@@ -29,7 +29,12 @@ use pnet::packet::ipv4::Ipv4Packet;
 use pnet::packet::ipv6::Ipv6Packet;
 use pnet::packet::udp::UdpPacket;
 use pnet::packet::Packet;
+use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader, Write};
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::path::Path;
+use std::time::SystemTime;
 
 /// DHCPv4 server port
 pub const DHCPV4_SERVER_PORT: u16 = 67;
@@ -587,6 +592,332 @@ impl DhcpSniffer {
     }
 }
 
+// ============================================================================
+// Device Tracking and CSV Export
+// ============================================================================
+
+/// Information about a detected DHCP device
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceInfo {
+    /// MAC address of the device
+    pub mac_address: String,
+    /// IP address (IPv4 or IPv6)
+    pub ip_address: String,
+    /// Hostname if available
+    pub hostname: Option<String>,
+    /// First seen timestamp (ISO 8601 format)
+    pub first_seen: String,
+    /// Last seen timestamp (ISO 8601 format)
+    pub last_seen: String,
+}
+
+impl DeviceInfo {
+    /// Create a new DeviceInfo with current timestamp
+    pub fn new(mac_address: String, ip_address: String, hostname: Option<String>) -> Self {
+        let timestamp = format_timestamp(SystemTime::now());
+        Self {
+            mac_address,
+            ip_address,
+            hostname,
+            first_seen: timestamp.clone(),
+            last_seen: timestamp,
+        }
+    }
+
+    /// Update the device info if something changed, returns true if updated
+    pub fn update(&mut self, ip_address: &str, hostname: Option<&str>) -> bool {
+        let mut changed = false;
+        let timestamp = format_timestamp(SystemTime::now());
+
+        if self.ip_address != ip_address {
+            self.ip_address = ip_address.to_string();
+            changed = true;
+        }
+
+        let new_hostname = hostname.map(|s| s.to_string());
+        if self.hostname != new_hostname && new_hostname.is_some() {
+            self.hostname = new_hostname;
+            changed = true;
+        }
+
+        self.last_seen = timestamp;
+        changed
+    }
+
+    /// Convert to CSV line
+    pub fn to_csv_line(&self) -> String {
+        format!(
+            "{},{},{},\"{}\",{}",
+            self.last_seen,
+            self.mac_address,
+            self.ip_address,
+            self.hostname.as_deref().unwrap_or(""),
+            self.first_seen
+        )
+    }
+
+    /// Parse from CSV line
+    pub fn from_csv_line(line: &str) -> Option<Self> {
+        let parts: Vec<&str> = line.split(',').collect();
+        if parts.len() < 4 {
+            return None;
+        }
+
+        let last_seen = parts[0].to_string();
+        let mac_address = parts[1].to_string();
+        let ip_address = parts[2].to_string();
+        let hostname = parts[3].trim_matches('"').to_string();
+        let hostname = if hostname.is_empty() {
+            None
+        } else {
+            Some(hostname)
+        };
+        let first_seen = if parts.len() > 4 {
+            parts[4].to_string()
+        } else {
+            last_seen.clone()
+        };
+
+        Some(Self {
+            mac_address,
+            ip_address,
+            hostname,
+            first_seen,
+            last_seen,
+        })
+    }
+}
+
+/// Format a SystemTime as ISO 8601 timestamp
+fn format_timestamp(time: SystemTime) -> String {
+    let duration = time
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = duration.as_secs();
+
+    // Simple UTC timestamp calculation
+    let days = secs / 86400;
+    let remaining = secs % 86400;
+    let hours = remaining / 3600;
+    let minutes = (remaining % 3600) / 60;
+    let seconds = remaining % 60;
+
+    // Calculate year, month, day from days since epoch (1970-01-01)
+    let mut year = 1970i32;
+    let mut remaining_days = days as i32;
+
+    loop {
+        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
+        if remaining_days < days_in_year {
+            break;
+        }
+        remaining_days -= days_in_year;
+        year += 1;
+    }
+
+    let days_in_months: [i32; 12] = if is_leap_year(year) {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+
+    let mut month = 1;
+    for days_in_month in days_in_months.iter() {
+        if remaining_days < *days_in_month {
+            break;
+        }
+        remaining_days -= days_in_month;
+        month += 1;
+    }
+    let day = remaining_days + 1;
+
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year, month, day, hours, minutes, seconds
+    )
+}
+
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+}
+
+/// Device tracker that maintains a list of seen devices and saves to CSV
+pub struct DeviceTracker {
+    devices: HashMap<String, DeviceInfo>,
+    csv_path: String,
+}
+
+impl DeviceTracker {
+    /// Create a new device tracker with the specified CSV file path
+    pub fn new<P: AsRef<Path>>(csv_path: P) -> std::io::Result<Self> {
+        let csv_path = csv_path.as_ref().to_string_lossy().to_string();
+        let mut tracker = Self {
+            devices: HashMap::new(),
+            csv_path,
+        };
+
+        // Load existing data if file exists
+        tracker.load_from_csv()?;
+
+        Ok(tracker)
+    }
+
+    /// Load devices from existing CSV file
+    fn load_from_csv(&mut self) -> std::io::Result<()> {
+        let path = Path::new(&self.csv_path);
+        if !path.exists() {
+            return Ok(());
+        }
+
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+
+        for line in reader.lines() {
+            let line = line?;
+            // Skip header
+            if line.starts_with("timestamp,") || line.starts_with("last_seen,") {
+                continue;
+            }
+            if let Some(device) = DeviceInfo::from_csv_line(&line) {
+                self.devices.insert(device.mac_address.clone(), device);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Save all devices to CSV file
+    pub fn save_to_csv(&self) -> std::io::Result<()> {
+        let mut file = File::create(&self.csv_path)?;
+
+        // Write header
+        writeln!(file, "last_seen,mac_address,ip_address,hostname,first_seen")?;
+
+        // Write devices sorted by last_seen
+        let mut devices: Vec<_> = self.devices.values().collect();
+        devices.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
+
+        for device in devices {
+            writeln!(file, "{}", device.to_csv_line())?;
+        }
+
+        Ok(())
+    }
+
+    /// Append a single device update to CSV (for real-time updates)
+    fn append_to_csv(&self, device: &DeviceInfo) -> std::io::Result<()> {
+        let path = Path::new(&self.csv_path);
+        let needs_header = !path.exists() || path.metadata()?.len() == 0;
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.csv_path)?;
+
+        if needs_header {
+            writeln!(file, "last_seen,mac_address,ip_address,hostname,first_seen")?;
+        }
+
+        writeln!(file, "{}", device.to_csv_line())?;
+        Ok(())
+    }
+
+    /// Update or add a device from a DHCPv4 packet
+    /// Returns true if the device was new or updated
+    pub fn update_from_dhcpv4(&mut self, packet: &Dhcpv4Packet) -> bool {
+        let mac = packet.client_mac_string();
+
+        // Determine IP address - use requested_ip if available, otherwise use source
+        let ip = packet
+            .requested_ip
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|| {
+                if packet.source_ip != Ipv4Addr::new(0, 0, 0, 0) {
+                    packet.source_ip.to_string()
+                } else {
+                    "0.0.0.0".to_string()
+                }
+            });
+
+        self.update_device(&mac, &ip, packet.hostname.as_deref())
+    }
+
+    /// Update or add a device from a DHCPv6 packet
+    /// Returns true if the device was new or updated
+    pub fn update_from_dhcpv6(&mut self, packet: &Dhcpv6Packet) -> bool {
+        // For DHCPv6, we use client DUID as identifier (converted to hex string)
+        let mut duid = None;
+        let mut fqdn = None;
+
+        for option in &packet.options {
+            match option {
+                Dhcpv6Option::ClientId(data) => {
+                    duid = Some(
+                        data.iter()
+                            .map(|b| format!("{:02X}", b))
+                            .collect::<Vec<_>>()
+                            .join(":"),
+                    );
+                }
+                Dhcpv6Option::ClientFqdn(name) => {
+                    fqdn = Some(name.as_str());
+                }
+                _ => {}
+            }
+        }
+
+        // If no DUID, we can't track this device
+        let mac = match duid {
+            Some(d) => d,
+            None => return false,
+        };
+
+        let ip = packet.source_ip.to_string();
+        self.update_device(&mac, &ip, fqdn)
+    }
+
+    /// Update or add a device
+    fn update_device(&mut self, mac: &str, ip: &str, hostname: Option<&str>) -> bool {
+        if let Some(device) = self.devices.get_mut(mac) {
+            let changed = device.update(ip, hostname);
+            if changed {
+                // Rewrite CSV when device info changes
+                let _ = self.save_to_csv();
+            } else {
+                // Clone for append since we can't borrow self while device is borrowed
+                let device_clone = device.clone();
+                let _ = self.append_to_csv(&device_clone);
+            }
+            changed
+        } else {
+            // New device
+            let device = DeviceInfo::new(
+                mac.to_string(),
+                ip.to_string(),
+                hostname.map(|s| s.to_string()),
+            );
+            let _ = self.append_to_csv(&device);
+            self.devices.insert(mac.to_string(), device);
+            true
+        }
+    }
+
+    /// Get all tracked devices
+    pub fn devices(&self) -> &HashMap<String, DeviceInfo> {
+        &self.devices
+    }
+
+    /// Get device count
+    pub fn device_count(&self) -> usize {
+        self.devices.len()
+    }
+
+    /// Get the CSV file path
+    pub fn csv_path(&self) -> &str {
+        &self.csv_path
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -843,5 +1174,130 @@ mod tests {
         let interfaces = list_interfaces();
         // Verify it's a valid Vec (this will always pass, but ensures the function works)
         let _ = interfaces;
+    }
+
+    #[test]
+    fn test_device_info_creation() {
+        let device = DeviceInfo::new(
+            "AA:BB:CC:DD:EE:FF".to_string(),
+            "192.168.1.100".to_string(),
+            Some("testhost".to_string()),
+        );
+
+        assert_eq!(device.mac_address, "AA:BB:CC:DD:EE:FF");
+        assert_eq!(device.ip_address, "192.168.1.100");
+        assert_eq!(device.hostname, Some("testhost".to_string()));
+        assert!(!device.first_seen.is_empty());
+        assert_eq!(device.first_seen, device.last_seen);
+    }
+
+    #[test]
+    fn test_device_info_csv_roundtrip() {
+        let device = DeviceInfo {
+            mac_address: "AA:BB:CC:DD:EE:FF".to_string(),
+            ip_address: "192.168.1.100".to_string(),
+            hostname: Some("testhost".to_string()),
+            first_seen: "2026-01-15T10:00:00Z".to_string(),
+            last_seen: "2026-01-15T12:00:00Z".to_string(),
+        };
+
+        let csv_line = device.to_csv_line();
+        let parsed = DeviceInfo::from_csv_line(&csv_line).unwrap();
+
+        assert_eq!(parsed.mac_address, device.mac_address);
+        assert_eq!(parsed.ip_address, device.ip_address);
+        assert_eq!(parsed.hostname, device.hostname);
+        assert_eq!(parsed.first_seen, device.first_seen);
+        assert_eq!(parsed.last_seen, device.last_seen);
+    }
+
+    #[test]
+    fn test_device_info_csv_no_hostname() {
+        let device = DeviceInfo {
+            mac_address: "AA:BB:CC:DD:EE:FF".to_string(),
+            ip_address: "192.168.1.100".to_string(),
+            hostname: None,
+            first_seen: "2026-01-15T10:00:00Z".to_string(),
+            last_seen: "2026-01-15T12:00:00Z".to_string(),
+        };
+
+        let csv_line = device.to_csv_line();
+        let parsed = DeviceInfo::from_csv_line(&csv_line).unwrap();
+
+        assert_eq!(parsed.hostname, None);
+    }
+
+    #[test]
+    fn test_device_info_update() {
+        let mut device = DeviceInfo {
+            mac_address: "AA:BB:CC:DD:EE:FF".to_string(),
+            ip_address: "192.168.1.100".to_string(),
+            hostname: None,
+            first_seen: "2026-01-15T10:00:00Z".to_string(),
+            last_seen: "2026-01-15T10:00:00Z".to_string(),
+        };
+
+        // Update with new IP - should return true
+        let changed = device.update("192.168.1.200", None);
+        assert!(changed);
+        assert_eq!(device.ip_address, "192.168.1.200");
+
+        // Update with same IP - should return false
+        let changed = device.update("192.168.1.200", None);
+        assert!(!changed);
+
+        // Update with hostname - should return true
+        let changed = device.update("192.168.1.200", Some("newhost"));
+        assert!(changed);
+        assert_eq!(device.hostname, Some("newhost".to_string()));
+    }
+
+    #[test]
+    fn test_format_timestamp() {
+        // Test epoch
+        let epoch = SystemTime::UNIX_EPOCH;
+        let ts = format_timestamp(epoch);
+        assert_eq!(ts, "1970-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn test_is_leap_year() {
+        assert!(!is_leap_year(1900)); // Not leap (divisible by 100 but not 400)
+        assert!(is_leap_year(2000)); // Leap (divisible by 400)
+        assert!(is_leap_year(2024)); // Leap (divisible by 4)
+        assert!(!is_leap_year(2023)); // Not leap
+    }
+
+    #[test]
+    fn test_device_tracker_new_device() {
+        let temp_path = "/tmp/dhcpsniff_test_devices.csv";
+        let _ = std::fs::remove_file(temp_path); // Clean up any existing file
+
+        let mut tracker = DeviceTracker::new(temp_path).unwrap();
+
+        // Create a test packet
+        let packet = Dhcpv4Packet {
+            source_ip: Ipv4Addr::new(0, 0, 0, 0),
+            dest_ip: Ipv4Addr::new(255, 255, 255, 255),
+            source_port: 68,
+            dest_port: 67,
+            operation: Dhcpv4Operation::BootRequest,
+            client_mac: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+            message_type: Some(Dhcpv4MessageType::Discover),
+            hostname: Some("testhost".to_string()),
+            requested_ip: Some(Ipv4Addr::new(192, 168, 1, 100)),
+        };
+
+        let is_new = tracker.update_from_dhcpv4(&packet);
+        assert!(is_new);
+        assert_eq!(tracker.device_count(), 1);
+
+        // Same device should not be "new"
+        let is_new = tracker.update_from_dhcpv4(&packet);
+        assert!(!is_new);
+        assert_eq!(tracker.device_count(), 1);
+
+        // Clean up
+        let _ = std::fs::remove_file(temp_path);
     }
 }
