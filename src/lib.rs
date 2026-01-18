@@ -1446,4 +1446,452 @@ mod tests {
         // Clean up
         let _ = std::fs::remove_file(temp_path);
     }
+
+    #[test]
+    fn test_device_tracker_update_from_dhcpv6() {
+        let temp_path = "/tmp/dhcpsniff_test_v6_devices.csv";
+        let _ = std::fs::remove_file(temp_path);
+
+        let mut tracker = DeviceTracker::new(temp_path).unwrap();
+
+        // Create a DHCPv6 packet with ClientId
+        let packet = Dhcpv6Packet {
+            source_ip: "fe80::1".parse().unwrap(),
+            dest_ip: "ff02::1:2".parse().unwrap(),
+            source_port: 546,
+            dest_port: 547,
+            message_type: Dhcpv6MessageType::Solicit,
+            transaction_id: [0x12, 0x34, 0x56],
+            options: vec![
+                Dhcpv6Option::ClientId(vec![0xAA, 0xBB, 0xCC, 0xDD]),
+                Dhcpv6Option::ClientFqdn("myhost.local".to_string()),
+            ],
+        };
+
+        let is_new = tracker.update_from_dhcpv6(&packet);
+        assert!(is_new);
+        assert_eq!(tracker.device_count(), 1);
+
+        // Verify the device was stored with DUID as identifier
+        let devices = tracker.devices();
+        assert!(devices.contains_key("AA:BB:CC:DD"));
+
+        // Clean up
+        let _ = std::fs::remove_file(temp_path);
+    }
+
+    #[test]
+    fn test_device_tracker_dhcpv6_no_client_id() {
+        let temp_path = "/tmp/dhcpsniff_test_v6_no_id.csv";
+        let _ = std::fs::remove_file(temp_path);
+
+        let mut tracker = DeviceTracker::new(temp_path).unwrap();
+
+        // DHCPv6 packet without ClientId should not be tracked
+        let packet = Dhcpv6Packet {
+            source_ip: "fe80::1".parse().unwrap(),
+            dest_ip: "ff02::1:2".parse().unwrap(),
+            source_port: 546,
+            dest_port: 547,
+            message_type: Dhcpv6MessageType::Solicit,
+            transaction_id: [0x12, 0x34, 0x56],
+            options: vec![], // No ClientId
+        };
+
+        let is_new = tracker.update_from_dhcpv6(&packet);
+        assert!(!is_new); // Should return false - can't track without DUID
+        assert_eq!(tracker.device_count(), 0);
+
+        let _ = std::fs::remove_file(temp_path);
+    }
+
+    #[test]
+    fn test_device_tracker_persistence() {
+        let temp_path = "/tmp/dhcpsniff_test_persistence.csv";
+        let _ = std::fs::remove_file(temp_path);
+
+        // Create tracker and add a device
+        {
+            let mut tracker = DeviceTracker::new(temp_path).unwrap();
+            let packet = Dhcpv4Packet {
+                source_ip: Ipv4Addr::new(192, 168, 1, 100),
+                dest_ip: Ipv4Addr::new(255, 255, 255, 255),
+                source_port: 68,
+                dest_port: 67,
+                operation: Dhcpv4Operation::BootRequest,
+                client_mac: [0x11, 0x22, 0x33, 0x44, 0x55, 0x66],
+                message_type: Some(Dhcpv4MessageType::Request),
+                hostname: Some("persistent-host".to_string()),
+                requested_ip: Some(Ipv4Addr::new(192, 168, 1, 100)),
+            };
+            tracker.update_from_dhcpv4(&packet);
+            assert_eq!(tracker.device_count(), 1);
+        }
+
+        // Create new tracker and verify data was loaded
+        {
+            let tracker = DeviceTracker::new(temp_path).unwrap();
+            assert_eq!(tracker.device_count(), 1);
+            
+            let devices = tracker.devices();
+            let device = devices.get("11:22:33:44:55:66").unwrap();
+            assert_eq!(device.ip_address, "192.168.1.100");
+            assert_eq!(device.hostname, Some("persistent-host".to_string()));
+        }
+
+        let _ = std::fs::remove_file(temp_path);
+    }
+
+    #[test]
+    fn test_device_info_json_serialization() {
+        let device = DeviceInfo {
+            mac_address: "AA:BB:CC:DD:EE:FF".to_string(),
+            ip_address: "192.168.1.100".to_string(),
+            hostname: Some("jsonhost".to_string()),
+            first_seen: "2026-01-15T10:00:00Z".to_string(),
+            last_seen: "2026-01-15T12:00:00Z".to_string(),
+        };
+
+        // Serialize to JSON
+        let json = serde_json::to_string(&device).unwrap();
+        assert!(json.contains("AA:BB:CC:DD:EE:FF"));
+        assert!(json.contains("192.168.1.100"));
+        assert!(json.contains("jsonhost"));
+
+        // Deserialize back
+        let parsed: DeviceInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.mac_address, device.mac_address);
+        assert_eq!(parsed.ip_address, device.ip_address);
+        assert_eq!(parsed.hostname, device.hostname);
+    }
+
+    #[test]
+    fn test_device_tracker_to_json() {
+        let temp_path = "/tmp/dhcpsniff_test_json.csv";
+        let _ = std::fs::remove_file(temp_path);
+
+        let mut tracker = DeviceTracker::new(temp_path).unwrap();
+
+        // Add two devices
+        let packet1 = Dhcpv4Packet {
+            source_ip: Ipv4Addr::new(0, 0, 0, 0),
+            dest_ip: Ipv4Addr::new(255, 255, 255, 255),
+            source_port: 68,
+            dest_port: 67,
+            operation: Dhcpv4Operation::BootRequest,
+            client_mac: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01],
+            message_type: Some(Dhcpv4MessageType::Discover),
+            hostname: Some("device1".to_string()),
+            requested_ip: Some(Ipv4Addr::new(192, 168, 1, 1)),
+        };
+        tracker.update_from_dhcpv4(&packet1);
+
+        let packet2 = Dhcpv4Packet {
+            source_ip: Ipv4Addr::new(0, 0, 0, 0),
+            dest_ip: Ipv4Addr::new(255, 255, 255, 255),
+            source_port: 68,
+            dest_port: 67,
+            operation: Dhcpv4Operation::BootRequest,
+            client_mac: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x02],
+            message_type: Some(Dhcpv4MessageType::Discover),
+            hostname: None,
+            requested_ip: Some(Ipv4Addr::new(192, 168, 1, 2)),
+        };
+        tracker.update_from_dhcpv4(&packet2);
+
+        let json = tracker.to_json().unwrap();
+        assert!(json.contains("device1"));
+        assert!(json.contains("192.168.1.1"));
+        assert!(json.contains("192.168.1.2"));
+
+        let _ = std::fs::remove_file(temp_path);
+    }
+
+    #[test]
+    fn test_parse_dhcpv6_with_server_id() {
+        let payload = vec![
+            0x02,       // Message type: ADVERTISE
+            0x12, 0x34, 0x56, // Transaction ID
+            0x00, 0x02, // Option code: 2 (Server ID)
+            0x00, 0x04, // Length: 4
+            0x01, 0x02, 0x03, 0x04, // Server ID data
+        ];
+
+        let result = parse_dhcpv6_payload(
+            &payload,
+            Ipv6Addr::LOCALHOST,
+            Ipv6Addr::LOCALHOST,
+            547,
+            546,
+        );
+
+        assert!(result.is_some());
+        let packet = result.unwrap();
+        assert_eq!(packet.message_type, Dhcpv6MessageType::Advertise);
+        assert_eq!(packet.options.len(), 1);
+        match &packet.options[0] {
+            Dhcpv6Option::ServerId(data) => {
+                assert_eq!(data, &vec![0x01, 0x02, 0x03, 0x04]);
+            }
+            _ => panic!("Expected ServerId option"),
+        }
+    }
+
+    #[test]
+    fn test_parse_dhcpv6_with_client_fqdn() {
+        let fqdn = "myhost.example.com";
+        let mut payload = vec![
+            0x01,       // Message type: SOLICIT
+            0xAB, 0xCD, 0xEF, // Transaction ID
+            0x00, 0x27, // Option code: 39 (Client FQDN)
+        ];
+        // Add length (2 bytes big-endian)
+        payload.push(0x00);
+        payload.push(fqdn.len() as u8);
+        // Add FQDN data
+        payload.extend_from_slice(fqdn.as_bytes());
+
+        let result = parse_dhcpv6_payload(
+            &payload,
+            Ipv6Addr::LOCALHOST,
+            Ipv6Addr::LOCALHOST,
+            546,
+            547,
+        );
+
+        assert!(result.is_some());
+        let packet = result.unwrap();
+        assert_eq!(packet.options.len(), 1);
+        match &packet.options[0] {
+            Dhcpv6Option::ClientFqdn(name) => {
+                assert_eq!(name, fqdn);
+            }
+            _ => panic!("Expected ClientFqdn option"),
+        }
+    }
+
+    #[test]
+    fn test_parse_dhcpv6_with_ia_na() {
+        let payload = vec![
+            0x03,       // Message type: REQUEST
+            0x11, 0x22, 0x33, // Transaction ID
+            0x00, 0x03, // Option code: 3 (IA_NA)
+            0x00, 0x00, // Length: 0 (minimal)
+        ];
+
+        let result = parse_dhcpv6_payload(
+            &payload,
+            Ipv6Addr::LOCALHOST,
+            Ipv6Addr::LOCALHOST,
+            546,
+            547,
+        );
+
+        assert!(result.is_some());
+        let packet = result.unwrap();
+        assert_eq!(packet.message_type, Dhcpv6MessageType::Request);
+        assert_eq!(packet.options.len(), 1);
+        assert!(matches!(packet.options[0], Dhcpv6Option::IaNa));
+    }
+
+    #[test]
+    fn test_parse_dhcpv6_multiple_options() {
+        let payload = vec![
+            0x01,       // Message type: SOLICIT
+            0x00, 0x00, 0x01, // Transaction ID
+            // Option 1: ClientId
+            0x00, 0x01, // Option code: 1
+            0x00, 0x02, // Length: 2
+            0xAA, 0xBB, // Data
+            // Option 2: IA_NA
+            0x00, 0x03, // Option code: 3
+            0x00, 0x00, // Length: 0
+        ];
+
+        let result = parse_dhcpv6_payload(
+            &payload,
+            Ipv6Addr::LOCALHOST,
+            Ipv6Addr::LOCALHOST,
+            546,
+            547,
+        );
+
+        assert!(result.is_some());
+        let packet = result.unwrap();
+        assert_eq!(packet.options.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_dhcpv4_truncated_option() {
+        // Payload with option that claims longer length than available
+        let mut payload = vec![0u8; 300];
+        payload[0] = 1; // BootRequest
+        payload[240] = 12; // Option: Hostname
+        payload[241] = 100; // Length: 100 (but only a few bytes available)
+        payload[242] = b't';
+        payload[243] = 255; // End option prematurely
+
+        let result = parse_dhcpv4_payload(
+            &payload,
+            Ipv4Addr::new(0, 0, 0, 0),
+            Ipv4Addr::new(255, 255, 255, 255),
+            68,
+            67,
+        );
+
+        // Should still parse but might not have hostname
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_parse_dhcpv6_truncated_option() {
+        // Option claims 100 bytes but only 2 available
+        let payload = vec![
+            0x01,       // Message type
+            0x00, 0x00, 0x01, // Transaction ID
+            0x00, 0x01, // Option code
+            0x00, 0x64, // Length: 100 (but not enough data)
+            0xAA, 0xBB, // Only 2 bytes of data
+        ];
+
+        let result = parse_dhcpv6_payload(
+            &payload,
+            Ipv6Addr::LOCALHOST,
+            Ipv6Addr::LOCALHOST,
+            546,
+            547,
+        );
+
+        // Should parse but truncated option won't be included
+        assert!(result.is_some());
+        let packet = result.unwrap();
+        assert_eq!(packet.options.len(), 0); // Option was skipped due to truncation
+    }
+
+    #[test]
+    fn test_dhcpv4_packet_fields() {
+        let mut payload = vec![0u8; 300];
+        payload[0] = 2; // BootReply
+        // Set client MAC
+        for i in 0..6 {
+            payload[28 + i] = (i + 1) as u8;
+        }
+        // Set yiaddr (your IP address) at offset 16
+        payload[16] = 10;
+        payload[17] = 0;
+        payload[18] = 0;
+        payload[19] = 100;
+
+        let result = parse_dhcpv4_payload(
+            &payload,
+            Ipv4Addr::new(192, 168, 1, 1),
+            Ipv4Addr::new(192, 168, 1, 100),
+            67,
+            68,
+        );
+
+        assert!(result.is_some());
+        let packet = result.unwrap();
+        assert_eq!(packet.operation, Dhcpv4Operation::BootReply);
+        assert_eq!(packet.source_ip, Ipv4Addr::new(192, 168, 1, 1));
+        assert_eq!(packet.dest_ip, Ipv4Addr::new(192, 168, 1, 100));
+        assert_eq!(packet.client_mac, [1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn test_dhcpv6_packet_transaction_id_string() {
+        let packet = Dhcpv6Packet {
+            source_ip: Ipv6Addr::LOCALHOST,
+            dest_ip: Ipv6Addr::LOCALHOST,
+            source_port: 546,
+            dest_port: 547,
+            message_type: Dhcpv6MessageType::Solicit,
+            transaction_id: [0x00, 0x00, 0x00],
+            options: vec![],
+        };
+        assert_eq!(packet.transaction_id_string(), "0x000000");
+
+        let packet2 = Dhcpv6Packet {
+            source_ip: Ipv6Addr::LOCALHOST,
+            dest_ip: Ipv6Addr::LOCALHOST,
+            source_port: 546,
+            dest_port: 547,
+            message_type: Dhcpv6MessageType::Solicit,
+            transaction_id: [0xFF, 0xFF, 0xFF],
+            options: vec![],
+        };
+        // The format uses uppercase hex
+        assert_eq!(packet2.transaction_id_string(), "0xFFFFFF");
+    }
+
+    #[test]
+    fn test_device_tracker_mac_address_update() {
+        let temp_path = "/tmp/dhcpsniff_test_mac_update.csv";
+        let _ = std::fs::remove_file(temp_path);
+
+        let mut tracker = DeviceTracker::new(temp_path).unwrap();
+
+        // First packet with one IP
+        let packet1 = Dhcpv4Packet {
+            source_ip: Ipv4Addr::new(0, 0, 0, 0),
+            dest_ip: Ipv4Addr::new(255, 255, 255, 255),
+            source_port: 68,
+            dest_port: 67,
+            operation: Dhcpv4Operation::BootRequest,
+            client_mac: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+            message_type: Some(Dhcpv4MessageType::Discover),
+            hostname: None,
+            requested_ip: Some(Ipv4Addr::new(192, 168, 1, 100)),
+        };
+        tracker.update_from_dhcpv4(&packet1);
+        assert_eq!(tracker.device_count(), 1);
+
+        // Same MAC, different IP (simulating DHCP renewal with new IP)
+        let packet2 = Dhcpv4Packet {
+            source_ip: Ipv4Addr::new(0, 0, 0, 0),
+            dest_ip: Ipv4Addr::new(255, 255, 255, 255),
+            source_port: 68,
+            dest_port: 67,
+            operation: Dhcpv4Operation::BootRequest,
+            client_mac: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+            message_type: Some(Dhcpv4MessageType::Request),
+            hostname: Some("newname".to_string()),
+            requested_ip: Some(Ipv4Addr::new(192, 168, 1, 200)),
+        };
+        let changed = tracker.update_from_dhcpv4(&packet2);
+        assert!(changed);
+        assert_eq!(tracker.device_count(), 1); // Still only 1 device
+
+        // Verify IP was updated
+        let device = tracker.devices().get("AA:BB:CC:DD:EE:FF").unwrap();
+        assert_eq!(device.ip_address, "192.168.1.200");
+        assert_eq!(device.hostname, Some("newname".to_string()));
+
+        let _ = std::fs::remove_file(temp_path);
+    }
+
+    #[test]
+    fn test_api_response_serialization() {
+        let response: ApiResponse<Vec<String>> = ApiResponse {
+            success: true,
+            data: vec!["test".to_string()],
+            count: 1,
+        };
+
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"success\":true"));
+        assert!(json.contains("\"count\":1"));
+    }
+
+    #[test]
+    fn test_api_error_serialization() {
+        let error = ApiError {
+            success: false,
+            error: "Not found".to_string(),
+        };
+
+        let json = serde_json::to_string(&error).unwrap();
+        assert!(json.contains("\"success\":false"));
+        assert!(json.contains("Not found"));
+    }
 }
