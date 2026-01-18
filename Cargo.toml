@@ -6,7 +6,8 @@ authors = ["Richard Vidal-Dorsch"]
 license = "MIT"
 description = "A library and CLI tool for sniffing and parsing DHCP (v4 & v6) network traffic"
 readme = "README.md"
-repository = "https://github.com/richardvidaldorsch/dhcpsniff"
+repository = "https://github.com/rvido/dhcpsniff"
+homepage = "https://github.com/rvido/dhcpsniff"
 keywords = ["dhcp", "network", "sniffer", "packet", "dhcpv6"]
 categories = ["network-programming", "parsing"]
 
