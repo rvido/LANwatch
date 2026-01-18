@@ -8,6 +8,7 @@ A Rust library and CLI tool for sniffing and parsing DHCP (v4 & v6) network traf
 - **DHCPv6 Support**: Capture and parse SOLICIT, ADVERTISE, REQUEST, CONFIRM, RENEW, REBIND, REPLY, RELEASE, DECLINE, RECONFIGURE, and INFO-REQUEST messages
 - **Device Tracking**: Automatically track detected devices and save to CSV file
 - **CSV Export**: Export device information with timestamps, MAC addresses, IP addresses, and hostnames
+- **HTTP API**: Built-in REST API server to query devices as JSON
 - **Library API**: Use as a library in your own Rust projects
 - **CLI Tool**: Run as a standalone command-line sniffer
 - **Type-Safe**: Strongly typed enums for message types, operations, and options
@@ -46,6 +47,15 @@ sudo cargo run -- eth0       # Linux
 sudo cargo run -- en0 -o /path/to/devices.csv
 sudo cargo run -- en0 --output my_devices.csv
 
+# Start with HTTP API server
+sudo cargo run -- en0 --api 0.0.0.0:8080
+
+# Start with API on default address (127.0.0.1:3000)
+sudo cargo run -- en0 --api-default
+
+# Combine options
+sudo cargo run -- en0 -o devices.csv --api 0.0.0.0:8080
+
 # Show help
 cargo run -- --help
 ```
@@ -69,6 +79,50 @@ last_seen,mac_address,ip_address,hostname,first_seen
 - **first_seen**: ISO 8601 timestamp of first detection
 
 The CSV file is updated in real-time as new devices are detected or existing devices change.
+
+### HTTP API
+
+When started with `--api` or `--api-default`, the tool exposes a REST API for querying devices:
+
+**Endpoints:**
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/` | GET | Service info and available endpoints |
+| `/devices` | GET | List all devices as JSON (sorted by last_seen) |
+| `/devices/count` | GET | Get device count |
+| `/health` | GET | Health check endpoint |
+
+**Example Requests:**
+
+```bash
+# Get all devices
+curl http://localhost:3000/devices
+
+# Get device count
+curl http://localhost:3000/devices/count
+
+# Health check
+curl http://localhost:3000/health
+```
+
+**Example Response (`/devices`):**
+
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "mac_address": "AA:BB:CC:DD:EE:FF",
+      "ip_address": "192.168.1.100",
+      "hostname": "mydevice",
+      "first_seen": "2026-01-16T10:25:00Z",
+      "last_seen": "2026-01-16T10:30:45Z"
+    }
+  ],
+  "count": 1
+}
+```
 
 ### Library Usage
 
@@ -99,7 +153,6 @@ fn main() {
         true // Continue sniffing
     });
 }
-```
 ```
 
 ### Parsing Raw Payloads
@@ -142,6 +195,7 @@ cargo run --example parse_payload
 - `DeviceTracker` - Track detected devices and save to CSV
 - `DeviceInfo` - Information about a detected device
 - `DhcpError` - Error types for sniffer operations
+- `ApiServer` - HTTP API server for querying devices
 
 ### Message Types
 
@@ -166,7 +220,9 @@ cargo run --example parse_payload
 - `find_interface(name)` - Find interface by name
 - `is_dhcpv4_ports(src, dest)` - Check if ports indicate DHCPv4
 - `is_dhcpv6_ports(src, dest)` - Check if ports indicate DHCPv6
-- `process_ethernet_frame(frame)` - Process raw Ethernet frame
+- `parse_dhcpv4_payload(payload, src, dst, src_port, dst_port)` - Parse DHCPv4 from raw bytes
+- `parse_dhcpv6_payload(payload, src, dst, src_port, dst_port)` - Parse DHCPv6 from raw bytes
+- `start_api_server(addr, tracker)` - Start HTTP API server in background thread
 
 ## Testing
 
@@ -177,6 +233,9 @@ cargo test
 ## Dependencies
 
 - [pnet](https://crates.io/crates/pnet) - Low-level networking library for packet capture and parsing
+- [serde](https://crates.io/crates/serde) - Serialization framework for JSON support
+- [serde_json](https://crates.io/crates/serde_json) - JSON serialization/deserialization
+- [tiny_http](https://crates.io/crates/tiny_http) - Lightweight HTTP server for the REST API
 
 ## License
 

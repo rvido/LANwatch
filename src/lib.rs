@@ -30,7 +30,7 @@ use pnet::packet::ipv6::Ipv6Packet;
 use pnet::packet::udp::UdpPacket;
 use pnet::packet::Packet;
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::Path;
@@ -597,7 +597,10 @@ impl DhcpSniffer {
 // ============================================================================
 
 /// Information about a detected DHCP device
-#[derive(Debug, Clone, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+/// Information about a detected DHCP device
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceInfo {
     /// MAC address of the device
     pub mac_address: String,
@@ -804,24 +807,6 @@ impl DeviceTracker {
         Ok(())
     }
 
-    /// Append a single device update to CSV (for real-time updates)
-    fn append_to_csv(&self, device: &DeviceInfo) -> std::io::Result<()> {
-        let path = Path::new(&self.csv_path);
-        let needs_header = !path.exists() || path.metadata()?.len() == 0;
-
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.csv_path)?;
-
-        if needs_header {
-            writeln!(file, "last_seen,mac_address,ip_address,hostname,first_seen")?;
-        }
-
-        writeln!(file, "{}", device.to_csv_line())?;
-        Ok(())
-    }
-
     /// Update or add a device from a DHCPv4 packet
     /// Returns true if the device was new or updated
     pub fn update_from_dhcpv4(&mut self, packet: &Dhcpv4Packet) -> bool {
@@ -880,14 +865,8 @@ impl DeviceTracker {
     fn update_device(&mut self, mac: &str, ip: &str, hostname: Option<&str>) -> bool {
         if let Some(device) = self.devices.get_mut(mac) {
             let changed = device.update(ip, hostname);
-            if changed {
-                // Rewrite CSV when device info changes
-                let _ = self.save_to_csv();
-            } else {
-                // Clone for append since we can't borrow self while device is borrowed
-                let device_clone = device.clone();
-                let _ = self.append_to_csv(&device_clone);
-            }
+            // Always rewrite CSV to update timestamp and avoid duplicates
+            let _ = self.save_to_csv();
             changed
         } else {
             // New device
@@ -896,8 +875,9 @@ impl DeviceTracker {
                 ip.to_string(),
                 hostname.map(|s| s.to_string()),
             );
-            let _ = self.append_to_csv(&device);
             self.devices.insert(mac.to_string(), device);
+            // Rewrite CSV to ensure clean state
+            let _ = self.save_to_csv();
             true
         }
     }
@@ -916,6 +896,172 @@ impl DeviceTracker {
     pub fn csv_path(&self) -> &str {
         &self.csv_path
     }
+
+    /// Get all devices as a JSON string
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        let devices: Vec<&DeviceInfo> = self.devices.values().collect();
+        serde_json::to_string_pretty(&devices)
+    }
+
+    /// Get all devices as a JSON array sorted by last_seen (most recent first)
+    pub fn to_json_sorted(&self) -> Result<String, serde_json::Error> {
+        let mut devices: Vec<&DeviceInfo> = self.devices.values().collect();
+        devices.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
+        serde_json::to_string_pretty(&devices)
+    }
+}
+
+// ============================================================================
+// HTTP API Server
+// ============================================================================
+
+use std::sync::{Arc, RwLock};
+use std::thread;
+use tiny_http::{Response, Server};
+
+/// HTTP API server for exposing device data
+pub struct ApiServer {
+    server: Server,
+    tracker: Arc<RwLock<DeviceTracker>>,
+}
+
+/// API response structure
+#[derive(Serialize)]
+struct ApiResponse<T> {
+    success: bool,
+    count: usize,
+    data: T,
+}
+
+/// Error response structure
+#[derive(Serialize)]
+struct ApiError {
+    success: bool,
+    error: String,
+}
+
+impl ApiServer {
+    /// Create a new API server on the specified address (e.g., "0.0.0.0:8080")
+    pub fn new(addr: &str, tracker: Arc<RwLock<DeviceTracker>>) -> std::io::Result<Self> {
+        let server = Server::http(addr).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+        })?;
+        Ok(Self { server, tracker })
+    }
+
+    /// Run the API server (blocking)
+    pub fn run(&self) {
+        println!("API server listening on http://{}", self.server.server_addr());
+        println!("Endpoints:");
+        println!("  GET /devices     - List all devices (JSON)");
+        println!("  GET /devices/count - Get device count");
+        println!("  GET /health      - Health check");
+        println!();
+
+        for request in self.server.incoming_requests() {
+            let response = self.handle_request(&request);
+            let _ = request.respond(response);
+        }
+    }
+
+    /// Handle incoming HTTP requests
+    fn handle_request(&self, request: &tiny_http::Request) -> Response<std::io::Cursor<Vec<u8>>> {
+        let path = request.url();
+        let method = request.method();
+
+        match (method.as_str(), path) {
+            ("GET", "/devices") => self.handle_devices(),
+            ("GET", "/devices/count") => self.handle_device_count(),
+            ("GET", "/health") => self.handle_health(),
+            ("GET", "/") => self.handle_root(),
+            _ => self.handle_not_found(),
+        }
+    }
+
+    fn handle_devices(&self) -> Response<std::io::Cursor<Vec<u8>>> {
+        match self.tracker.read() {
+            Ok(tracker) => {
+                let mut devices: Vec<&DeviceInfo> = tracker.devices().values().collect();
+                devices.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
+                
+                let response = ApiResponse {
+                    success: true,
+                    count: devices.len(),
+                    data: devices,
+                };
+                
+                let json = serde_json::to_string_pretty(&response).unwrap_or_default();
+                Response::from_string(json)
+                    .with_header(tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap())
+            }
+            Err(_) => self.handle_error("Failed to read device data"),
+        }
+    }
+
+    fn handle_device_count(&self) -> Response<std::io::Cursor<Vec<u8>>> {
+        match self.tracker.read() {
+            Ok(tracker) => {
+                let json = serde_json::json!({
+                    "success": true,
+                    "count": tracker.device_count()
+                });
+                Response::from_string(json.to_string())
+                    .with_header(tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap())
+            }
+            Err(_) => self.handle_error("Failed to read device count"),
+        }
+    }
+
+    fn handle_health(&self) -> Response<std::io::Cursor<Vec<u8>>> {
+        let json = serde_json::json!({
+            "status": "ok",
+            "service": "dhcpsniff"
+        });
+        Response::from_string(json.to_string())
+            .with_header(tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap())
+    }
+
+    fn handle_root(&self) -> Response<std::io::Cursor<Vec<u8>>> {
+        let json = serde_json::json!({
+            "service": "dhcpsniff",
+            "version": env!("CARGO_PKG_VERSION"),
+            "endpoints": {
+                "/devices": "GET - List all detected devices",
+                "/devices/count": "GET - Get device count",
+                "/health": "GET - Health check"
+            }
+        });
+        Response::from_string(serde_json::to_string_pretty(&json).unwrap_or_default())
+            .with_header(tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap())
+    }
+
+    fn handle_not_found(&self) -> Response<std::io::Cursor<Vec<u8>>> {
+        let error = ApiError {
+            success: false,
+            error: "Not found".to_string(),
+        };
+        Response::from_string(serde_json::to_string(&error).unwrap_or_default())
+            .with_status_code(404)
+            .with_header(tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap())
+    }
+
+    fn handle_error(&self, message: &str) -> Response<std::io::Cursor<Vec<u8>>> {
+        let error = ApiError {
+            success: false,
+            error: message.to_string(),
+        };
+        Response::from_string(serde_json::to_string(&error).unwrap_or_default())
+            .with_status_code(500)
+            .with_header(tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap())
+    }
+}
+
+/// Start the API server in a background thread
+pub fn start_api_server(addr: &str, tracker: Arc<RwLock<DeviceTracker>>) -> std::io::Result<thread::JoinHandle<()>> {
+    let server = ApiServer::new(addr, tracker)?;
+    Ok(thread::spawn(move || {
+        server.run();
+    }))
 }
 
 #[cfg(test)]
