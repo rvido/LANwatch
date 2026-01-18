@@ -1,1 +1,7 @@
 /target
+Cargo.lock
+*.csv
+.DS_Store
+*.swp
+.idea/
+.vscode/
