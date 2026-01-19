@@ -45,7 +45,7 @@ sudo cargo run -- eth0       # Linux
 
 # Specify a custom output CSV file
 sudo cargo run -- en0 -o /path/to/devices.csv
-sudo cargo run -- en0 --output my_devices.csv
+sudo cargo run -- en0 --output devices.csv
 
 # Start with HTTP API server
 sudo cargo run -- en0 --api 0.0.0.0:8080
@@ -111,6 +111,7 @@ curl http://localhost:3000/health
 ```json
 {
   "success": true,
+  "count": 1,
   "data": [
     {
       "mac_address": "AA:BB:CC:DD:EE:FF",
@@ -119,8 +120,7 @@ curl http://localhost:3000/health
       "first_seen": "2026-01-16T10:25:00Z",
       "last_seen": "2026-01-16T10:30:45Z"
     }
-  ],
-  "count": 1
+  ]
 }
 ```
 
@@ -169,6 +169,18 @@ if let Some(packet) = parse_dhcpv4_payload(
     68, 67,
 ) {
     println!("Message type: {:?}", packet.message_type);
+}
+
+// Parse a DHCPv6 payload
+if let Some(packet) = parse_dhcpv6_payload(
+    &payload_bytes,
+    Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1),
+    Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 1, 2),
+    546, 547,
+) {
+    println!("Message type: {}", packet.message_type);
+    println!("Transaction ID: {}", packet.transaction_id_string());
+    println!("Options: {:?}", packet.options);
 }
 ```
 
