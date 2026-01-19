@@ -4,20 +4,24 @@
 // DHCPsniff - A DHCP (v4 & v6) network traffic sniffer
 // See LICENSE file for details.
 
-use dhcpsniff::{
-    list_interfaces, start_api_server, DeviceTracker, DhcpEvent, DhcpSniffer, Dhcpv6Option,
-};
+#[cfg(feature = "http-api")]
+use dhcpsniff::start_api_server;
+use dhcpsniff::{list_interfaces, DeviceTracker, DhcpEvent, DhcpSniffer, Dhcpv6Option};
 use std::env;
 use std::sync::{Arc, RwLock};
 
 const DEFAULT_CSV_PATH: &str = "dhcp_devices.csv";
+#[cfg(feature = "http-api")]
 const DEFAULT_API_ADDR: &str = "127.0.0.1:8080";
 
 fn main() {
     // Parse command line arguments
     let args: Vec<String> = env::args().collect();
 
+    #[cfg(feature = "http-api")]
     let (interface_name, csv_path, api_addr) = parse_args(&args);
+    #[cfg(not(feature = "http-api"))]
+    let (interface_name, csv_path) = parse_args(&args);
 
     println!("Sniffing DHCP (v4 & v6) traffic on: {}", interface_name);
     println!("Saving device info to: {}", csv_path);
@@ -38,6 +42,7 @@ fn main() {
     let tracker = Arc::new(RwLock::new(tracker));
 
     // Start API server if address is provided
+    #[cfg(feature = "http-api")]
     if let Some(addr) = api_addr {
         let tracker_clone = Arc::clone(&tracker);
         match start_api_server(&addr, tracker_clone) {
@@ -116,6 +121,7 @@ fn main() {
     });
 }
 
+#[cfg(feature = "http-api")]
 fn parse_args(args: &[String]) -> (String, String, Option<String>) {
     let mut interface_name = None;
     let mut csv_path = DEFAULT_CSV_PATH.to_string();
@@ -175,19 +181,70 @@ fn parse_args(args: &[String]) -> (String, String, Option<String>) {
     (interface_name, csv_path, api_addr)
 }
 
+#[cfg(not(feature = "http-api"))]
+fn parse_args(args: &[String]) -> (String, String) {
+    let mut interface_name = None;
+    let mut csv_path = DEFAULT_CSV_PATH.to_string();
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-o" | "--output" => {
+                if i + 1 < args.len() {
+                    csv_path = args[i + 1].clone();
+                    i += 2;
+                } else {
+                    eprintln!("Error: --output requires a file path");
+                    std::process::exit(1);
+                }
+            }
+            "-h" | "--help" => {
+                print_usage();
+                std::process::exit(0);
+            }
+            arg if !arg.starts_with('-') => {
+                interface_name = Some(arg.to_string());
+                i += 1;
+            }
+            _ => {
+                eprintln!("Unknown option: {}", args[i]);
+                print_usage();
+                std::process::exit(1);
+            }
+        }
+    }
+
+    let interface_name = interface_name.unwrap_or_else(|| {
+        print_usage();
+        println!("\nAvailable interfaces:");
+        for iface in list_interfaces() {
+            println!("  - {}", iface);
+        }
+        std::process::exit(1);
+    });
+
+    (interface_name, csv_path)
+}
+
 fn print_usage() {
     println!("Usage: dhcpsniff <interface_name> [OPTIONS]");
     println!();
     println!("Options:");
     println!("  -o, --output <FILE>    Output CSV file path (default: dhcp_devices.csv)");
-    println!("  -a, --api <ADDR:PORT>  Start HTTP API server (e.g., 127.0.0.1:8080)");
-    println!("  --api-default          Start HTTP API on default address (127.0.0.1:8080)");
+    #[cfg(feature = "http-api")]
+    {
+        println!("  -a, --api <ADDR:PORT>  Start HTTP API server (e.g., 127.0.0.1:8080)");
+        println!("  --api-default          Start HTTP API on default address (127.0.0.1:8080)");
+    }
     println!("  -h, --help             Show this help message");
     println!();
     println!("CSV Format: last_seen,mac_address,ip_address,hostname,first_seen");
-    println!();
-    println!("API Endpoints (when --api is enabled):");
-    println!("  GET /devices       - List all devices as JSON");
-    println!("  GET /devices/count - Get device count");
-    println!("  GET /health        - Health check");
+    #[cfg(feature = "http-api")]
+    {
+        println!();
+        println!("API Endpoints (when --api is enabled):");
+        println!("  GET /devices       - List all devices as JSON");
+        println!("  GET /devices/count - Get device count");
+        println!("  GET /health        - Health check");
+    }
 }

@@ -8,7 +8,7 @@ A Rust library and CLI tool for sniffing and parsing DHCP (v4 & v6) network traf
 - **DHCPv6 Support**: Capture and parse SOLICIT, ADVERTISE, REQUEST, CONFIRM, RENEW, REBIND, REPLY, RELEASE, DECLINE, RECONFIGURE, and INFO-REQUEST messages
 - **Device Tracking**: Automatically track detected devices and save to CSV file
 - **CSV Export**: Export device information with timestamps, MAC addresses, IP addresses, and hostnames
-- **HTTP API**: Built-in REST API server to query devices as JSON
+- **HTTP API** (optional): Built-in REST API server to query devices as JSON
 - **Library API**: Use as a library in your own Rust projects
 - **CLI Tool**: Run as a standalone command-line sniffer
 - **Type-Safe**: Strongly typed enums for message types, operations, and options
@@ -23,12 +23,22 @@ Add to your `Cargo.toml`:
 dhcpsniff = "0.1.0"
 ```
 
+Or without the HTTP API feature (smaller binary):
+
+```toml
+[dependencies]
+dhcpsniff = { version = "0.1.0", default-features = false }
+```
+
 Or clone and build from source:
 
 ```bash
 git clone <repository-url>
 cd dhcpsniff
 cargo build --release
+
+# Or build without HTTP API
+cargo build --release --no-default-features
 ```
 
 ## Usage
@@ -81,6 +91,9 @@ last_seen,mac_address,ip_address,hostname,first_seen
 The CSV file is updated in real-time as new devices are detected or existing devices change.
 
 ### HTTP API
+
+> **Note:** The HTTP API requires the `http-api` feature, which is enabled by default.
+> Build with `--no-default-features` to disable it.
 
 When started with `--api` or `--api-default`, the tool exposes a REST API for querying devices:
 
@@ -234,7 +247,22 @@ cargo run --example parse_payload
 - `is_dhcpv6_ports(src, dest)` - Check if ports indicate DHCPv6
 - `parse_dhcpv4_payload(payload, src, dst, src_port, dst_port)` - Parse DHCPv4 from raw bytes
 - `parse_dhcpv6_payload(payload, src, dst, src_port, dst_port)` - Parse DHCPv6 from raw bytes
-- `start_api_server(addr, tracker)` - Start HTTP API server in background thread
+- `start_api_server(addr, tracker)` - Start HTTP API server in background thread (requires `http-api` feature)
+- `to_json()` / `to_json_sorted()` - Export devices as JSON (requires `http-api` feature)
+
+## Feature Flags
+
+| Feature | Default | Description |
+|---------|---------|-------------|
+| `http-api` | ✓ | Enables the HTTP REST API server, JSON export, and serde serialization |
+
+```bash
+# Build with all features (default)
+cargo build --release
+
+# Build without HTTP API (smaller binary, fewer dependencies)
+cargo build --release --no-default-features
+```
 
 ## Testing
 
@@ -245,9 +273,9 @@ cargo test
 ## Dependencies
 
 - [pnet](https://crates.io/crates/pnet) - Low-level networking library for packet capture and parsing
-- [serde](https://crates.io/crates/serde) - Serialization framework for JSON support
-- [serde_json](https://crates.io/crates/serde_json) - JSON serialization/deserialization
-- [tiny_http](https://crates.io/crates/tiny_http) - Lightweight HTTP server for the REST API
+- [serde](https://crates.io/crates/serde) - Serialization framework for JSON support (optional, `http-api` feature)
+- [serde_json](https://crates.io/crates/serde_json) - JSON serialization/deserialization (optional, `http-api` feature)
+- [tiny_http](https://crates.io/crates/tiny_http) - Lightweight HTTP server for the REST API (optional, `http-api` feature)
 
 ## License
 

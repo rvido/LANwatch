@@ -597,10 +597,12 @@ impl DhcpSniffer {
 // ============================================================================
 
 /// Information about a detected DHCP device
+#[cfg(feature = "http-api")]
 use serde::{Deserialize, Serialize};
 
 /// Information about a detected DHCP device
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "http-api", derive(Serialize, Deserialize))]
 pub struct DeviceInfo {
     /// MAC address of the device
     pub mac_address: String,
@@ -898,12 +900,14 @@ impl DeviceTracker {
     }
 
     /// Get all devices as a JSON string
+    #[cfg(feature = "http-api")]
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         let devices: Vec<&DeviceInfo> = self.devices.values().collect();
         serde_json::to_string_pretty(&devices)
     }
 
     /// Get all devices as a JSON array sorted by last_seen (most recent first)
+    #[cfg(feature = "http-api")]
     pub fn to_json_sorted(&self) -> Result<String, serde_json::Error> {
         let mut devices: Vec<&DeviceInfo> = self.devices.values().collect();
         devices.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
@@ -915,17 +919,22 @@ impl DeviceTracker {
 // HTTP API Server
 // ============================================================================
 
+#[cfg(feature = "http-api")]
 use std::sync::{Arc, RwLock};
+#[cfg(feature = "http-api")]
 use std::thread;
+#[cfg(feature = "http-api")]
 use tiny_http::{Response, Server};
 
 /// HTTP API server for exposing device data
+#[cfg(feature = "http-api")]
 pub struct ApiServer {
     server: Server,
     tracker: Arc<RwLock<DeviceTracker>>,
 }
 
 /// API response structure
+#[cfg(feature = "http-api")]
 #[derive(Serialize)]
 struct ApiResponse<T> {
     success: bool,
@@ -934,12 +943,14 @@ struct ApiResponse<T> {
 }
 
 /// Error response structure
+#[cfg(feature = "http-api")]
 #[derive(Serialize)]
 struct ApiError {
     success: bool,
     error: String,
 }
 
+#[cfg(feature = "http-api")]
 impl ApiServer {
     /// Create a new API server on the specified address (e.g., "0.0.0.0:8080")
     pub fn new(addr: &str, tracker: Arc<RwLock<DeviceTracker>>) -> std::io::Result<Self> {
@@ -1057,6 +1068,7 @@ impl ApiServer {
 }
 
 /// Start the API server in a background thread
+#[cfg(feature = "http-api")]
 pub fn start_api_server(addr: &str, tracker: Arc<RwLock<DeviceTracker>>) -> std::io::Result<thread::JoinHandle<()>> {
     let server = ApiServer::new(addr, tracker)?;
     Ok(thread::spawn(move || {
@@ -1543,6 +1555,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "http-api")]
     fn test_device_info_json_serialization() {
         let device = DeviceInfo {
             mac_address: "AA:BB:CC:DD:EE:FF".to_string(),
@@ -1566,6 +1579,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "http-api")]
     fn test_device_tracker_to_json() {
         let temp_path = "/tmp/dhcpsniff_test_json.csv";
         let _ = std::fs::remove_file(temp_path);
@@ -1871,6 +1885,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "http-api")]
     fn test_api_response_serialization() {
         let response: ApiResponse<Vec<String>> = ApiResponse {
             success: true,
@@ -1884,6 +1899,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "http-api")]
     fn test_api_error_serialization() {
         let error = ApiError {
             success: false,

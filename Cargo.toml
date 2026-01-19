@@ -11,8 +11,12 @@ homepage = "https://github.com/rvido/dhcpsniff"
 keywords = ["dhcp", "network", "sniffer", "packet", "dhcpv6"]
 categories = ["network-programming", "parsing"]
 
+[features]
+default = ["http-api"]
+http-api = ["dep:serde", "dep:serde_json", "dep:tiny_http"]
+
 [dependencies]
 pnet = "0.35"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-tiny_http = "0.12"
+serde = { version = "1.0", features = ["derive"], optional = true }
+serde_json = { version = "1.0", optional = true }
+tiny_http = { version = "0.12", optional = true }
