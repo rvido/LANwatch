@@ -1987,7 +1987,7 @@ impl DeviceTracker {
         let mut file = File::create(&self.csv_path)?;
 
         // Write header
-        writeln!(file, "last_seen,mac_address,ip_address,hostname,first_seen,services,vendor")?;
+        writeln!(file, "last_seen,mac_address,ip_address,hostname,first_seen,services,vendor,device_type")?;
 
         // Write devices sorted by last_seen
         let mut devices: Vec<_> = self.devices.values().collect();
