@@ -84,19 +84,19 @@ cargo run -- --help
 The tool saves detected devices to a CSV file with the following columns:
 
 ```csv
-last_seen,mac_address,ip_address,hostname,first_seen,services,vendor,device_type
-2026-01-16T10:30:45Z,AA:BB:CC:DD:EE:FF,192.168.1.100,"mydevice",2026-01-16T10:25:00Z,"_googlecast._tcp","Google","Chromecast"
-2026-01-16T10:28:30Z,11:22:33:44:55:66,192.168.1.101,"","2026-01-16T10:28:30Z","_airplay._tcp","Apple","AirPlay Device"
+first_seen,last_seen,mac_address,ip_address,hostname,device_type,vendor,services
+2026-01-16T10:25:00Z,2026-01-16T10:30:45Z,AA:BB:CC:DD:EE:FF,192.168.1.100,"mydevice","Chromecast","Google","_googlecast._tcp"
+2026-01-16T10:28:30Z,2026-01-16T10:28:30Z,11:22:33:44:55:66,192.168.1.101,"","AirPlay Device","Apple","_airplay._tcp"
 ```
 
+- **first_seen**: ISO 8601 timestamp of first detection
 - **last_seen**: ISO 8601 timestamp of last DHCP/mDNS activity
 - **mac_address**: Device MAC address (or DUID for DHCPv6)
 - **ip_address**: IP address (requested or assigned)
 - **hostname**: Device hostname if available (empty if not)
-- **first_seen**: ISO 8601 timestamp of first detection
-- **services**: Semicolon-separated list of mDNS services (requires `mdns` feature)
-- **vendor**: Detected vendor based on mDNS services (e.g., "Apple", "Google", "Amazon")
 - **device_type**: Device type inferred from mDNS services (e.g., "Chromecast", "Apple TV", "Printer", "NAS")
+- **vendor**: Detected vendor based on mDNS services (e.g., "Apple", "Google", "Amazon")
+- **services**: Semicolon-separated list of mDNS services (requires `mdns` feature)
 
 The CSV file is updated in real-time as new devices are detected or existing devices change.
 

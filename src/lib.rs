@@ -1776,19 +1776,19 @@ impl DeviceInfo {
     }
 
     /// Convert to CSV line
-    /// Format: last_seen,mac_address,ip_address,"hostname",first_seen,"services","vendor","device_type"
+    /// Format: first_seen,last_seen,mac_address,ip_address,"hostname","device_type","vendor","services"
     pub fn to_csv_line(&self) -> String {
         let services_str = self.services.join(";");
         format!(
-            "{},{},{},\"{}\",{},\"{}\",\"{}\",\"{}\"",
+            "{},{},{},{},\"{}\",\"{}\",\"{}\",\"{}\"",
+            self.first_seen,
             self.last_seen,
             self.mac_address,
             self.ip_address,
             self.hostname.as_deref().unwrap_or(""),
-            self.first_seen,
-            services_str,
+            self.device_type.as_deref().unwrap_or(""),
             self.vendor.as_deref().unwrap_or(""),
-            self.device_type.as_deref().unwrap_or("")
+            services_str
         )
     }
 
@@ -1800,27 +1800,25 @@ impl DeviceInfo {
             return None;
         }
 
-        let last_seen = parts[0].to_string();
-        let mac_address = parts[1].to_string();
-        let ip_address = parts[2].to_string();
-        let hostname = {
-            let h = parts[3].trim_matches('"').to_string();
+        let first_seen = parts[0].to_string();
+        let last_seen = if parts.len() > 1 {
+            parts[1].to_string()
+        } else {
+            first_seen.clone()
+        };
+        let mac_address = parts[2].to_string();
+        let ip_address = parts[3].to_string();
+        let hostname = if parts.len() > 4 {
+            let h = parts[4].trim_matches('"').to_string();
             if h.is_empty() { None } else { Some(h) }
-        };
-        let first_seen = if parts.len() > 4 {
-            parts[4].to_string()
         } else {
-            last_seen.clone()
+            None
         };
-        let services = if parts.len() > 5 {
-            let s = parts[5].trim_matches('"');
-            if s.is_empty() {
-                Vec::new()
-            } else {
-                s.split(';').map(|s| s.to_string()).collect()
-            }
+        let device_type = if parts.len() > 5 {
+            let t = parts[5].trim_matches('"').to_string();
+            if t.is_empty() { None } else { Some(t) }
         } else {
-            Vec::new()
+            None
         };
         let vendor = if parts.len() > 6 {
             let v = parts[6].trim_matches('"').to_string();
@@ -1828,11 +1826,15 @@ impl DeviceInfo {
         } else {
             None
         };
-        let device_type = if parts.len() > 7 {
-            let t = parts[7].trim_matches('"').to_string();
-            if t.is_empty() { None } else { Some(t) }
+        let services = if parts.len() > 7 {
+            let s = parts[7].trim_matches('"');
+            if s.is_empty() {
+                Vec::new()
+            } else {
+                s.split(';').map(|s| s.to_string()).collect()
+            }
         } else {
-            None
+            Vec::new()
         };
 
         Some(Self {
@@ -1970,8 +1972,8 @@ impl DeviceTracker {
 
         for line in reader.lines() {
             let line = line?;
-            // Skip header
-            if line.starts_with("timestamp,") || line.starts_with("last_seen,") {
+            // Skip header (supports both old and new formats)
+            if line.starts_with("timestamp,") || line.starts_with("last_seen,") || line.starts_with("first_seen,") {
                 continue;
             }
             if let Some(device) = DeviceInfo::from_csv_line(&line) {
@@ -1987,7 +1989,7 @@ impl DeviceTracker {
         let mut file = File::create(&self.csv_path)?;
 
         // Write header
-        writeln!(file, "last_seen,mac_address,ip_address,hostname,first_seen,services,vendor,device_type")?;
+        writeln!(file, "first_seen,last_seen,mac_address,ip_address,hostname,device_type,vendor,services")?;
 
         // Write devices sorted by last_seen
         let mut devices: Vec<_> = self.devices.values().collect();
