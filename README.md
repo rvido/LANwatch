@@ -6,6 +6,7 @@ A Rust library and CLI tool for sniffing and parsing DHCP (v4 & v6) network traf
 
 - **DHCPv4 Support**: Capture and parse DHCP DISCOVER, OFFER, REQUEST, ACK, NAK, RELEASE, and INFORM messages
 - **DHCPv6 Support**: Capture and parse SOLICIT, ADVERTISE, REQUEST, CONFIRM, RENEW, REBIND, REPLY, RELEASE, DECLINE, RECONFIGURE, and INFO-REQUEST messages
+- **mDNS Support** (optional): Passive and active mDNS discovery for enhanced device identification
 - **Device Tracking**: Automatically track detected devices and save to CSV file
 - **CSV Export**: Export device information with timestamps, MAC addresses, IP addresses, and hostnames
 - **HTTP API** (optional): Built-in REST API server to query devices as JSON
@@ -60,11 +61,17 @@ sudo cargo run -- en0 --output devices.csv
 # Start with HTTP API server
 sudo cargo run -- en0 --api 0.0.0.0:8080
 
-# Start with API on default address (127.0.0.1:3000)
+# Start with API on default address (127.0.0.1:8080)
 sudo cargo run -- en0 --api-default
 
-# Combine options
-sudo cargo run -- en0 -o devices.csv --api 0.0.0.0:8080
+# Enable mDNS sniffing for enhanced device discovery (requires mdns feature)
+sudo cargo run --features mdns -- en0 --mdns
+
+# Enable mDNS with active querying (sends discovery probes)
+sudo cargo run --features mdns -- en0 --mdns-query
+
+# Combine all options
+sudo cargo run --all-features -- en0 -o devices.csv --api 0.0.0.0:8080 --mdns-query
 
 # Show help
 cargo run -- --help
@@ -77,18 +84,47 @@ cargo run -- --help
 The tool saves detected devices to a CSV file with the following columns:
 
 ```csv
-last_seen,mac_address,ip_address,hostname,first_seen
-2026-01-16T10:30:45Z,AA:BB:CC:DD:EE:FF,192.168.1.100,"mydevice",2026-01-16T10:25:00Z
-2026-01-16T10:28:30Z,11:22:33:44:55:66,192.168.1.101,"",2026-01-16T10:28:30Z
+last_seen,mac_address,ip_address,hostname,first_seen,services,vendor,device_type
+2026-01-16T10:30:45Z,AA:BB:CC:DD:EE:FF,192.168.1.100,"mydevice",2026-01-16T10:25:00Z,"_googlecast._tcp","Google","Chromecast"
+2026-01-16T10:28:30Z,11:22:33:44:55:66,192.168.1.101,"","2026-01-16T10:28:30Z","_airplay._tcp","Apple","AirPlay Device"
 ```
 
-- **last_seen**: ISO 8601 timestamp of last DHCP activity
+- **last_seen**: ISO 8601 timestamp of last DHCP/mDNS activity
 - **mac_address**: Device MAC address (or DUID for DHCPv6)
 - **ip_address**: IP address (requested or assigned)
 - **hostname**: Device hostname if available (empty if not)
 - **first_seen**: ISO 8601 timestamp of first detection
+- **services**: Semicolon-separated list of mDNS services (requires `mdns` feature)
+- **vendor**: Detected vendor based on mDNS services (e.g., "Apple", "Google", "Amazon")
+- **device_type**: Device type inferred from mDNS services (e.g., "Chromecast", "Apple TV", "Printer", "NAS")
 
 The CSV file is updated in real-time as new devices are detected or existing devices change.
+
+### mDNS Service Identification
+
+When mDNS sniffing is enabled, the tool can identify devices based on the services they advertise.
+You can provide a custom services file to enhance identification:
+
+```bash
+# Use a custom services file
+sudo cargo run --features mdns -- en0 --mdns -s mdns-services.txt
+```
+
+**Services file format:**
+```
+# Comment lines start with #
+_service._tcp.local    # Description of the service
+_http._tcp.local       # Web Server
+_airplay._tcp.local    # AirPlay, Apple
+_googlecast._tcp.local # Google Chromecast streaming protocol, Google
+```
+
+The tool includes built-in detection for:
+- **Vendors**: Apple, Google, Amazon, Spotify, NVIDIA, Microsoft, Sony, Samsung, etc.
+- **Device Types**: Chromecast, Apple TV, Fire TV, AirPlay Device, Printer, Scanner, NAS, Smart Home Device, Android TV, NVIDIA Shield, etc.
+
+Loading a services file allows for more comprehensive identification. Device types are inferred from
+service descriptions (e.g., "_googlecast._tcp" → "Chromecast").
 
 ### HTTP API
 
@@ -130,6 +166,9 @@ curl http://localhost:3000/health
       "mac_address": "AA:BB:CC:DD:EE:FF",
       "ip_address": "192.168.1.100",
       "hostname": "mydevice",
+      "services": ["_http._tcp", "_airplay._tcp"],
+      "vendor": "Apple",
+      "device_type": "AirPlay Device",
       "first_seen": "2026-01-16T10:25:00Z",
       "last_seen": "2026-01-16T10:30:45Z"
     }
@@ -213,10 +252,15 @@ cargo run --example parse_payload
 
 ### Main Types
 
-- `DhcpSniffer` - Main sniffer struct for capturing packets
+- `DhcpSniffer` - Main sniffer struct for capturing DHCP packets
+- `NetworkSniffer` - Extended sniffer for DHCP + mDNS (requires `mdns` feature)
 - `DhcpEvent` - Enum containing either `V4(Dhcpv4Packet)` or `V6(Dhcpv6Packet)`
+- `NetworkEvent` - Enum for DHCP or mDNS events (requires `mdns` feature)
 - `Dhcpv4Packet` - Parsed DHCPv4 packet with all fields
 - `Dhcpv6Packet` - Parsed DHCPv6 packet with all fields
+- `MdnsPacket` - Parsed mDNS packet (requires `mdns` feature)
+- `MdnsRecord` - DNS resource record from mDNS
+- `MdnsQuerier` - Active mDNS query sender (requires `mdns` feature)
 - `DeviceTracker` - Track detected devices and save to CSV
 - `DeviceInfo` - Information about a detected device
 - `DhcpError` - Error types for sniffer operations
@@ -238,6 +282,9 @@ cargo run --example parse_payload
 - `DHCPV4_CLIENT_PORT` (68)
 - `DHCPV6_CLIENT_PORT` (546)
 - `DHCPV6_SERVER_PORT` (547)
+- `MDNS_PORT` (5353) - requires `mdns` feature
+- `MDNS_IPV4_MULTICAST` (224.0.0.251) - requires `mdns` feature
+- `MDNS_IPV6_MULTICAST` (ff02::fb) - requires `mdns` feature
 
 ### Helper Functions
 
@@ -245,8 +292,11 @@ cargo run --example parse_payload
 - `find_interface(name)` - Find interface by name
 - `is_dhcpv4_ports(src, dest)` - Check if ports indicate DHCPv4
 - `is_dhcpv6_ports(src, dest)` - Check if ports indicate DHCPv6
+- `is_mdns_ports(src, dest)` - Check if ports indicate mDNS (requires `mdns` feature)
 - `parse_dhcpv4_payload(payload, src, dst, src_port, dst_port)` - Parse DHCPv4 from raw bytes
 - `parse_dhcpv6_payload(payload, src, dst, src_port, dst_port)` - Parse DHCPv6 from raw bytes
+- `parse_mdns_payload(payload, src, dst)` - Parse mDNS from raw bytes (requires `mdns` feature)
+- `build_mdns_query(name, record_type)` - Build an mDNS query packet (requires `mdns` feature)
 - `start_api_server(addr, tracker)` - Start HTTP API server in background thread (requires `http-api` feature)
 - `to_json()` / `to_json_sorted()` - Export devices as JSON (requires `http-api` feature)
 
@@ -255,14 +305,39 @@ cargo run --example parse_payload
 | Feature | Default | Description |
 |---------|---------|-------------|
 | `http-api` | ✓ | Enables the HTTP REST API server, JSON export, and serde serialization |
+| `mdns` | ✗ | Enables mDNS (Multicast DNS) sniffing for enhanced device discovery |
 
 ```bash
-# Build with all features (default)
+# Build with default features (http-api)
 cargo build --release
 
-# Build without HTTP API (smaller binary, fewer dependencies)
+# Build with mDNS support
+cargo build --release --features mdns
+
+# Build with all features
+cargo build --release --all-features
+
+# Build without any optional features (smallest binary)
 cargo build --release --no-default-features
 ```
+
+### mDNS Discovery
+
+When the `mdns` feature is enabled, the tool can capture mDNS traffic to discover:
+
+- Device hostnames (`.local` names)
+- Service types (HTTP, AirPlay, Chromecast, printers, etc.)
+- IP address to hostname mappings
+
+**Passive mode** (`--mdns`): Captures mDNS announcements as devices broadcast them.
+
+**Active mode** (`--mdns-query`): Also sends multicast queries for common services:
+- `_http._tcp.local` - Web servers
+- `_airplay._tcp.local` - Apple AirPlay devices
+- `_googlecast._tcp.local` - Chromecast devices
+- `_printer._tcp.local` - Network printers
+- `_smb._tcp.local` - SMB file shares
+- And more...
 
 ## Testing
 

@@ -14,6 +14,7 @@ categories = ["network-programming", "parsing"]
 [features]
 default = ["http-api"]
 http-api = ["dep:serde", "dep:serde_json", "dep:tiny_http"]
+mdns = []
 
 [dependencies]
 pnet = "0.35"
