@@ -1691,8 +1691,10 @@ use serde::{Deserialize, Serialize};
 pub struct DeviceInfo {
     /// MAC address of the device
     pub mac_address: String,
-    /// IP address (IPv4 or IPv6)
+    /// IPv4 address
     pub ip_address: String,
+    /// IPv6 address if available
+    pub ipv6_address: Option<String>,
     /// Hostname if available
     pub hostname: Option<String>,
     /// Detected mDNS services (e.g., "_http._tcp", "_airplay._tcp")
@@ -1714,6 +1716,7 @@ impl DeviceInfo {
         Self {
             mac_address,
             ip_address,
+            ipv6_address: None,
             hostname,
             services: Vec::new(),
             vendor: None,
@@ -1775,16 +1778,28 @@ impl DeviceInfo {
         }
     }
 
+    /// Set IPv6 address (updates if different)
+    pub fn set_ipv6_address(&mut self, ipv6: &str) -> bool {
+        let new_ipv6 = Some(ipv6.to_string());
+        if self.ipv6_address != new_ipv6 {
+            self.ipv6_address = new_ipv6;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Convert to CSV line
-    /// Format: first_seen,last_seen,mac_address,ip_address,"hostname","device_type","vendor","services"
+    /// Format: first_seen,last_seen,mac_address,ip_address,"ipv6_address","hostname","device_type","vendor","services"
     pub fn to_csv_line(&self) -> String {
         let services_str = self.services.join(";");
         format!(
-            "{},{},{},{},\"{}\",\"{}\",\"{}\",\"{}\"",
+            "{},{},{},{},\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"",
             self.first_seen,
             self.last_seen,
             self.mac_address,
             self.ip_address,
+            self.ipv6_address.as_deref().unwrap_or(""),
             self.hostname.as_deref().unwrap_or(""),
             self.device_type.as_deref().unwrap_or(""),
             self.vendor.as_deref().unwrap_or(""),
@@ -1808,26 +1823,32 @@ impl DeviceInfo {
         };
         let mac_address = parts[2].to_string();
         let ip_address = parts[3].to_string();
-        let hostname = if parts.len() > 4 {
-            let h = parts[4].trim_matches('"').to_string();
+        let ipv6_address = if parts.len() > 4 {
+            let v6 = parts[4].trim_matches('"').to_string();
+            if v6.is_empty() { None } else { Some(v6) }
+        } else {
+            None
+        };
+        let hostname = if parts.len() > 5 {
+            let h = parts[5].trim_matches('"').to_string();
             if h.is_empty() { None } else { Some(h) }
         } else {
             None
         };
-        let device_type = if parts.len() > 5 {
-            let t = parts[5].trim_matches('"').to_string();
+        let device_type = if parts.len() > 6 {
+            let t = parts[6].trim_matches('"').to_string();
             if t.is_empty() { None } else { Some(t) }
         } else {
             None
         };
-        let vendor = if parts.len() > 6 {
-            let v = parts[6].trim_matches('"').to_string();
+        let vendor = if parts.len() > 7 {
+            let v = parts[7].trim_matches('"').to_string();
             if v.is_empty() { None } else { Some(v) }
         } else {
             None
         };
-        let services = if parts.len() > 7 {
-            let s = parts[7].trim_matches('"');
+        let services = if parts.len() > 8 {
+            let s = parts[8].trim_matches('"');
             if s.is_empty() {
                 Vec::new()
             } else {
@@ -1840,6 +1861,7 @@ impl DeviceInfo {
         Some(Self {
             mac_address,
             ip_address,
+            ipv6_address,
             hostname,
             services,
             vendor,
@@ -1989,7 +2011,7 @@ impl DeviceTracker {
         let mut file = File::create(&self.csv_path)?;
 
         // Write header
-        writeln!(file, "first_seen,last_seen,mac_address,ip_address,hostname,device_type,vendor,services")?;
+        writeln!(file, "first_seen,last_seen,mac_address,ip_address,ipv6_address,hostname,device_type,vendor,services")?;
 
         // Write devices sorted by last_seen
         let mut devices: Vec<_> = self.devices.values().collect();
@@ -2063,8 +2085,10 @@ impl DeviceTracker {
         let mut updated = 0;
         let mac = &packet.source_mac;
 
-        // Collect hostname to IP mappings from A and AAAA records
-        let mut hostname_to_ip: HashMap<String, String> = HashMap::new();
+        // Collect hostname to IPv4 mappings from A records
+        let mut hostname_to_ipv4: HashMap<String, String> = HashMap::new();
+        // Collect hostname to IPv6 mappings from AAAA records
+        let mut hostname_to_ipv6: HashMap<String, String> = HashMap::new();
         // Collect services advertised by this device
         let mut services: Vec<String> = Vec::new();
 
@@ -2073,12 +2097,11 @@ impl DeviceTracker {
                 MdnsRecordData::A(addr) => {
                     // Strip .local suffix for hostname
                     let hostname = record.name.trim_end_matches(".local").to_string();
-                    hostname_to_ip.insert(hostname.clone(), addr.to_string());
+                    hostname_to_ipv4.insert(hostname.clone(), addr.to_string());
                 }
                 MdnsRecordData::Aaaa(addr) => {
                     let hostname = record.name.trim_end_matches(".local").to_string();
-                    // Only insert if we don't have an IPv4 already
-                    hostname_to_ip.entry(hostname).or_insert_with(|| addr.to_string());
+                    hostname_to_ipv6.insert(hostname.clone(), addr.to_string());
                 }
                 MdnsRecordData::Ptr(_target) => {
                     // PTR records indicate service advertisements
@@ -2117,9 +2140,12 @@ impl DeviceTracker {
         let vendor = self.detect_vendor_from_services(&services);
         let device_type = self.detect_device_type_from_services(&services);
 
+        // Get the first IPv6 address if available
+        let ipv6_addr = hostname_to_ipv6.values().next().cloned();
+
         // Get or create device entry
         let device = self.devices.entry(mac.clone()).or_insert_with(|| {
-            let ip = hostname_to_ip
+            let ip = hostname_to_ipv4
                 .values()
                 .next()
                 .cloned()
@@ -2129,14 +2155,25 @@ impl DeviceTracker {
         });
 
         // Update hostname from A/AAAA records
-        for (hostname, ip) in &hostname_to_ip {
+        for hostname in hostname_to_ipv4.keys().chain(hostname_to_ipv6.keys()) {
             if device.hostname.is_none() {
                 device.hostname = Some(hostname.clone());
                 updated += 1;
+                break;
             }
-            // Update IP if we have a better one
+        }
+
+        // Update IPv4 if we have a better one
+        if let Some(ipv4) = hostname_to_ipv4.values().next() {
             if device.ip_address == "0.0.0.0" || device.ip_address.is_empty() {
-                device.ip_address = ip.clone();
+                device.ip_address = ipv4.clone();
+                updated += 1;
+            }
+        }
+
+        // Set IPv6 address if available
+        if let Some(ipv6) = ipv6_addr {
+            if device.set_ipv6_address(&ipv6) {
                 updated += 1;
             }
         }
@@ -2779,6 +2816,7 @@ mod tests {
         let device = DeviceInfo {
             mac_address: "AA:BB:CC:DD:EE:FF".to_string(),
             ip_address: "192.168.1.100".to_string(),
+            ipv6_address: Some("fe80::1".to_string()),
             hostname: Some("testhost".to_string()),
             services: vec!["_http._tcp".to_string(), "_ssh._tcp".to_string()],
             vendor: Some("TestVendor".to_string()),
@@ -2792,6 +2830,7 @@ mod tests {
 
         assert_eq!(parsed.mac_address, device.mac_address);
         assert_eq!(parsed.ip_address, device.ip_address);
+        assert_eq!(parsed.ipv6_address, device.ipv6_address);
         assert_eq!(parsed.hostname, device.hostname);
         assert_eq!(parsed.services, device.services);
         assert_eq!(parsed.vendor, device.vendor);
@@ -2805,6 +2844,7 @@ mod tests {
         let device = DeviceInfo {
             mac_address: "AA:BB:CC:DD:EE:FF".to_string(),
             ip_address: "192.168.1.100".to_string(),
+            ipv6_address: None,
             hostname: None,
             services: Vec::new(),
             vendor: None,
@@ -2824,6 +2864,7 @@ mod tests {
         let mut device = DeviceInfo {
             mac_address: "AA:BB:CC:DD:EE:FF".to_string(),
             ip_address: "192.168.1.100".to_string(),
+            ipv6_address: None,
             hostname: None,
             services: Vec::new(),
             vendor: None,
@@ -2997,6 +3038,7 @@ mod tests {
         let device = DeviceInfo {
             mac_address: "AA:BB:CC:DD:EE:FF".to_string(),
             ip_address: "192.168.1.100".to_string(),
+            ipv6_address: Some("fe80::abcd:1234".to_string()),
             hostname: Some("jsonhost".to_string()),
             services: vec!["_airplay._tcp".to_string()],
             vendor: Some("Apple".to_string()),
@@ -3009,6 +3051,7 @@ mod tests {
         let json = serde_json::to_string(&device).unwrap();
         assert!(json.contains("AA:BB:CC:DD:EE:FF"));
         assert!(json.contains("192.168.1.100"));
+        assert!(json.contains("fe80::abcd:1234"));
         assert!(json.contains("jsonhost"));
 
         // Deserialize back
