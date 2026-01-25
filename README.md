@@ -1,18 +1,19 @@
-# dhcpsniff
+# lanwatch
 
-A Rust library and CLI tool for sniffing and parsing DHCP (v4 & v6) network traffic.
+A Rust library and CLI tool for network device discovery and tracking via DHCP, mDNS, and OUI identification.
 
 ## Features
 
 - **DHCPv4 Support**: Capture and parse DHCP DISCOVER, OFFER, REQUEST, ACK, NAK, RELEASE, and INFORM messages
 - **DHCPv6 Support**: Capture and parse SOLICIT, ADVERTISE, REQUEST, CONFIRM, RENEW, REBIND, REPLY, RELEASE, DECLINE, RECONFIGURE, and INFO-REQUEST messages
 - **mDNS Support** (optional): Passive and active mDNS discovery for enhanced device identification
+- **Device Classification**: Automatic identification of device types (phones, printers, thermostats, etc.) from hostnames, services, and vendor data
 - **IEEE OUI Database**: Built-in vendor identification from MAC addresses using IEEE OUI (Organizationally Unique Identifier) prefixes
 - **Device Tracking**: Automatically track detected devices and save to CSV file
 - **CSV Export**: Export device information with timestamps, MAC addresses, IP addresses, and hostnames
 - **HTTP API** (optional): Built-in REST API server to query devices as JSON
 - **Library API**: Use as a library in your own Rust projects
-- **CLI Tool**: Run as a standalone command-line sniffer
+- **CLI Tool**: Run as a standalone command-line tool
 - **Type-Safe**: Strongly typed enums for message types, operations, and options
 - **Cross-Platform**: Works on macOS, Linux, and other Unix-like systems
 
@@ -22,21 +23,21 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-dhcpsniff = "0.1.0"
+lanwatch = "0.1.0"
 ```
 
 Or without the HTTP API feature (smaller binary):
 
 ```toml
 [dependencies]
-dhcpsniff = { version = "0.1.0", default-features = false }
+lanwatch = { version = "0.1.0", default-features = false }
 ```
 
 Or clone and build from source:
 
 ```bash
 git clone <repository-url>
-cd dhcpsniff
+cd lanwatch
 cargo build --release
 
 # Or build without HTTP API
@@ -242,7 +243,7 @@ curl http://localhost:3000/health
 ### Library Usage
 
 ```rust
-use dhcpsniff::{DhcpSniffer, DhcpEvent, DeviceTracker, Dhcpv6Option};
+use lanwatch::{DhcpSniffer, DhcpEvent, DeviceTracker, Dhcpv6Option};
 
 fn main() {
     let mut sniffer = DhcpSniffer::new("en0").expect("Failed to create sniffer");
@@ -273,7 +274,7 @@ fn main() {
 ### Parsing Raw Payloads
 
 ```rust
-use dhcpsniff::{parse_dhcpv4_payload, parse_dhcpv6_payload};
+use lanwatch::{parse_dhcpv4_payload, parse_dhcpv6_payload};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 // Parse a DHCPv4 payload

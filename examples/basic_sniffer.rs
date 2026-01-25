@@ -1,12 +1,12 @@
 // Copyright (c) 2026 Richard Vidal-Dorsch
 // SPDX-License-Identifier: MIT
 //
-// DHCPsniff - A DHCP (v4 & v6) network traffic sniffer
+// LANwatch - Network device discovery and tracking
 // See LICENSE file for details.
 
-//! Example: Basic DHCP sniffer with device tracking
+//! Example: Basic network sniffer with device tracking
 //!
-//! This example shows how to use the dhcpsniff library to capture
+//! This example shows how to use the lanwatch library to capture
 //! and display DHCP packets on a network interface, while also
 //! tracking devices and saving them to a CSV file.
 //!
@@ -14,7 +14,7 @@
 //!
 //! Note: Root/sudo privileges are typically required for packet capture.
 
-use dhcpsniff::{list_interfaces, DeviceTracker, DhcpEvent, DhcpSniffer, Dhcpv6Option};
+use lanwatch::{list_interfaces, DeviceTracker, DhcpEvent, DhcpSniffer, Dhcpv6Option};
 use std::env;
 
 fn main() {

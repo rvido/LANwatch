@@ -1,17 +1,17 @@
 // Copyright (c) 2026 Richard Vidal-Dorsch
 // SPDX-License-Identifier: MIT
 //
-// DHCPsniff - A DHCP (v4 & v6) network traffic sniffer
+// LANwatch - Network device discovery and tracking
 // See LICENSE file for details.
 
-//! # dhcpsniff
+//! # lanwatch
 //!
-//! A library for parsing and sniffing DHCP (v4 & v6) network traffic.
+//! A library for network device discovery and tracking via DHCP, mDNS, and OUI identification.
 //!
 //! ## Example
 //!
 //! ```no_run
-//! use dhcpsniff::{DhcpSniffer, DhcpEvent};
+//! use lanwatch::{DhcpSniffer, DhcpEvent};
 //!
 //! let mut sniffer = DhcpSniffer::new("en0").expect("Failed to create sniffer");
 //!
@@ -1145,7 +1145,7 @@ pub const IEEE_OUI36_URL: &str = "https://standards-oui.ieee.org/oui36/oui36.txt
 ///
 /// # Example
 /// ```no_run
-/// use dhcpsniff::download_ieee_oui;
+/// use lanwatch::download_ieee_oui;
 /// download_ieee_oui("oui.txt", None).expect("Failed to download OUI database");
 /// ```
 pub fn download_ieee_oui<P: AsRef<Path>>(output_path: P, url: Option<&str>) -> Result<(), String> {
@@ -3013,7 +3013,7 @@ impl ApiServer {
     fn handle_health(&self) -> Response<std::io::Cursor<Vec<u8>>> {
         let json = serde_json::json!({
             "status": "ok",
-            "service": "dhcpsniff"
+            "service": "lanwatch"
         });
         Response::from_string(json.to_string())
             .with_header(tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap())
@@ -3021,7 +3021,7 @@ impl ApiServer {
 
     fn handle_root(&self) -> Response<std::io::Cursor<Vec<u8>>> {
         let json = serde_json::json!({
-            "service": "dhcpsniff",
+            "service": "lanwatch",
             "version": env!("CARGO_PKG_VERSION"),
             "endpoints": {
                 "/devices": "GET - List all detected devices",
@@ -3431,7 +3431,7 @@ mod tests {
 
     #[test]
     fn test_device_tracker_new_device() {
-        let temp_path = "/tmp/dhcpsniff_test_devices.csv";
+        let temp_path = "/tmp/lanwatch_test_devices.csv";
         let _ = std::fs::remove_file(temp_path); // Clean up any existing file
 
         let mut tracker = DeviceTracker::new(temp_path).unwrap();
@@ -3464,7 +3464,7 @@ mod tests {
 
     #[test]
     fn test_device_tracker_update_from_dhcpv6() {
-        let temp_path = "/tmp/dhcpsniff_test_v6_devices.csv";
+        let temp_path = "/tmp/lanwatch_test_v6_devices.csv";
         let _ = std::fs::remove_file(temp_path);
 
         let mut tracker = DeviceTracker::new(temp_path).unwrap();
@@ -3497,7 +3497,7 @@ mod tests {
 
     #[test]
     fn test_device_tracker_dhcpv6_no_client_id() {
-        let temp_path = "/tmp/dhcpsniff_test_v6_no_id.csv";
+        let temp_path = "/tmp/lanwatch_test_v6_no_id.csv";
         let _ = std::fs::remove_file(temp_path);
 
         let mut tracker = DeviceTracker::new(temp_path).unwrap();
@@ -3522,7 +3522,7 @@ mod tests {
 
     #[test]
     fn test_device_tracker_persistence() {
-        let temp_path = "/tmp/dhcpsniff_test_persistence.csv";
+        let temp_path = "/tmp/lanwatch_test_persistence.csv";
         let _ = std::fs::remove_file(temp_path);
 
         // Create tracker and add a device
@@ -3589,7 +3589,7 @@ mod tests {
     #[test]
     #[cfg(feature = "http-api")]
     fn test_device_tracker_to_json() {
-        let temp_path = "/tmp/dhcpsniff_test_json.csv";
+        let temp_path = "/tmp/lanwatch_test_json.csv";
         let _ = std::fs::remove_file(temp_path);
 
         let mut tracker = DeviceTracker::new(temp_path).unwrap();
@@ -3848,7 +3848,7 @@ mod tests {
 
     #[test]
     fn test_device_tracker_mac_address_update() {
-        let temp_path = "/tmp/dhcpsniff_test_mac_update.csv";
+        let temp_path = "/tmp/lanwatch_test_mac_update.csv";
         let _ = std::fs::remove_file(temp_path);
 
         let mut tracker = DeviceTracker::new(temp_path).unwrap();

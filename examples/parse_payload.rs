@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Richard Vidal-Dorsch
 // SPDX-License-Identifier: MIT
 //
-// DHCPsniff - A DHCP (v4 & v6) network traffic sniffer
+// LANwatch - Network device discovery and tracking
 // See LICENSE file for details.
 
 //! Example: Parse raw DHCP payloads
@@ -9,7 +9,7 @@
 //! This example demonstrates how to use the parsing functions directly
 //! without network capture, useful for testing or analyzing saved packets.
 
-use dhcpsniff::{
+use lanwatch::{
     parse_dhcpv4_payload, parse_dhcpv6_payload, Dhcpv4MessageType, Dhcpv6MessageType,
 };
 use std::net::{Ipv4Addr, Ipv6Addr};

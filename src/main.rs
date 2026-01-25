@@ -1,18 +1,18 @@
 // Copyright (c) 2026 Richard Vidal-Dorsch
 // SPDX-License-Identifier: MIT
 //
-// DHCPsniff - A DHCP (v4 & v6) network traffic sniffer
+// LANwatch - Network device discovery and tracking
 // See LICENSE file for details.
 
 #[cfg(feature = "http-api")]
-use dhcpsniff::start_api_server;
+use lanwatch::start_api_server;
 #[cfg(feature = "mdns")]
-use dhcpsniff::{MdnsQuerier, MdnsRecordData, MdnsServiceRegistry, NetworkEvent, NetworkSniffer};
-use dhcpsniff::{list_interfaces, DeviceTracker, DhcpEvent, DhcpSniffer, Dhcpv6Option, OuiRegistry, download_ieee_oui, IEEE_OUI_URL};
+use lanwatch::{MdnsQuerier, MdnsRecordData, MdnsServiceRegistry, NetworkEvent, NetworkSniffer};
+use lanwatch::{list_interfaces, DeviceTracker, DhcpEvent, DhcpSniffer, Dhcpv6Option, OuiRegistry, download_ieee_oui, IEEE_OUI_URL};
 use std::env;
 use std::sync::{Arc, RwLock};
 
-const DEFAULT_CSV_PATH: &str = "dhcp_devices.csv";
+const DEFAULT_CSV_PATH: &str = "devices.csv";
 #[cfg(feature = "http-api")]
 const DEFAULT_API_ADDR: &str = "127.0.0.1:8080";
 const DEFAULT_OUI_DOWNLOAD_PATH: &str = "ieee-oui.txt";
@@ -195,7 +195,7 @@ fn run_network_sniffer(interface_name: &str, tracker: Arc<RwLock<DeviceTracker>>
     });
 }
 
-fn print_dhcpv4_packet(packet: &dhcpsniff::Dhcpv4Packet, is_new_or_updated: bool, total: usize) {
+fn print_dhcpv4_packet(packet: &lanwatch::Dhcpv4Packet, is_new_or_updated: bool, total: usize) {
     println!("\n[IPv4] DHCP Packet Detected");
     println!("Source: {}:{}", packet.source_ip, packet.source_port);
     println!("Dest:   {}:{}", packet.dest_ip, packet.dest_port);
@@ -216,7 +216,7 @@ fn print_dhcpv4_packet(packet: &dhcpsniff::Dhcpv4Packet, is_new_or_updated: bool
     println!("------------------------------");
 }
 
-fn print_dhcpv6_packet(packet: &dhcpsniff::Dhcpv6Packet, is_new_or_updated: bool, total: usize) {
+fn print_dhcpv6_packet(packet: &lanwatch::Dhcpv6Packet, is_new_or_updated: bool, total: usize) {
     println!("\n[IPv6] DHCPv6 Packet Detected");
     println!("Source: {}:{}", packet.source_ip, packet.source_port);
     println!("Dest:   {}:{}", packet.dest_ip, packet.dest_port);
@@ -246,7 +246,7 @@ fn print_dhcpv6_packet(packet: &dhcpsniff::Dhcpv6Packet, is_new_or_updated: bool
 }
 
 #[cfg(feature = "mdns")]
-fn print_mdns_packet(packet: &dhcpsniff::MdnsPacket, updated_count: usize, total: usize) {
+fn print_mdns_packet(packet: &lanwatch::MdnsPacket, updated_count: usize, total: usize) {
     let packet_type = if packet.is_response { "Response" } else { "Query" };
     println!("\n[mDNS] {} from {} (MAC: {})", packet_type, packet.source_ip, packet.source_mac);
 
@@ -411,10 +411,10 @@ fn parse_args(args: &[String]) -> Config {
 }
 
 fn print_usage() {
-    println!("Usage: dhcpsniff <interface_name> [OPTIONS]");
+    println!("Usage: lanwatch <interface_name> [OPTIONS]");
     println!();
     println!("Options:");
-    println!("  -o, --output <FILE>    Output CSV file path (default: dhcp_devices.csv)");
+    println!("  -o, --output <FILE>    Output CSV file path (default: devices.csv)");
     println!("  -u, --oui <FILE>       Load IEEE OUI database for vendor identification");
     #[cfg(feature = "http-api")]
     {
@@ -489,7 +489,7 @@ fn handle_download_oui(args: &[String]) {
                 Ok(count) => {
                     println!("  Entries: {} vendors", count);
                     println!();
-                    println!("Download complete! Use with: dhcpsniff <interface> -u {}", output_path);
+                    println!("Download complete! Use with: lanwatch <interface> -u {}", output_path);
                 }
                 Err(e) => {
                     eprintln!("Warning: Downloaded but failed to parse: {}", e);

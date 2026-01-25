@@ -1,14 +1,14 @@
 [package]
-name = "dhcpsniff"
+name = "lanwatch"
 version = "0.1.0"
 edition = "2024"
 authors = ["Richard Vidal-Dorsch"]
 license = "MIT"
-description = "A library and CLI tool for sniffing and parsing DHCP (v4 & v6) network traffic"
+description = "A library and CLI tool for network device discovery and tracking via DHCP, mDNS, and OUI identification"
 readme = "README.md"
-repository = "https://github.com/rvido/dhcpsniff"
-homepage = "https://github.com/rvido/dhcpsniff"
-keywords = ["dhcp", "network", "sniffer", "packet", "dhcpv6"]
+repository = "https://github.com/rvido/lanwatch"
+homepage = "https://github.com/rvido/lanwatch"
+keywords = ["network", "discovery", "dhcp", "mdns", "device-tracking"]
 categories = ["network-programming", "parsing"]
 
 [features]
