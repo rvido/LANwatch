@@ -8,17 +8,25 @@
 use dhcpsniff::start_api_server;
 #[cfg(feature = "mdns")]
 use dhcpsniff::{MdnsQuerier, MdnsRecordData, MdnsServiceRegistry, NetworkEvent, NetworkSniffer};
-use dhcpsniff::{list_interfaces, DeviceTracker, DhcpEvent, DhcpSniffer, Dhcpv6Option};
+use dhcpsniff::{list_interfaces, DeviceTracker, DhcpEvent, DhcpSniffer, Dhcpv6Option, OuiRegistry, download_ieee_oui, IEEE_OUI_URL};
 use std::env;
 use std::sync::{Arc, RwLock};
 
 const DEFAULT_CSV_PATH: &str = "dhcp_devices.csv";
 #[cfg(feature = "http-api")]
 const DEFAULT_API_ADDR: &str = "127.0.0.1:8080";
+const DEFAULT_OUI_DOWNLOAD_PATH: &str = "ieee-oui.txt";
 
 fn main() {
     // Parse command line arguments
     let args: Vec<String> = env::args().collect();
+
+    // Check for --download-oui before normal parsing
+    if args.iter().any(|a| a == "--download-oui") {
+        handle_download_oui(&args);
+        return;
+    }
+
     let config = parse_args(&args);
 
     println!("Sniffing DHCP (v4 & v6) traffic on: {}", config.interface_name);
@@ -33,6 +41,31 @@ fn main() {
         eprintln!("Error creating device tracker: {}", e);
         std::process::exit(1);
     });
+
+    // Load IEEE OUI registry for vendor identification
+    {
+        let mut oui_registry = OuiRegistry::with_defaults();
+        
+        // Try to load custom OUI file
+        if let Some(ref oui_path) = config.oui_file {
+            match oui_registry.load_from_file(oui_path) {
+                Ok(count) => println!("Loaded {} OUI entries from {}", count, oui_path),
+                Err(e) => eprintln!("Warning: Failed to load OUI file: {}", e),
+            }
+        } else {
+            // Try default location
+            let default_oui = "oui.txt";
+            if std::path::Path::new(default_oui).exists() {
+                match oui_registry.load_from_file(default_oui) {
+                    Ok(count) => println!("Loaded {} OUI entries from {}", count, default_oui),
+                    Err(e) => eprintln!("Warning: Failed to load OUI file: {}", e),
+                }
+            }
+        }
+        
+        println!("OUI database: {} vendor entries", oui_registry.len());
+        tracker.set_oui_registry(oui_registry);
+    }
 
     // Load mDNS service registry if mdns is enabled
     #[cfg(feature = "mdns")]
@@ -264,6 +297,7 @@ struct Config {
     mdns_query: bool,
     #[cfg(feature = "mdns")]
     services_file: Option<String>,
+    oui_file: Option<String>,
 }
 
 fn parse_args(args: &[String]) -> Config {
@@ -277,6 +311,7 @@ fn parse_args(args: &[String]) -> Config {
     let mut mdns_query = false;
     #[cfg(feature = "mdns")]
     let mut services_file: Option<String> = None;
+    let mut oui_file: Option<String> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -326,6 +361,15 @@ fn parse_args(args: &[String]) -> Config {
                     std::process::exit(1);
                 }
             }
+            "-u" | "--oui" => {
+                if i + 1 < args.len() {
+                    oui_file = Some(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    eprintln!("Error: --oui requires a file path");
+                    std::process::exit(1);
+                }
+            }
             "-h" | "--help" => {
                 print_usage();
                 std::process::exit(0);
@@ -362,6 +406,7 @@ fn parse_args(args: &[String]) -> Config {
         mdns_query,
         #[cfg(feature = "mdns")]
         services_file,
+        oui_file,
     }
 }
 
@@ -370,6 +415,7 @@ fn print_usage() {
     println!();
     println!("Options:");
     println!("  -o, --output <FILE>    Output CSV file path (default: dhcp_devices.csv)");
+    println!("  -u, --oui <FILE>       Load IEEE OUI database for vendor identification");
     #[cfg(feature = "http-api")]
     {
         println!("  -a, --api <ADDR:PORT>  Start HTTP API server (e.g., 127.0.0.1:8080)");
@@ -383,7 +429,16 @@ fn print_usage() {
     }
     println!("  -h, --help             Show this help message");
     println!();
-    println!("CSV Format: last_seen,mac_address,ip_address,hostname,first_seen,services,vendor");
+    println!("OUI Database Commands:");
+    println!("  --download-oui [FILE]  Download latest IEEE OUI database");
+    println!("                         Default output: {}", DEFAULT_OUI_DOWNLOAD_PATH);
+    println!();
+    println!("CSV Format: first_seen,last_seen,mac_address,ip_address,ipv6_address,hostname,device_type,vendor,services");
+    println!();
+    println!("OUI Database:");
+    println!("  Uses IEEE OUI database (40,000+ vendors) for MAC address identification.");
+    println!("  Use -u/--oui to load additional custom entries that override the built-in database.");
+    println!("  Download latest from: {}", IEEE_OUI_URL);
     #[cfg(feature = "http-api")]
     {
         println!();
@@ -398,5 +453,56 @@ fn print_usage() {
         println!("mDNS Discovery (when --mdns is enabled):");
         println!("  Passively captures mDNS traffic to identify device hostnames and services.");
         println!("  Use --mdns-query to also send active discovery queries.");
+    }
+}
+
+/// Handle --download-oui command
+fn handle_download_oui(args: &[String]) {
+    // Find the output path (argument after --download-oui, if any)
+    let mut output_path = DEFAULT_OUI_DOWNLOAD_PATH;
+    
+    for i in 0..args.len() {
+        if args[i] == "--download-oui" {
+            if i + 1 < args.len() && !args[i + 1].starts_with('-') {
+                output_path = &args[i + 1];
+            }
+            break;
+        }
+    }
+
+    println!("Downloading IEEE OUI database...");
+    println!("  Source: {}", IEEE_OUI_URL);
+    println!("  Output: {}", output_path);
+
+    match download_ieee_oui(output_path, None) {
+        Ok(()) => {
+            // Get file size
+            if let Ok(metadata) = std::fs::metadata(output_path) {
+                let size_mb = metadata.len() as f64 / 1024.0 / 1024.0;
+                println!("  Downloaded: {:.2} MB", size_mb);
+            }
+
+            // Count entries in the downloaded file
+            println!("  Parsing...");
+            let mut registry = OuiRegistry::new();
+            match registry.load_from_ieee_file(output_path) {
+                Ok(count) => {
+                    println!("  Entries: {} vendors", count);
+                    println!();
+                    println!("Download complete! Use with: dhcpsniff <interface> -u {}", output_path);
+                }
+                Err(e) => {
+                    eprintln!("Warning: Downloaded but failed to parse: {}", e);
+                    eprintln!("The file may be corrupted or in an unexpected format.");
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Error: Failed to download IEEE OUI database");
+            eprintln!("  {}", e);
+            eprintln!();
+            eprintln!("You can manually download from: {}", IEEE_OUI_URL);
+            std::process::exit(1);
+        }
     }
 }

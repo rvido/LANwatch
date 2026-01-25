@@ -18,6 +18,7 @@ mdns = []
 
 [dependencies]
 pnet = "0.35"
+oui-data = "0.2"
 serde = { version = "1.0", features = ["derive"], optional = true }
 serde_json = { version = "1.0", optional = true }
 tiny_http = { version = "0.12", optional = true }

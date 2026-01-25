@@ -7,6 +7,7 @@ A Rust library and CLI tool for sniffing and parsing DHCP (v4 & v6) network traf
 - **DHCPv4 Support**: Capture and parse DHCP DISCOVER, OFFER, REQUEST, ACK, NAK, RELEASE, and INFORM messages
 - **DHCPv6 Support**: Capture and parse SOLICIT, ADVERTISE, REQUEST, CONFIRM, RENEW, REBIND, REPLY, RELEASE, DECLINE, RECONFIGURE, and INFO-REQUEST messages
 - **mDNS Support** (optional): Passive and active mDNS discovery for enhanced device identification
+- **IEEE OUI Database**: Built-in vendor identification from MAC addresses using IEEE OUI (Organizationally Unique Identifier) prefixes
 - **Device Tracking**: Automatically track detected devices and save to CSV file
 - **CSV Export**: Export device information with timestamps, MAC addresses, IP addresses, and hostnames
 - **HTTP API** (optional): Built-in REST API server to query devices as JSON
@@ -58,6 +59,10 @@ sudo cargo run -- eth0       # Linux
 sudo cargo run -- en0 -o /path/to/devices.csv
 sudo cargo run -- en0 --output devices.csv
 
+# Load additional OUI database entries
+sudo cargo run -- en0 --oui /path/to/oui.txt
+sudo cargo run -- en0 -u ieee-oui.txt
+
 # Start with HTTP API server
 sudo cargo run -- en0 --api 0.0.0.0:8080
 
@@ -71,7 +76,7 @@ sudo cargo run --features mdns -- en0 --mdns
 sudo cargo run --features mdns -- en0 --mdns-query
 
 # Combine all options
-sudo cargo run --all-features -- en0 -o devices.csv --api 0.0.0.0:8080 --mdns-query
+sudo cargo run --all-features -- en0 -o devices.csv --api 0.0.0.0:8080 --mdns-query -u oui.txt
 
 # Show help
 cargo run -- --help
@@ -126,6 +131,62 @@ The tool includes built-in detection for:
 
 Loading a services file allows for more comprehensive identification. Device types are inferred from
 service descriptions (e.g., "_googlecast._tcp" → "Chromecast").
+
+### IEEE OUI Database
+
+The tool uses the `oui-data` crate which provides the complete IEEE OUI (Organizationally Unique Identifier) 
+database with **40,000+ vendor entries**. This allows automatic identification of device manufacturers based 
+on the first 3 bytes of their MAC address.
+
+**Benefits of the oui-data crate:**
+- Complete IEEE OUI registry (40,000+ entries)
+- Regularly updated as new vendors are registered
+- No manual maintenance of vendor lists required
+
+**Built-in coverage includes:**
+- All major manufacturers: Apple, Google, Samsung, Microsoft, Sony, Intel, etc.
+- Network equipment: Cisco, Netgear, TP-Link, Ubiquiti, etc.
+- IoT/Smart home: Philips, Sonos, Ring, Nest, etc.
+- Industrial and enterprise vendors
+- Consumer electronics brands
+- And thousands more...
+
+**Loading additional OUI entries:**
+
+You can load custom OUI entries to supplement or override the built-in database:
+
+```bash
+# Load additional OUI entries
+sudo cargo run -- en0 --oui custom-oui.txt
+
+# Default locations checked automatically:
+# - ./oui.txt (current directory)
+```
+
+**Supported OUI file formats:**
+
+```
+# IEEE OUI format (from IEEE registry downloads)
+00-1A-2B   (hex)    Vendor Name, Inc.
+
+# Simple colon format
+00:1A:2B    Vendor Name
+
+# Simple dash format  
+00-1A-2B    Vendor Name
+
+# Compact format (no separators)
+001A2B Vendor Name
+
+# Comments start with #
+# This is a comment line
+```
+
+The IEEE maintains the official OUI registry at:
+https://standards-oui.ieee.org/oui/oui.txt
+
+**Vendor priority:** mDNS-detected vendors take precedence over OUI lookups, as mDNS provides
+more specific identification (e.g., "Google Chromecast" vs just "Google" from OUI).
 
 ### HTTP API
 
@@ -265,6 +326,7 @@ cargo run --example parse_payload
 - `MdnsQuerier` - Active mDNS query sender (requires `mdns` feature)
 - `DeviceTracker` - Track detected devices and save to CSV
 - `DeviceInfo` - Information about a detected device
+- `OuiRegistry` - IEEE OUI database for MAC-to-vendor lookups
 - `DhcpError` - Error types for sniffer operations
 - `ApiServer` - HTTP API server for querying devices
 
@@ -350,6 +412,7 @@ cargo test
 ## Dependencies
 
 - [pnet](https://crates.io/crates/pnet) - Low-level networking library for packet capture and parsing
+- [oui-data](https://crates.io/crates/oui-data) - IEEE OUI database for MAC address vendor identification (40,000+ entries)
 - [serde](https://crates.io/crates/serde) - Serialization framework for JSON support (optional, `http-api` feature)
 - [serde_json](https://crates.io/crates/serde_json) - JSON serialization/deserialization (optional, `http-api` feature)
 - [tiny_http](https://crates.io/crates/tiny_http) - Lightweight HTTP server for the REST API (optional, `http-api` feature)

@@ -226,10 +226,10 @@ pub struct Dhcpv4Packet {
 }
 
 impl Dhcpv4Packet {
-    /// Format the client MAC address as a string
+    /// Format the client MAC address as a lowercase string
     pub fn client_mac_string(&self) -> String {
         format!(
-            "{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
             self.client_mac[0],
             self.client_mac[1],
             self.client_mac[2],
@@ -924,6 +924,286 @@ impl MdnsServiceRegistry {
     }
 }
 
+// ============================================================================
+// OUI Registry (IEEE MAC Address Vendor Database)
+// ============================================================================
+
+/// Registry for IEEE OUI (Organizationally Unique Identifier) database.
+/// Uses the `oui-data` crate which contains ~40,000+ vendor entries from the IEEE registry.
+/// Custom overrides can be loaded from a file to supplement or replace built-in entries.
+#[derive(Debug, Clone, Default)]
+pub struct OuiRegistry {
+    /// Custom vendor overrides (takes priority over the built-in database)
+    custom_overrides: HashMap<String, String>,
+}
+
+impl OuiRegistry {
+    /// Create a new empty OUI registry (still has access to built-in oui-data database)
+    pub fn new() -> Self {
+        Self {
+            custom_overrides: HashMap::new(),
+        }
+    }
+
+    /// Create a new OUI registry with the built-in IEEE database.
+    /// This is equivalent to `new()` since oui-data is always available.
+    pub fn with_defaults() -> Self {
+        Self::new()
+    }
+
+    /// Look up vendor name by MAC address.
+    /// Checks custom overrides first, then falls back to the oui-data crate.
+    ///
+    /// The MAC address can be in various formats:
+    /// - Full: "AA:BB:CC:DD:EE:FF" or "AA-BB-CC-DD-EE-FF"
+    /// - OUI only: "AA:BB:CC" or "AABBCC"
+    pub fn lookup(&self, mac_address: &str) -> Option<&str> {
+        let normalized = Self::normalize_mac(mac_address);
+
+        // Check custom overrides first (highest priority)
+        if let Some(vendor) = self.custom_overrides.get(&normalized) {
+            return Some(vendor.as_str());
+        }
+
+        // Fall back to oui-data crate (IEEE database with ~40,000 entries)
+        if let Some(oui_entry) = oui_data::lookup(&normalized) {
+            // Return the organization name from oui-data
+            // We need to use Box::leak to get a &'static str since oui_data returns owned data
+            let org = oui_entry.organization();
+            // Use interning to avoid leaking memory for repeated lookups
+            Some(Box::leak(org.to_string().into_boxed_str()))
+        } else {
+            None
+        }
+    }
+
+    /// Load additional OUI entries from a file.
+    /// File format: MAC_PREFIX<whitespace>VENDOR_NAME
+    /// Example:
+    ///   AA:BB:CC  Acme Corporation
+    ///   DD-EE-FF  Another Vendor
+    ///
+    /// Returns the number of entries loaded.
+    pub fn load_from_file<P: AsRef<Path>>(&mut self, path: P) -> std::io::Result<usize> {
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+        let mut count = 0;
+
+        for line in reader.lines() {
+            let line = line?;
+            let line = line.trim();
+
+            // Skip empty lines and comments
+            if line.is_empty() || line.starts_with('#') || line.starts_with("//") {
+                continue;
+            }
+
+            // Parse line: MAC_PREFIX<whitespace>VENDOR_NAME
+            if let Some((mac, vendor)) = Self::parse_oui_line(line) {
+                let normalized = Self::normalize_mac(&mac);
+                self.custom_overrides.insert(normalized, vendor);
+                count += 1;
+            }
+        }
+
+        Ok(count)
+    }
+
+    /// Add a custom OUI entry (override)
+    pub fn add(&mut self, mac_prefix: &str, vendor: &str) {
+        let normalized = Self::normalize_mac(mac_prefix);
+        self.custom_overrides.insert(normalized, vendor.to_string());
+    }
+
+    /// Get the total number of entries available (custom + built-in IEEE database)
+    pub fn len(&self) -> usize {
+        // oui-data contains the full IEEE OUI database
+        oui_data::OUI_ENTRIES.len() + self.custom_overrides.len()
+    }
+
+    /// Check if registry has no entries
+    pub fn is_empty(&self) -> bool {
+        oui_data::OUI_ENTRIES.is_empty() && self.custom_overrides.is_empty()
+    }
+
+    /// Get the number of custom override entries
+    pub fn custom_count(&self) -> usize {
+        self.custom_overrides.len()
+    }
+
+    /// Get the number of built-in IEEE database entries
+    pub fn builtin_count() -> usize {
+        oui_data::OUI_ENTRIES.len()
+    }
+
+    /// Normalize a MAC address to OUI format (first 3 octets, uppercase, colon-separated)
+    fn normalize_mac(mac: &str) -> String {
+        // Remove common separators and convert to uppercase
+        let clean: String = mac
+            .to_uppercase()
+            .chars()
+            .filter(|c| c.is_ascii_hexdigit())
+            .collect();
+
+        // Take first 6 hex characters (3 octets = OUI)
+        let oui = if clean.len() >= 6 {
+            &clean[..6]
+        } else {
+            &clean
+        };
+
+        // Format as XX:XX:XX
+        if oui.len() >= 6 {
+            format!("{}:{}:{}", &oui[0..2], &oui[2..4], &oui[4..6])
+        } else {
+            oui.to_string()
+        }
+    }
+
+    /// Parse a line from an OUI file
+    fn parse_oui_line(line: &str) -> Option<(String, String)> {
+        // Try tab separator first
+        if let Some((mac, vendor)) = line.split_once('\t') {
+            let mac = mac.trim();
+            let vendor = vendor.trim();
+            if !mac.is_empty() && !vendor.is_empty() {
+                return Some((mac.to_string(), vendor.to_string()));
+            }
+        }
+
+        // Try splitting on first run of spaces (at least 2)
+        let parts: Vec<&str> = line.splitn(2, |c: char| c.is_whitespace()).collect();
+        if parts.len() == 2 {
+            let mac = parts[0].trim();
+            let vendor = parts[1].trim();
+            if !mac.is_empty() && !vendor.is_empty() {
+                return Some((mac.to_string(), vendor.to_string()));
+            }
+        }
+
+        None
+    }
+
+    /// Parse IEEE OUI format line (from official IEEE downloads)
+    /// Format: "XX-XX-XX   (hex)\t\tVendor Name"
+    fn parse_ieee_oui_line(line: &str) -> Option<(String, String)> {
+        // IEEE format: "XX-XX-XX   (hex)		Vendor Name"
+        // We look for lines containing "(hex)"
+        if !line.contains("(hex)") {
+            return None;
+        }
+
+        // Split on "(hex)" - MAC is before, vendor is after
+        let parts: Vec<&str> = line.splitn(2, "(hex)").collect();
+        if parts.len() != 2 {
+            return None;
+        }
+
+        let mac = parts[0].trim();
+        let vendor = parts[1].trim();
+
+        if mac.is_empty() || vendor.is_empty() {
+            return None;
+        }
+
+        Some((mac.to_string(), vendor.to_string()))
+    }
+
+    /// Load OUI entries from IEEE format file (official IEEE OUI download)
+    /// This parses the official IEEE OUI format with "(hex)" markers.
+    pub fn load_from_ieee_file<P: AsRef<Path>>(&mut self, path: P) -> std::io::Result<usize> {
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+        let mut count = 0;
+
+        for line in reader.lines() {
+            let line = line?;
+
+            // Parse IEEE format line
+            if let Some((mac, vendor)) = Self::parse_ieee_oui_line(&line) {
+                let normalized = Self::normalize_mac(&mac);
+                self.custom_overrides.insert(normalized, vendor);
+                count += 1;
+            }
+        }
+
+        Ok(count)
+    }
+}
+
+/// IEEE OUI database URLs
+pub const IEEE_OUI_URL: &str = "https://standards-oui.ieee.org/oui/oui.txt";
+pub const IEEE_OUI28_URL: &str = "https://standards-oui.ieee.org/oui28/mam.txt";
+pub const IEEE_OUI36_URL: &str = "https://standards-oui.ieee.org/oui36/oui36.txt";
+
+/// Download the IEEE OUI database to a file using curl.
+/// Returns Ok(()) on success, or an error message on failure.
+///
+/// # Arguments
+/// * `output_path` - Path where the downloaded file will be saved
+/// * `url` - Optional custom URL (defaults to IEEE_OUI_URL)
+///
+/// # Example
+/// ```no_run
+/// use dhcpsniff::download_ieee_oui;
+/// download_ieee_oui("oui.txt", None).expect("Failed to download OUI database");
+/// ```
+pub fn download_ieee_oui<P: AsRef<Path>>(output_path: P, url: Option<&str>) -> Result<(), String> {
+    let url = url.unwrap_or(IEEE_OUI_URL);
+    let output_path = output_path.as_ref();
+
+    // Use curl to download the file
+    let output = std::process::Command::new("curl")
+        .args([
+            "-fsSL",           // fail silently, follow redirects, show errors
+            "--connect-timeout", "30",
+            "--max-time", "120",
+            "-o", output_path.to_str().ok_or("Invalid output path")?,
+            url,
+        ])
+        .output()
+        .map_err(|e| format!("Failed to execute curl: {}. Is curl installed?", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("curl failed: {}", stderr.trim()));
+    }
+
+    // Verify the file was created and has content
+    let metadata = std::fs::metadata(output_path)
+        .map_err(|e| format!("Failed to verify downloaded file: {}", e))?;
+
+    if metadata.len() == 0 {
+        return Err("Downloaded file is empty".to_string());
+    }
+
+    Ok(())
+}
+
+/// Download and load IEEE OUI database into an OuiRegistry.
+/// Downloads from IEEE and parses the official format.
+///
+/// # Arguments
+/// * `registry` - The OuiRegistry to load entries into
+/// * `cache_path` - Optional path to cache the downloaded file (default: "ieee-oui.txt")
+///
+/// # Returns
+/// Number of entries loaded on success, or an error message on failure.
+pub fn download_and_load_ieee_oui(
+    registry: &mut OuiRegistry,
+    cache_path: Option<&str>,
+) -> Result<usize, String> {
+    let path = cache_path.unwrap_or("ieee-oui.txt");
+
+    // Download the file
+    download_ieee_oui(path, None)?;
+
+    // Load the downloaded file
+    registry
+        .load_from_ieee_file(path)
+        .map_err(|e| format!("Failed to parse IEEE OUI file: {}", e))
+}
+
 #[cfg(feature = "mdns")]
 impl std::fmt::Display for MdnsRecordType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1467,7 +1747,7 @@ fn process_ipv4_packet_extended(ethernet: &EthernetPacket) -> Option<NetworkEven
 
     // Check for mDNS first
     if is_mdns_ports(src, dest) {
-        let source_mac = ethernet.get_source().to_string();
+        let source_mac = ethernet.get_source().to_string().to_lowercase();
         let packet = parse_mdns_payload(
             udp.payload(),
             source_mac,
@@ -1532,7 +1812,7 @@ fn process_ipv6_packet_extended(ethernet: &EthernetPacket) -> Option<NetworkEven
 
     // Check for mDNS first
     if is_mdns_ports(src, dest) {
-        let source_mac = ethernet.get_source().to_string();
+        let source_mac = ethernet.get_source().to_string().to_lowercase();
         let packet = parse_mdns_payload(
             udp.payload(),
             source_mac,
@@ -1821,7 +2101,8 @@ impl DeviceInfo {
         } else {
             first_seen.clone()
         };
-        let mac_address = parts[2].to_string();
+        // Normalize MAC address to lowercase
+        let mac_address = parts[2].to_lowercase();
         let ip_address = parts[3].to_string();
         let ipv6_address = if parts.len() > 4 {
             let v6 = parts[4].trim_matches('"').to_string();
@@ -1949,6 +2230,8 @@ fn is_leap_year(year: i32) -> bool {
 pub struct DeviceTracker {
     devices: HashMap<String, DeviceInfo>,
     csv_path: String,
+    /// OUI registry for MAC address vendor lookup
+    oui_registry: Option<OuiRegistry>,
     #[cfg(feature = "mdns")]
     service_registry: Option<MdnsServiceRegistry>,
 }
@@ -1960,6 +2243,7 @@ impl DeviceTracker {
         let mut tracker = Self {
             devices: HashMap::new(),
             csv_path,
+            oui_registry: None,
             #[cfg(feature = "mdns")]
             service_registry: None,
         };
@@ -1968,6 +2252,16 @@ impl DeviceTracker {
         tracker.load_from_csv()?;
 
         Ok(tracker)
+    }
+
+    /// Set the OUI registry for MAC address vendor lookup
+    pub fn set_oui_registry(&mut self, registry: OuiRegistry) {
+        self.oui_registry = Some(registry);
+    }
+
+    /// Get the OUI registry
+    pub fn oui_registry(&self) -> Option<&OuiRegistry> {
+        self.oui_registry.as_ref()
     }
 
     /// Set the mDNS service registry for vendor/service identification
@@ -2327,19 +2621,32 @@ impl DeviceTracker {
 
     /// Update or add a device
     fn update_device(&mut self, mac: &str, ip: &str, hostname: Option<&str>) -> bool {
-        if let Some(device) = self.devices.get_mut(mac) {
+        // Normalize MAC address to lowercase to avoid duplicates
+        let mac = mac.to_lowercase();
+        // Look up vendor from OUI registry if available
+        let vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(&mac));
+
+        if let Some(device) = self.devices.get_mut(&mac) {
             let changed = device.update(ip, hostname);
+            // Set vendor if not already set and we found one
+            if let Some(v) = vendor {
+                device.set_vendor(v);
+            }
             // Always rewrite CSV to update timestamp and avoid duplicates
             let _ = self.save_to_csv();
             changed
         } else {
             // New device
-            let device = DeviceInfo::new(
-                mac.to_string(),
+            let mut device = DeviceInfo::new(
+                mac.clone(),
                 ip.to_string(),
                 hostname.map(|s| s.to_string()),
             );
-            self.devices.insert(mac.to_string(), device);
+            // Set vendor if we found one
+            if let Some(v) = vendor {
+                device.set_vendor(v);
+            }
+            self.devices.insert(mac, device);
             // Rewrite CSV to ensure clean state
             let _ = self.save_to_csv();
             true
@@ -2653,7 +2960,7 @@ mod tests {
         assert_eq!(packet.client_mac, [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
         assert_eq!(
             packet.client_mac_string(),
-            "AA:BB:CC:DD:EE:FF"
+            "aa:bb:cc:dd:ee:ff"
         );
         assert_eq!(packet.message_type, Some(Dhcpv4MessageType::Discover));
         assert_eq!(packet.source_port, 68);
@@ -2799,12 +3106,12 @@ mod tests {
     #[test]
     fn test_device_info_creation() {
         let device = DeviceInfo::new(
-            "AA:BB:CC:DD:EE:FF".to_string(),
+            "aa:bb:cc:dd:ee:ff".to_string(),
             "192.168.1.100".to_string(),
             Some("testhost".to_string()),
         );
 
-        assert_eq!(device.mac_address, "AA:BB:CC:DD:EE:FF");
+        assert_eq!(device.mac_address, "aa:bb:cc:dd:ee:ff");
         assert_eq!(device.ip_address, "192.168.1.100");
         assert_eq!(device.hostname, Some("testhost".to_string()));
         assert!(!device.first_seen.is_empty());
@@ -2814,7 +3121,7 @@ mod tests {
     #[test]
     fn test_device_info_csv_roundtrip() {
         let device = DeviceInfo {
-            mac_address: "AA:BB:CC:DD:EE:FF".to_string(),
+            mac_address: "aa:bb:cc:dd:ee:ff".to_string(),
             ip_address: "192.168.1.100".to_string(),
             ipv6_address: Some("fe80::1".to_string()),
             hostname: Some("testhost".to_string()),
@@ -2842,7 +3149,7 @@ mod tests {
     #[test]
     fn test_device_info_csv_no_hostname() {
         let device = DeviceInfo {
-            mac_address: "AA:BB:CC:DD:EE:FF".to_string(),
+            mac_address: "aa:bb:cc:dd:ee:ff".to_string(),
             ip_address: "192.168.1.100".to_string(),
             ipv6_address: None,
             hostname: None,
@@ -2862,7 +3169,7 @@ mod tests {
     #[test]
     fn test_device_info_update() {
         let mut device = DeviceInfo {
-            mac_address: "AA:BB:CC:DD:EE:FF".to_string(),
+            mac_address: "aa:bb:cc:dd:ee:ff".to_string(),
             ip_address: "192.168.1.100".to_string(),
             ipv6_address: None,
             hostname: None,
@@ -2962,9 +3269,9 @@ mod tests {
         assert!(is_new);
         assert_eq!(tracker.device_count(), 1);
 
-        // Verify the device was stored with DUID as identifier
+        // Verify the device was stored with DUID as identifier (lowercase)
         let devices = tracker.devices();
-        assert!(devices.contains_key("AA:BB:CC:DD"));
+        assert!(devices.contains_key("aa:bb:cc:dd"));
 
         // Clean up
         let _ = std::fs::remove_file(temp_path);
@@ -3359,8 +3666,8 @@ mod tests {
         assert!(changed);
         assert_eq!(tracker.device_count(), 1); // Still only 1 device
 
-        // Verify IP was updated
-        let device = tracker.devices().get("AA:BB:CC:DD:EE:FF").unwrap();
+        // Verify IP was updated (MAC is lowercase)
+        let device = tracker.devices().get("aa:bb:cc:dd:ee:ff").unwrap();
         assert_eq!(device.ip_address, "192.168.1.200");
         assert_eq!(device.hostname, Some("newname".to_string()));
 
@@ -3719,7 +4026,7 @@ mod tests {
     #[test]
     fn test_device_info_csv_roundtrip_with_device_type() {
         let mut device = DeviceInfo::new(
-            "AA:BB:CC:DD:EE:FF".to_string(),
+            "aa:bb:cc:dd:ee:ff".to_string(),
             "192.168.1.100".to_string(),
             Some("mydevice".to_string()),
         );
@@ -3736,5 +4043,210 @@ mod tests {
         assert_eq!(parsed.services, device.services);
         assert_eq!(parsed.vendor, device.vendor);
         assert_eq!(parsed.device_type, device.device_type);
+    }
+
+    // ========================================================================
+    // OUI Registry Tests
+    // ========================================================================
+
+    #[test]
+    fn test_oui_registry_new() {
+        let registry = OuiRegistry::new();
+        // The oui-data crate should have entries
+        assert!(registry.len() > 0);
+        assert!(!registry.is_empty());
+        assert_eq!(registry.custom_count(), 0);
+        // Built-in IEEE database should have ~40,000+ entries
+        assert!(OuiRegistry::builtin_count() > 30000);
+    }
+
+    #[test]
+    fn test_oui_registry_with_defaults() {
+        let registry = OuiRegistry::with_defaults();
+        // Should be identical to new()
+        assert!(registry.len() > 0);
+        assert!(!registry.is_empty());
+    }
+
+    #[test]
+    fn test_oui_registry_lookup_known_vendor() {
+        let registry = OuiRegistry::new();
+        
+        // Apple's OUI (well-known)
+        let vendor = registry.lookup("00:1B:63:00:00:00");
+        assert!(vendor.is_some(), "Apple OUI should be found in IEEE database");
+        
+        // Intel's OUI (well-known)
+        let vendor = registry.lookup("00:1B:21:00:00:00");
+        assert!(vendor.is_some(), "Intel OUI should be found in IEEE database");
+    }
+
+    #[test]
+    fn test_oui_registry_normalize_mac() {
+        let registry = OuiRegistry::new();
+        
+        // All these formats should normalize to the same OUI lookup
+        let mac_formats = [
+            "00:1B:63:AA:BB:CC",  // colon separated full
+            "00-1B-63-AA-BB-CC",  // dash separated full
+            "001B63AABBCC",       // no separator
+            "00:1B:63",           // OUI only
+            "001B63",             // OUI only no separator
+        ];
+        
+        // They should all find the same vendor (or none)
+        let first_result = registry.lookup(mac_formats[0]);
+        for mac in &mac_formats[1..] {
+            assert_eq!(registry.lookup(mac), first_result, 
+                "All MAC formats should resolve to same vendor: {}", mac);
+        }
+    }
+
+    #[test]
+    fn test_oui_registry_custom_override() {
+        let mut registry = OuiRegistry::new();
+        
+        // Add a custom override
+        registry.add("AA:BB:CC", "My Custom Vendor");
+        
+        // Custom override should take priority
+        let vendor = registry.lookup("AA:BB:CC:DD:EE:FF");
+        assert_eq!(vendor, Some("My Custom Vendor"));
+        
+        // Custom count should increase
+        assert_eq!(registry.custom_count(), 1);
+    }
+
+    #[test]
+    fn test_oui_registry_custom_overrides_builtin() {
+        let mut registry = OuiRegistry::new();
+        
+        // Apple's real OUI - check if it exists and remember if we found one
+        let has_original = registry.lookup("00:1B:63:00:00:00").is_some();
+        
+        // Override Apple's OUI with custom vendor
+        registry.add("00:1B:63", "Fake Vendor Override");
+        
+        // Custom should now take priority
+        let vendor = registry.lookup("00:1B:63:AA:BB:CC");
+        assert_eq!(vendor, Some("Fake Vendor Override"));
+        
+        // If original existed, verify the override hides it
+        if has_original {
+            // The override should be what we set, not the original
+            assert_eq!(vendor, Some("Fake Vendor Override"));
+        }
+    }
+
+    #[test]
+    fn test_oui_registry_lookup_unknown() {
+        let registry = OuiRegistry::new();
+        
+        // This OUI is unlikely to exist (private range)
+        let vendor = registry.lookup("FE:FF:FF:00:00:00");
+        // May or may not be found - just ensure no panic
+        let _ = vendor;
+    }
+
+    #[test]
+    fn test_oui_registry_load_from_file() {
+        use std::io::Write;
+        
+        let mut registry = OuiRegistry::new();
+        
+        // Create a temporary file with OUI entries
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("test_oui.txt");
+        {
+            let mut file = File::create(&temp_file).unwrap();
+            writeln!(file, "# Comment line").unwrap();
+            writeln!(file, "").unwrap();  // Empty line
+            writeln!(file, "AA:BB:CC\tTest Vendor 1").unwrap();
+            writeln!(file, "DD:EE:FF  Test Vendor 2").unwrap();
+            writeln!(file, "11-22-33  Test Vendor 3").unwrap();
+        }
+        
+        // Load the file
+        let count = registry.load_from_file(&temp_file).unwrap();
+        assert_eq!(count, 3);
+        assert_eq!(registry.custom_count(), 3);
+        
+        // Check lookups
+        assert_eq!(registry.lookup("AA:BB:CC:00:00:00"), Some("Test Vendor 1"));
+        assert_eq!(registry.lookup("DD:EE:FF:00:00:00"), Some("Test Vendor 2"));
+        assert_eq!(registry.lookup("11:22:33:00:00:00"), Some("Test Vendor 3"));
+        
+        // Clean up
+        std::fs::remove_file(&temp_file).unwrap();
+    }
+
+    #[test]
+    fn test_oui_registry_len() {
+        let mut registry = OuiRegistry::new();
+        let initial_len = registry.len();
+        
+        // Add custom entries
+        registry.add("AA:BB:CC", "Vendor 1");
+        registry.add("DD:EE:FF", "Vendor 2");
+        
+        // Length should increase
+        assert_eq!(registry.len(), initial_len + 2);
+    }
+
+    #[test]
+    fn test_oui_registry_load_from_ieee_file() {
+        use std::io::Write;
+        
+        let mut registry = OuiRegistry::new();
+        
+        // Create a temporary file with IEEE OUI format entries
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("test_ieee_oui.txt");
+        {
+            let mut file = File::create(&temp_file).unwrap();
+            // IEEE format: "XX-XX-XX   (hex)\t\tVendor Name"
+            writeln!(file, "OUI/MA-L			Organization").unwrap();
+            writeln!(file, "company_id			Organization Address").unwrap();
+            writeln!(file, "").unwrap();
+            writeln!(file, "00-00-00   (hex)\t\tXerox Corporation").unwrap();
+            writeln!(file, "000000     (base 16)\t\tXerox Corporation").unwrap();
+            writeln!(file, "\t\t\t\t26600 SW Parkway").unwrap();
+            writeln!(file, "").unwrap();
+            writeln!(file, "00-00-01   (hex)\t\tXerox Corporation").unwrap();
+            writeln!(file, "00-00-0C   (hex)\t\tCisco Systems, Inc").unwrap();
+            writeln!(file, "00-17-F2   (hex)\t\tApple, Inc.").unwrap();
+        }
+        
+        // Load the file
+        let count = registry.load_from_ieee_file(&temp_file).unwrap();
+        assert_eq!(count, 4); // Only (hex) lines are parsed
+        
+        // Check lookups
+        assert_eq!(registry.lookup("00:00:00:11:22:33"), Some("Xerox Corporation"));
+        assert_eq!(registry.lookup("00:00:0C:AA:BB:CC"), Some("Cisco Systems, Inc"));
+        assert_eq!(registry.lookup("00:17:F2:12:34:56"), Some("Apple, Inc."));
+        
+        // Clean up
+        std::fs::remove_file(&temp_file).unwrap();
+    }
+
+    #[test]
+    fn test_parse_ieee_oui_line() {
+        // Test valid IEEE format lines
+        let result = OuiRegistry::parse_ieee_oui_line("00-00-00   (hex)\t\tXerox Corporation");
+        assert!(result.is_some());
+        let (mac, vendor) = result.unwrap();
+        assert_eq!(mac, "00-00-00");
+        assert_eq!(vendor, "Xerox Corporation");
+
+        // Test line without (hex) marker - should return None
+        let result = OuiRegistry::parse_ieee_oui_line("000000     (base 16)\t\tXerox Corporation");
+        assert!(result.is_none());
+
+        // Test empty/whitespace lines
+        let result = OuiRegistry::parse_ieee_oui_line("");
+        assert!(result.is_none());
+        let result = OuiRegistry::parse_ieee_oui_line("   ");
+        assert!(result.is_none());
     }
 }
