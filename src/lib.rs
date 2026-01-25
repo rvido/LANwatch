@@ -2430,9 +2430,15 @@ impl DeviceTracker {
             }
         }
 
-        // Determine vendor and device type from services (before borrowing device)
-        let vendor = self.detect_vendor_from_services(&services);
-        let device_type = self.detect_device_type_from_services(&services);
+        // Get the first hostname for detection purposes
+        let first_hostname = hostname_to_ipv4.keys().chain(hostname_to_ipv6.keys()).next().cloned();
+
+        // Determine vendor and device type from services and hostname (before borrowing device)
+        // Hostname-based detection takes priority for certain patterns
+        let vendor = Self::detect_vendor_from_hostname(first_hostname.as_deref())
+            .or_else(|| self.detect_vendor_from_services(&services));
+        let device_type = Self::detect_device_type_from_hostname(first_hostname.as_deref())
+            .or_else(|| self.detect_device_type_from_services(&services));
 
         // Get the first IPv6 address if available
         let ipv6_addr = hostname_to_ipv6.values().next().cloned();
@@ -2503,13 +2509,127 @@ impl DeviceTracker {
         updated
     }
 
+    /// Detect vendor from hostname patterns
+    #[cfg(feature = "mdns")]
+    fn detect_vendor_from_hostname(hostname: Option<&str>) -> Option<String> {
+        let hostname = hostname?.to_lowercase();
+        
+        // Google/Nest devices often use WICED platform
+        if hostname.starts_with("wiced-hap") || hostname.contains("nest") {
+            return Some("Google".to_string());
+        }
+        
+        // Google Pixel phones
+        if hostname.contains("pixel") {
+            return Some("Google".to_string());
+        }
+        
+        // Apple devices
+        if hostname.contains("iphone") || hostname.contains("ipad") || hostname.contains("macbook") 
+            || hostname.contains("imac") || hostname.contains("mac-mini") || hostname.contains("apple") {
+            return Some("Apple".to_string());
+        }
+        
+        // Samsung devices
+        if hostname.contains("samsung") || hostname.contains("galaxy") {
+            return Some("Samsung".to_string());
+        }
+        
+        // Android devices
+        if hostname.starts_with("android") || hostname.starts_with("android_") {
+            return Some("Google".to_string());
+        }
+        
+        // HP printers (NPI prefix)
+        if hostname.starts_with("npi") {
+            return Some("HP".to_string());
+        }
+        
+        None
+    }
+
+    /// Detect device type from hostname patterns
+    #[cfg(feature = "mdns")]
+    fn detect_device_type_from_hostname(hostname: Option<&str>) -> Option<String> {
+        let hostname = hostname?.to_lowercase();
+        
+        // Google Pixel phones - check before other patterns
+        if hostname.contains("pixel") {
+            return Some("Pixel Phone".to_string());
+        }
+        
+        // Google/Nest thermostats use WICED-hap prefix
+        if hostname.starts_with("wiced-hap") {
+            return Some("Thermostat".to_string());
+        }
+        
+        // Nest devices
+        if hostname.contains("nest") {
+            if hostname.contains("thermostat") {
+                return Some("Thermostat".to_string());
+            }
+            if hostname.contains("cam") || hostname.contains("doorbell") {
+                return Some("Security Camera".to_string());
+            }
+            return Some("Smart Home Device".to_string());
+        }
+        
+        // iPhones/iPads
+        if hostname.contains("iphone") {
+            return Some("iPhone".to_string());
+        }
+        if hostname.contains("ipad") {
+            return Some("iPad".to_string());
+        }
+        
+        // Macs
+        if hostname.contains("macbook") || hostname.contains("imac") || hostname.contains("mac-mini") || hostname.contains("mac-pro") {
+            return Some("Mac".to_string());
+        }
+        
+        // HP printers (NPI prefix = Network Peripheral Interface)
+        if hostname.starts_with("npi") {
+            return Some("Printer".to_string());
+        }
+        
+        // Android phones
+        if hostname.starts_with("android") || hostname.starts_with("android_") {
+            return Some("Android Phone".to_string());
+        }
+        
+        None
+    }
+
     /// Detect vendor from a list of services
     #[cfg(feature = "mdns")]
     fn detect_vendor_from_services(&self, services: &[String]) -> Option<String> {
-        // First try the registry if available
+        // Check for specific device-type services first to avoid misidentification
+        // (e.g., a printer that supports AirPrint shouldn't be labeled as Apple)
+        let mut has_printer_services = false;
+        let mut has_scanner_services = false;
+        
+        for service in services {
+            let s = service.to_lowercase();
+            if s.contains("_printer") || s.contains("_ipp") || s.contains("_pdl-datastream") || s.contains("_print-caps") {
+                has_printer_services = true;
+            }
+            if s.contains("_scanner") || s.contains("_uscan") {
+                has_scanner_services = true;
+            }
+        }
+        
+        // If it's a printer/scanner, don't assume vendor from generic protocols
+        // (Printers often support AirPrint which uses Apple protocols but doesn't mean vendor is Apple)
+        let is_peripheral = has_printer_services || has_scanner_services;
+
+        // First try the registry if available (but skip for peripherals with Apple protocols)
         if let Some(registry) = &self.service_registry {
             for service in services {
                 if let Some(vendor) = registry.get_vendor(service) {
+                    // Skip Apple vendor assignment for printers/scanners (they support AirPrint but aren't Apple devices)
+                    if is_peripheral && vendor.eq_ignore_ascii_case("apple") {
+                        continue;
+                    }
                     return Some(vendor.to_string());
                 }
             }
@@ -2518,25 +2638,7 @@ impl DeviceTracker {
         // Fallback to built-in detection
         for service in services {
             let s = service.to_lowercase();
-            // Apple services
-            if s.contains("airplay")
-                || s.contains("airdrop")
-                || s.contains("homekit")
-                || s.contains("raop")
-                || s.contains("airport")
-                || s.contains("daap")
-                || s.contains("dpap")
-                || s.contains("afpovertcp")
-                || s.contains("apple")
-                || s.contains("companion-link")
-                || s.contains("touch-able")
-                || s.contains("mediaremotetv")
-                || s.contains("hap._tcp")
-                || s.contains("appletv")
-            {
-                return Some("Apple".to_string());
-            }
-            // Google services
+            // Google services (specific enough to identify vendor)
             if s.contains("googlecast") || s.contains("googlezone") || s.contains("androidtvremote") {
                 return Some("Google".to_string());
             }
@@ -2552,6 +2654,24 @@ impl DeviceTracker {
             if s.contains("nvstream") {
                 return Some("NVIDIA".to_string());
             }
+            // Apple services - only for non-peripheral devices
+            if !is_peripheral && (s.contains("airplay")
+                || s.contains("airdrop")
+                || s.contains("homekit")
+                || s.contains("raop")
+                || s.contains("airport")
+                || s.contains("daap")
+                || s.contains("dpap")
+                || s.contains("afpovertcp")
+                || s.contains("apple")
+                || s.contains("companion-link")
+                || s.contains("touch-able")
+                || s.contains("mediaremotetv")
+                || s.contains("hap._tcp")
+                || s.contains("appletv"))
+            {
+                return Some("Apple".to_string());
+            }
         }
         None
     }
@@ -2559,7 +2679,38 @@ impl DeviceTracker {
     /// Detect device type from a list of services
     #[cfg(feature = "mdns")]
     fn detect_device_type_from_services(&self, services: &[String]) -> Option<String> {
-        // First try the registry if available
+        // Priority-based detection: check for specific device types first
+        // before falling back to registry lookup (which may give generic results)
+        
+        for service in services {
+            let s = service.to_lowercase();
+            // Chromecast devices (high priority)
+            if s.contains("googlecast") || s.contains("googlezone") {
+                return Some("Chromecast".to_string());
+            }
+            // Apple TV (high priority)
+            if s.contains("appletv") || s.contains("mediaremotetv") {
+                return Some("Apple TV".to_string());
+            }
+            // AirPlay devices
+            if s.contains("airplay") || s.contains("raop") {
+                return Some("AirPlay Device".to_string());
+            }
+            // Fire TV / Amazon devices
+            if s.contains("amzn-wplay") {
+                return Some("Fire TV".to_string());
+            }
+            // Printers - check BEFORE generic server detection
+            if s.contains("_printer") || s.contains("_ipp") || s.contains("_pdl-datastream") || s.contains("_print-caps") {
+                return Some("Printer".to_string());
+            }
+            // Scanners
+            if s.contains("_scanner") || s.contains("_uscan") {
+                return Some("Scanner".to_string());
+            }
+        }
+
+        // Now try the registry for less specific lookups
         if let Some(registry) = &self.service_registry {
             for service in services {
                 if let Some(device_type) = registry.get_device_type(service) {
@@ -2568,33 +2719,9 @@ impl DeviceTracker {
             }
         }
 
-        // Fallback to built-in detection
+        // Fallback to remaining built-in detection
         for service in services {
             let s = service.to_lowercase();
-            // Chromecast devices
-            if s.contains("googlecast") || s.contains("googlezone") {
-                return Some("Chromecast".to_string());
-            }
-            // Apple TV
-            if s.contains("appletv") || s.contains("mediaremotetv") {
-                return Some("Apple TV".to_string());
-            }
-            // AirPlay devices (speakers, receivers)
-            if s.contains("airplay") || s.contains("raop") {
-                return Some("AirPlay Device".to_string());
-            }
-            // Fire TV / Amazon devices
-            if s.contains("amzn-wplay") {
-                return Some("Fire TV".to_string());
-            }
-            // Printers
-            if s.contains("_printer") || s.contains("_ipp") || s.contains("_pdl-datastream") {
-                return Some("Printer".to_string());
-            }
-            // Scanners
-            if s.contains("_scanner") || s.contains("_uscan") {
-                return Some("Scanner".to_string());
-            }
             // NAS devices
             if s.contains("_smb") || s.contains("_afpovertcp") || s.contains("_nfs") {
                 return Some("NAS".to_string());
@@ -2619,18 +2746,105 @@ impl DeviceTracker {
         None
     }
 
+    /// Detect device type from vendor name
+    fn detect_device_type_from_vendor(vendor: &str) -> Option<String> {
+        let v = vendor.to_lowercase();
+        
+        // Security systems
+        if v.contains("simplisafe") {
+            return Some("Security System".to_string());
+        }
+        if v.contains("ring") && !v.contains("engineering") {
+            return Some("Security Camera".to_string());
+        }
+        if v.contains("arlo") {
+            return Some("Security Camera".to_string());
+        }
+        if v.contains("nest") {
+            return Some("Smart Home Device".to_string());
+        }
+        if v.contains("alarm") || v.contains("security") {
+            return Some("Security System".to_string());
+        }
+        
+        // Smart home devices
+        if v.contains("tuya") || v.contains("smartlife") {
+            return Some("Smart Home Device".to_string());
+        }
+        if v.contains("philips hue") || v.contains("signify") {
+            return Some("Smart Light".to_string());
+        }
+        if v.contains("sonos") {
+            return Some("Speaker".to_string());
+        }
+        if v.contains("ecobee") || v.contains("honeywell") {
+            return Some("Thermostat".to_string());
+        }
+        
+        // Networking equipment
+        if v.contains("ubiquiti") || v.contains("netgear") || v.contains("tp-link") || v.contains("linksys") {
+            return Some("Network Equipment".to_string());
+        }
+        if v.contains("cisco") {
+            return Some("Network Equipment".to_string());
+        }
+        
+        // Gaming consoles
+        if v.contains("nintendo") {
+            return Some("Gaming Console".to_string());
+        }
+        if v.contains("sony") && (v.contains("playstation") || v.contains("entertainment")) {
+            return Some("Gaming Console".to_string());
+        }
+        if v.contains("microsoft") && v.contains("xbox") {
+            return Some("Gaming Console".to_string());
+        }
+        
+        // IoT / Microcontrollers
+        if v.contains("espressif") {
+            return Some("IoT Device".to_string());
+        }
+        if v.contains("raspberry") {
+            return Some("Raspberry Pi".to_string());
+        }
+        if v.contains("arduino") {
+            return Some("Microcontroller".to_string());
+        }
+        
+        // Printers
+        if v.contains("hp") && v.contains("print") {
+            return Some("Printer".to_string());
+        }
+        if v.contains("canon") || v.contains("epson") || v.contains("brother") || v.contains("lexmark") {
+            return Some("Printer".to_string());
+        }
+        
+        // Storage
+        if v.contains("synology") || v.contains("qnap") || v.contains("western digital") {
+            return Some("NAS".to_string());
+        }
+        
+        None
+    }
+
     /// Update or add a device
     fn update_device(&mut self, mac: &str, ip: &str, hostname: Option<&str>) -> bool {
         // Normalize MAC address to lowercase to avoid duplicates
         let mac = mac.to_lowercase();
         // Look up vendor from OUI registry if available
         let vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(&mac));
+        // Infer device type from vendor name
+        let device_type_from_vendor = vendor.as_ref().and_then(|v| Self::detect_device_type_from_vendor(v));
 
         if let Some(device) = self.devices.get_mut(&mac) {
             let changed = device.update(ip, hostname);
             // Set vendor if not already set and we found one
             if let Some(v) = vendor {
                 device.set_vendor(v);
+            }
+            // Set device type from vendor if not already set
+            if let Some(dt) = device_type_from_vendor {
+                device.set_device_type(&dt);
             }
             // Always rewrite CSV to update timestamp and avoid duplicates
             let _ = self.save_to_csv();
@@ -2645,6 +2859,10 @@ impl DeviceTracker {
             // Set vendor if we found one
             if let Some(v) = vendor {
                 device.set_vendor(v);
+            }
+            // Set device type from vendor
+            if let Some(dt) = device_type_from_vendor {
+                device.set_device_type(&dt);
             }
             self.devices.insert(mac, device);
             // Rewrite CSV to ensure clean state
