@@ -608,8 +608,11 @@ impl MdnsServiceRegistry {
         // Apple Mobile / Mac devices
         self.add_full("_airdrop._tcp", "AirDrop", Some("Apple"), Some("Apple Device"));
         self.add_full("_device-info._tcp", "Device Info", Some("Apple"), Some("Apple Device"));
-        self.add_full("_apple-mobdev._tcp", "Apple Mobile Device", Some("Apple"), Some("iPhone/iPad"));
-        self.add_full("_apple-mobdev2._tcp", "Apple Mobile Device", Some("Apple"), Some("iPhone/iPad"));
+        self.add_full("_apple-mobdev._tcp", "Apple Mobile Device", Some("Apple"), Some("Apple iPhone"));
+        self.add_full("_apple-mobdev2._tcp", "Apple Mobile Device", Some("Apple"), Some("Apple iPhone"));
+        self.add_full("_remotepairing._tcp", "Apple Remote Pairing", Some("Apple"), Some("Apple iPhone"));
+        self.add_full("_atc._tcp", "Apple Transfer Control", Some("Apple"), Some("Apple iPhone"));
+        self.add_full("_rdlink._tcp", "Apple Remote Device Link", Some("Apple"), Some("Apple iPhone"));
 
         // Apple Smart Home
         self.add_full("_homekit._tcp", "HomeKit", Some("Apple"), Some("Smart Home Hub"));
@@ -761,7 +764,7 @@ impl MdnsServiceRegistry {
         
         // Mobile devices
         if desc_lower.contains("iphone") || desc_lower.contains("ipad") || desc_lower.contains("ios device") {
-            return Some("iPhone/iPad".to_string());
+            return Some("Apple iPhone".to_string());
         }
         if desc_lower.contains("mobile device") {
             return Some("Mobile Device".to_string());
@@ -2576,10 +2579,10 @@ impl DeviceTracker {
         
         // iPhones/iPads
         if hostname.contains("iphone") {
-            return Some("iPhone".to_string());
+            return Some("Apple iPhone".to_string());
         }
         if hostname.contains("ipad") {
-            return Some("iPad".to_string());
+            return Some("Apple iPad".to_string());
         }
         
         // Macs
@@ -2691,6 +2694,10 @@ impl DeviceTracker {
             // Apple TV (high priority)
             if s.contains("appletv") || s.contains("mediaremotetv") {
                 return Some("Apple TV".to_string());
+            }
+            // Apple iPhone/iPad (check before AirPlay - iPhones also support AirPlay)
+            if s.contains("_remotepairing") || s.contains("_atc") || s.contains("_rdlink") {
+                return Some("Apple iPhone".to_string());
             }
             // AirPlay devices
             if s.contains("airplay") || s.contains("raop") {
