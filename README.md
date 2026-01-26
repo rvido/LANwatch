@@ -1,4 +1,4 @@
-# lanwatch
+# LANwatch
 
 A Rust library and CLI tool for network device discovery and tracking via DHCP, mDNS, and IEEE-OUI identification.
 
