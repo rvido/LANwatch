@@ -2845,6 +2845,7 @@ fn normalize_device_identifier(raw: &str) -> String {
 pub struct DeviceTracker {
     devices: HashMap<String, DeviceInfo>,
     csv_path: String,
+    auto_save: bool,
     /// OUI registry for MAC address vendor lookup
     oui_registry: Option<OuiRegistry>,
     #[cfg(feature = "mdns")]
@@ -2858,6 +2859,7 @@ impl DeviceTracker {
         let mut tracker = Self {
             devices: HashMap::new(),
             csv_path,
+            auto_save: true,
             oui_registry: None,
             #[cfg(feature = "mdns")]
             service_registry: None,
@@ -2937,6 +2939,17 @@ impl DeviceTracker {
         }
 
         Ok(())
+    }
+
+    /// Enable or disable automatic CSV writes on each update.
+    /// Disabled mode is intended for external batched flush pipelines.
+    pub fn set_auto_save(&mut self, enabled: bool) {
+        self.auto_save = enabled;
+    }
+
+    /// Flush current in-memory device state to CSV.
+    pub fn flush_to_csv(&self) -> std::io::Result<()> {
+        self.save_to_csv()
     }
 
     /// Update or add a device from a DHCPv4 packet
@@ -3125,7 +3138,7 @@ impl DeviceTracker {
         // Update timestamp
         device.last_seen = format_timestamp(SystemTime::now());
 
-        if updated > 0 {
+        if updated > 0 && self.auto_save {
             let _ = self.save_to_csv();
         }
 
@@ -3453,7 +3466,7 @@ impl DeviceTracker {
 
         device.last_seen = format_timestamp(SystemTime::now());
 
-        if updated > 0 {
+        if updated > 0 && self.auto_save {
             let _ = self.save_to_csv();
         }
 
@@ -3704,8 +3717,10 @@ impl DeviceTracker {
             if let Some(dt) = device_type_from_vendor {
                 device.set_device_type(&dt);
             }
-            // Always rewrite CSV to update timestamp and avoid duplicates
-            let _ = self.save_to_csv();
+            if self.auto_save {
+                // Always rewrite CSV to update timestamp and avoid duplicates
+                let _ = self.save_to_csv();
+            }
             changed
         } else {
             // New device
@@ -3719,8 +3734,10 @@ impl DeviceTracker {
                 device.set_device_type(&dt);
             }
             self.devices.insert(mac, device);
-            // Rewrite CSV to ensure clean state
-            let _ = self.save_to_csv();
+            if self.auto_save {
+                // Rewrite CSV to ensure clean state
+                let _ = self.save_to_csv();
+            }
             true
         }
     }

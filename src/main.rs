@@ -17,12 +17,20 @@ use lanwatch::{NetworkEvent, NetworkSniffer};
 #[cfg(feature = "ssdp")]
 use lanwatch::{SsdpPacket, SsdpQuerier};
 use std::env;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, RwLock};
+use std::thread;
+use std::time::{Duration, Instant};
 
 const DEFAULT_CSV_PATH: &str = "devices.csv";
 #[cfg(feature = "http-api")]
 const DEFAULT_API_ADDR: &str = "127.0.0.1:8080";
 const DEFAULT_OUI_DOWNLOAD_PATH: &str = "ieee-oui.txt";
+// Tuned defaults for bursty LAN discovery traffic (mDNS/SSDP).
+// Aim: absorb short bursts while keeping CSV/API state latency low.
+const EVENT_CHANNEL_CAPACITY: usize = 4096;
+const CSV_FLUSH_BATCH_SIZE: usize = 32;
+const CSV_FLUSH_INTERVAL_MS: u64 = 300;
 
 fn main() {
     // Parse command line arguments
@@ -110,6 +118,13 @@ fn main() {
         "Loaded {} existing devices from CSV",
         tracker.device_count()
     );
+    println!(
+        "Batching: queue_capacity={}, flush_batch_size={}, flush_interval_ms={}",
+        EVENT_CHANNEL_CAPACITY, CSV_FLUSH_BATCH_SIZE, CSV_FLUSH_INTERVAL_MS
+    );
+
+    // Use batched CSV flushing through worker threads to reduce write amplification.
+    tracker.set_auto_save(false);
 
     // Wrap tracker in Arc<RwLock> for thread-safe sharing
     let tracker = Arc::new(RwLock::new(tracker));
@@ -180,81 +195,194 @@ fn main() {
 }
 
 fn run_dhcp_sniffer(interface_name: &str, tracker: Arc<RwLock<DeviceTracker>>) {
+    let (tx, rx) = mpsc::sync_channel::<DhcpEvent>(EVENT_CHANNEL_CAPACITY);
+    let worker = start_dhcp_worker(rx, Arc::clone(&tracker));
+
     let mut sniffer = DhcpSniffer::new(interface_name).unwrap_or_else(|e| {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     });
 
-    sniffer.run(|event| {
-        let mut tracker = match tracker.write() {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!("Error acquiring lock: {}", e);
-                return true;
-            }
-        };
+    sniffer.run(|event| tx.send(event).is_ok());
 
-        match &event {
-            DhcpEvent::V4(packet) => {
-                let is_new_or_updated = tracker.update_from_dhcpv4(packet);
-                print_dhcpv4_packet(packet, is_new_or_updated, tracker.device_count());
-            }
-            DhcpEvent::V6(packet) => {
-                let is_new_or_updated = tracker.update_from_dhcpv6(packet);
-                print_dhcpv6_packet(packet, is_new_or_updated, tracker.device_count());
-            }
-        }
-        true
-    });
+    drop(tx);
+    let _ = worker.join();
 }
 
 #[cfg(any(feature = "mdns", feature = "ssdp"))]
 fn run_network_sniffer(
     interface_name: &str,
     tracker: Arc<RwLock<DeviceTracker>>,
-    _enable_mdns: bool,
-    _enable_ssdp: bool,
+    enable_mdns: bool,
+    enable_ssdp: bool,
 ) {
+    let (tx, rx) = mpsc::sync_channel::<NetworkEvent>(EVENT_CHANNEL_CAPACITY);
+    let worker = start_network_worker(rx, Arc::clone(&tracker), enable_mdns, enable_ssdp);
+
     let mut sniffer = NetworkSniffer::new(interface_name).unwrap_or_else(|e| {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     });
 
-    sniffer.run(|event| {
-        let mut tracker = match tracker.write() {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!("Error acquiring lock: {}", e);
-                return true;
-            }
-        };
+    sniffer.run(|event| tx.send(event).is_ok());
 
-        match &event {
-            NetworkEvent::Dhcpv4(packet) => {
-                let is_new_or_updated = tracker.update_from_dhcpv4(packet);
-                print_dhcpv4_packet(packet, is_new_or_updated, tracker.device_count());
-            }
-            NetworkEvent::Dhcpv6(packet) => {
-                let is_new_or_updated = tracker.update_from_dhcpv6(packet);
-                print_dhcpv6_packet(packet, is_new_or_updated, tracker.device_count());
-            }
-            #[cfg(feature = "mdns")]
-            NetworkEvent::Mdns(packet) => {
-                if _enable_mdns {
-                    let updated_count = tracker.update_from_mdns(packet);
-                    print_mdns_packet(packet, updated_count, tracker.device_count());
+    drop(tx);
+    let _ = worker.join();
+}
+
+fn start_dhcp_worker(
+    rx: Receiver<DhcpEvent>,
+    tracker: Arc<RwLock<DeviceTracker>>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let flush_interval = Duration::from_millis(CSV_FLUSH_INTERVAL_MS);
+        let mut pending_updates = 0usize;
+        let mut last_flush = Instant::now();
+
+        loop {
+            match rx.recv_timeout(flush_interval) {
+                Ok(event) => {
+                    let mut tracker = match tracker.write() {
+                        Ok(t) => t,
+                        Err(e) => {
+                            eprintln!("Error acquiring lock: {}", e);
+                            continue;
+                        }
+                    };
+
+                    match &event {
+                        DhcpEvent::V4(packet) => {
+                            let is_new_or_updated = tracker.update_from_dhcpv4(packet);
+                            if is_new_or_updated {
+                                pending_updates += 1;
+                            }
+                            print_dhcpv4_packet(packet, is_new_or_updated, tracker.device_count());
+                        }
+                        DhcpEvent::V6(packet) => {
+                            let is_new_or_updated = tracker.update_from_dhcpv6(packet);
+                            if is_new_or_updated {
+                                pending_updates += 1;
+                            }
+                            print_dhcpv6_packet(packet, is_new_or_updated, tracker.device_count());
+                        }
+                    }
                 }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
             }
-            #[cfg(feature = "ssdp")]
-            NetworkEvent::Ssdp(packet) => {
-                if _enable_ssdp {
-                    let updated_count = tracker.update_from_ssdp(packet);
-                    print_ssdp_packet(packet, updated_count, tracker.device_count());
-                }
+
+            if pending_updates >= CSV_FLUSH_BATCH_SIZE
+                || (pending_updates > 0 && last_flush.elapsed() >= flush_interval)
+            {
+                flush_tracker(&tracker, pending_updates);
+                pending_updates = 0;
+                last_flush = Instant::now();
             }
         }
-        true
-    });
+
+        if pending_updates > 0 {
+            flush_tracker(&tracker, pending_updates);
+        }
+    })
+}
+
+#[cfg(any(feature = "mdns", feature = "ssdp"))]
+fn start_network_worker(
+    rx: Receiver<NetworkEvent>,
+    tracker: Arc<RwLock<DeviceTracker>>,
+    _enable_mdns: bool,
+    _enable_ssdp: bool,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let flush_interval = Duration::from_millis(CSV_FLUSH_INTERVAL_MS);
+        let mut pending_updates = 0usize;
+        let mut last_flush = Instant::now();
+
+        loop {
+            match rx.recv_timeout(flush_interval) {
+                Ok(event) => {
+                    let mut tracker = match tracker.write() {
+                        Ok(t) => t,
+                        Err(e) => {
+                            eprintln!("Error acquiring lock: {}", e);
+                            continue;
+                        }
+                    };
+
+                    match &event {
+                        NetworkEvent::Dhcpv4(packet) => {
+                            let is_new_or_updated = tracker.update_from_dhcpv4(packet);
+                            if is_new_or_updated {
+                                pending_updates += 1;
+                            }
+                            print_dhcpv4_packet(packet, is_new_or_updated, tracker.device_count());
+                        }
+                        NetworkEvent::Dhcpv6(packet) => {
+                            let is_new_or_updated = tracker.update_from_dhcpv6(packet);
+                            if is_new_or_updated {
+                                pending_updates += 1;
+                            }
+                            print_dhcpv6_packet(packet, is_new_or_updated, tracker.device_count());
+                        }
+                        #[cfg(feature = "mdns")]
+                        NetworkEvent::Mdns(packet) => {
+                            if _enable_mdns {
+                                let updated_count = tracker.update_from_mdns(packet);
+                                if updated_count > 0 {
+                                    pending_updates += 1;
+                                }
+                                print_mdns_packet(packet, updated_count, tracker.device_count());
+                            }
+                        }
+                        #[cfg(feature = "ssdp")]
+                        NetworkEvent::Ssdp(packet) => {
+                            if _enable_ssdp {
+                                let updated_count = tracker.update_from_ssdp(packet);
+                                if updated_count > 0 {
+                                    pending_updates += 1;
+                                }
+                                print_ssdp_packet(packet, updated_count, tracker.device_count());
+                            }
+                        }
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+
+            if pending_updates >= CSV_FLUSH_BATCH_SIZE
+                || (pending_updates > 0 && last_flush.elapsed() >= flush_interval)
+            {
+                flush_tracker(&tracker, pending_updates);
+                pending_updates = 0;
+                last_flush = Instant::now();
+            }
+        }
+
+        if pending_updates > 0 {
+            flush_tracker(&tracker, pending_updates);
+        }
+    })
+}
+
+fn flush_tracker(tracker: &Arc<RwLock<DeviceTracker>>, pending_updates: usize) {
+    let tracker = match tracker.read() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("Error acquiring lock for CSV flush: {}", e);
+            return;
+        }
+    };
+
+    if let Err(e) = tracker.flush_to_csv() {
+        eprintln!("Warning: Failed to flush CSV: {}", e);
+    } else {
+        println!(
+            "-> [CSV Flushed] batched updates: {}, Total devices: {}",
+            pending_updates,
+            tracker.device_count()
+        );
+    }
 }
 
 fn print_dhcpv4_packet(packet: &lanwatch::Dhcpv4Packet, is_new_or_updated: bool, total: usize) {
@@ -319,12 +447,10 @@ fn print_mdns_packet(packet: &lanwatch::MdnsPacket, updated_count: usize, total:
         packet_type, packet.source_ip, packet.source_mac
     );
 
-    // Print questions
     for q in &packet.questions {
         println!("  ? {} ({})", q.name, q.record_type);
     }
 
-    // Print answers and additional records
     for record in packet.all_records() {
         match &record.data {
             MdnsRecordData::A(addr) => {
@@ -469,11 +595,23 @@ fn parse_args(args: &[String]) -> Config {
                 ssdp_query = true;
                 i += 1;
             }
+            #[cfg(not(feature = "ssdp"))]
+            "-p" | "--ssdp" | "--upnp" | "--ssdp-query" => {
+                eprintln!("Error: SSDP options require a binary built with the 'ssdp' feature.");
+                eprintln!("Rebuild with: cargo build --release --features ssdp");
+                std::process::exit(1);
+            }
             #[cfg(feature = "mdns")]
             "--mdns-query" => {
                 enable_mdns = true;
                 mdns_query = true;
                 i += 1;
+            }
+            #[cfg(not(feature = "mdns"))]
+            "-m" | "--mdns" | "--mdns-query" | "-s" | "--services" => {
+                eprintln!("Error: mDNS options require a binary built with the 'mdns' feature.");
+                eprintln!("Rebuild with: cargo build --release --features mdns");
+                std::process::exit(1);
             }
             #[cfg(feature = "mdns")]
             "-s" | "--services" => {
@@ -603,6 +741,12 @@ fn print_usage() {
             "  Passively captures SSDP advertisements and responses to identify UPnP devices."
         );
         println!("  Use --ssdp-query to also send active M-SEARCH discovery probes.");
+    }
+    #[cfg(not(feature = "ssdp"))]
+    {
+        println!();
+        println!("SSDP/UPnP Discovery:");
+        println!("  Not available in this binary. Rebuild with '--features ssdp'.");
     }
 }
 
