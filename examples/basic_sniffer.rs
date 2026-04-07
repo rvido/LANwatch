@@ -14,13 +14,13 @@
 //!
 //! Note: Root/sudo privileges are typically required for packet capture.
 
-use lanwatch::{list_interfaces, DeviceTracker, DhcpEvent, DhcpSniffer, Dhcpv6Option};
+use lanwatch::{DeviceTracker, DhcpEvent, DhcpSniffer, Dhcpv6Option, list_interfaces};
 use std::env;
 
 fn main() {
     // Get interface name and optional CSV path from command line
     let args: Vec<String> = env::args().collect();
-    
+
     let interface_name = match args.get(1) {
         Some(name) => name.clone(),
         None => {
@@ -33,7 +33,10 @@ fn main() {
         }
     };
 
-    let csv_path = args.get(2).map(|s| s.as_str()).unwrap_or("devices_example.csv");
+    let csv_path = args
+        .get(2)
+        .map(|s| s.as_str())
+        .unwrap_or("devices_example.csv");
 
     println!("=== DHCP Sniffer Example ===");
     println!("Listening on interface: {}", interface_name);
@@ -59,7 +62,10 @@ fn main() {
         }
     };
 
-    println!("Loaded {} existing devices from CSV\n", tracker.device_count());
+    println!(
+        "Loaded {} existing devices from CSV\n",
+        tracker.device_count()
+    );
 
     // Counter for packets
     let mut packet_count = 0u64;
@@ -72,7 +78,7 @@ fn main() {
         match &event {
             DhcpEvent::V4(pkt) => {
                 let is_new = tracker.update_from_dhcpv4(pkt);
-                
+
                 println!("Protocol: DHCPv4");
                 println!("Source:   {}:{}", pkt.source_ip, pkt.source_port);
                 println!("Dest:     {}:{}", pkt.dest_ip, pkt.dest_port);
@@ -88,14 +94,17 @@ fn main() {
                 if let Some(ref ip) = pkt.requested_ip {
                     println!("Requested IP: {}", ip);
                 }
-                
+
                 if is_new {
-                    println!("[NEW/UPDATED] Total devices tracked: {}", tracker.device_count());
+                    println!(
+                        "[NEW/UPDATED] Total devices tracked: {}",
+                        tracker.device_count()
+                    );
                 }
             }
             DhcpEvent::V6(pkt) => {
                 let is_new = tracker.update_from_dhcpv6(pkt);
-                
+
                 println!("Protocol: DHCPv6");
                 println!("Source:   {}:{}", pkt.source_ip, pkt.source_port);
                 println!("Dest:     {}:{}", pkt.dest_ip, pkt.dest_port);
@@ -121,9 +130,12 @@ fn main() {
                         }
                     }
                 }
-                
+
                 if is_new {
-                    println!("[NEW/UPDATED] Total devices tracked: {}", tracker.device_count());
+                    println!(
+                        "[NEW/UPDATED] Total devices tracked: {}",
+                        tracker.device_count()
+                    );
                 }
             }
         }

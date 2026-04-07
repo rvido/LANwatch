@@ -9,9 +9,7 @@
 //! This example demonstrates how to use the parsing functions directly
 //! without network capture, useful for testing or analyzing saved packets.
 
-use lanwatch::{
-    parse_dhcpv4_payload, parse_dhcpv6_payload, Dhcpv4MessageType, Dhcpv6MessageType,
-};
+use lanwatch::{Dhcpv4MessageType, Dhcpv6MessageType, parse_dhcpv4_payload, parse_dhcpv6_payload};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 fn main() {

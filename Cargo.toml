@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 authors = ["Richard Vidal-Dorsch"]
 license = "MIT"
-description = "A library and CLI tool for network device discovery and tracking via DHCP, mDNS, and OUI identification"
+description = "A library and CLI tool for network device discovery and tracking via DHCP, mDNS, SSDP/UPnP, and OUI identification"
 readme = "README.md"
 repository = "https://github.com/rvido/lanwatch"
 homepage = "https://github.com/rvido/lanwatch"
@@ -15,6 +15,7 @@ categories = ["network-programming", "parsing"]
 default = ["http-api"]
 http-api = ["dep:serde", "dep:serde_json", "dep:tiny_http"]
 mdns = []
+ssdp = []
 
 [dependencies]
 pnet = "0.35"
