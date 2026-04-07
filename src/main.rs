@@ -6,9 +6,16 @@
 
 #[cfg(feature = "http-api")]
 use lanwatch::start_api_server;
+use lanwatch::{
+    DeviceTracker, DhcpEvent, DhcpSniffer, Dhcpv6Option, IEEE_OUI_URL, OuiRegistry,
+    download_ieee_oui, list_interfaces,
+};
 #[cfg(feature = "mdns")]
-use lanwatch::{MdnsQuerier, MdnsRecordData, MdnsServiceRegistry, NetworkEvent, NetworkSniffer};
-use lanwatch::{list_interfaces, DeviceTracker, DhcpEvent, DhcpSniffer, Dhcpv6Option, OuiRegistry, download_ieee_oui, IEEE_OUI_URL};
+use lanwatch::{MdnsQuerier, MdnsRecordData, MdnsServiceRegistry};
+#[cfg(any(feature = "mdns", feature = "ssdp"))]
+use lanwatch::{NetworkEvent, NetworkSniffer};
+#[cfg(feature = "ssdp")]
+use lanwatch::{SsdpPacket, SsdpQuerier};
 use std::env;
 use std::sync::{Arc, RwLock};
 
@@ -29,10 +36,17 @@ fn main() {
 
     let config = parse_args(&args);
 
-    println!("Sniffing DHCP (v4 & v6) traffic on: {}", config.interface_name);
+    println!(
+        "Sniffing DHCP (v4 & v6) traffic on: {}",
+        config.interface_name
+    );
     #[cfg(feature = "mdns")]
     if config.enable_mdns {
         println!("mDNS sniffing: enabled");
+    }
+    #[cfg(feature = "ssdp")]
+    if config.enable_ssdp {
+        println!("SSDP/UPnP sniffing: enabled");
     }
     println!("Saving device info to: {}", config.csv_path);
 
@@ -45,7 +59,7 @@ fn main() {
     // Load IEEE OUI registry for vendor identification
     {
         let mut oui_registry = OuiRegistry::with_defaults();
-        
+
         // Try to load custom OUI file
         if let Some(ref oui_path) = config.oui_file {
             match oui_registry.load_from_file(oui_path) {
@@ -62,7 +76,7 @@ fn main() {
                 }
             }
         }
-        
+
         println!("OUI database: {} vendor entries", oui_registry.len());
         tracker.set_oui_registry(oui_registry);
     }
@@ -71,7 +85,7 @@ fn main() {
     #[cfg(feature = "mdns")]
     if config.enable_mdns {
         let mut registry = MdnsServiceRegistry::with_defaults();
-        
+
         // Try to load custom services file
         if let Some(ref services_path) = config.services_file {
             match registry.load_from_file(services_path) {
@@ -88,11 +102,14 @@ fn main() {
                 }
             }
         }
-        
+
         tracker.set_service_registry(registry);
     }
 
-    println!("Loaded {} existing devices from CSV", tracker.device_count());
+    println!(
+        "Loaded {} existing devices from CSV",
+        tracker.device_count()
+    );
 
     // Wrap tracker in Arc<RwLock> for thread-safe sharing
     let tracker = Arc::new(RwLock::new(tracker));
@@ -118,17 +135,47 @@ fn main() {
         }
     }
 
+    // Send active SSDP queries if enabled
+    #[cfg(feature = "ssdp")]
+    if config.enable_ssdp && config.ssdp_query {
+        println!("Sending SSDP M-SEARCH discovery probes...");
+        if let Ok(querier) = SsdpQuerier::new() {
+            if let Err(e) = querier.search_common_devices() {
+                eprintln!("Warning: Failed to send SSDP queries: {}", e);
+            }
+        }
+    }
+
     println!("Press Ctrl+C to stop\n");
 
     // Choose sniffer based on mDNS feature
-    #[cfg(feature = "mdns")]
-    if config.enable_mdns {
-        run_network_sniffer(&config.interface_name, tracker);
+    #[cfg(all(feature = "mdns", feature = "ssdp"))]
+    if config.enable_mdns || config.enable_ssdp {
+        run_network_sniffer(
+            &config.interface_name,
+            tracker,
+            config.enable_mdns,
+            config.enable_ssdp,
+        );
     } else {
         run_dhcp_sniffer(&config.interface_name, tracker);
     }
 
-    #[cfg(not(feature = "mdns"))]
+    #[cfg(all(feature = "mdns", not(feature = "ssdp")))]
+    if config.enable_mdns {
+        run_network_sniffer(&config.interface_name, tracker, true, false);
+    } else {
+        run_dhcp_sniffer(&config.interface_name, tracker);
+    }
+
+    #[cfg(all(feature = "ssdp", not(feature = "mdns")))]
+    if config.enable_ssdp {
+        run_network_sniffer(&config.interface_name, tracker, false, true);
+    } else {
+        run_dhcp_sniffer(&config.interface_name, tracker);
+    }
+
+    #[cfg(not(any(feature = "mdns", feature = "ssdp")))]
     run_dhcp_sniffer(&config.interface_name, tracker);
 }
 
@@ -161,8 +208,13 @@ fn run_dhcp_sniffer(interface_name: &str, tracker: Arc<RwLock<DeviceTracker>>) {
     });
 }
 
-#[cfg(feature = "mdns")]
-fn run_network_sniffer(interface_name: &str, tracker: Arc<RwLock<DeviceTracker>>) {
+#[cfg(any(feature = "mdns", feature = "ssdp"))]
+fn run_network_sniffer(
+    interface_name: &str,
+    tracker: Arc<RwLock<DeviceTracker>>,
+    _enable_mdns: bool,
+    _enable_ssdp: bool,
+) {
     let mut sniffer = NetworkSniffer::new(interface_name).unwrap_or_else(|e| {
         eprintln!("Error: {}", e);
         std::process::exit(1);
@@ -186,9 +238,19 @@ fn run_network_sniffer(interface_name: &str, tracker: Arc<RwLock<DeviceTracker>>
                 let is_new_or_updated = tracker.update_from_dhcpv6(packet);
                 print_dhcpv6_packet(packet, is_new_or_updated, tracker.device_count());
             }
+            #[cfg(feature = "mdns")]
             NetworkEvent::Mdns(packet) => {
-                let updated_count = tracker.update_from_mdns(packet);
-                print_mdns_packet(packet, updated_count, tracker.device_count());
+                if _enable_mdns {
+                    let updated_count = tracker.update_from_mdns(packet);
+                    print_mdns_packet(packet, updated_count, tracker.device_count());
+                }
+            }
+            #[cfg(feature = "ssdp")]
+            NetworkEvent::Ssdp(packet) => {
+                if _enable_ssdp {
+                    let updated_count = tracker.update_from_ssdp(packet);
+                    print_ssdp_packet(packet, updated_count, tracker.device_count());
+                }
             }
         }
         true
@@ -247,8 +309,15 @@ fn print_dhcpv6_packet(packet: &lanwatch::Dhcpv6Packet, is_new_or_updated: bool,
 
 #[cfg(feature = "mdns")]
 fn print_mdns_packet(packet: &lanwatch::MdnsPacket, updated_count: usize, total: usize) {
-    let packet_type = if packet.is_response { "Response" } else { "Query" };
-    println!("\n[mDNS] {} from {} (MAC: {})", packet_type, packet.source_ip, packet.source_mac);
+    let packet_type = if packet.is_response {
+        "Response"
+    } else {
+        "Query"
+    };
+    println!(
+        "\n[mDNS] {} from {} (MAC: {})",
+        packet_type, packet.source_ip, packet.source_mac
+    );
 
     // Print questions
     for q in &packet.questions {
@@ -280,7 +349,43 @@ fn print_mdns_packet(packet: &lanwatch::MdnsPacket, updated_count: usize, total:
     }
 
     if updated_count > 0 {
-        println!("-> [CSV Updated] {} device(s), Total: {}", updated_count, total);
+        println!(
+            "-> [CSV Updated] {} device(s), Total: {}",
+            updated_count, total
+        );
+    }
+    println!("------------------------------");
+}
+
+#[cfg(feature = "ssdp")]
+fn print_ssdp_packet(packet: &SsdpPacket, updated_count: usize, total: usize) {
+    println!(
+        "\n[SSDP] {} from {} (MAC: {})",
+        packet.message_type, packet.source_ip, packet.source_mac
+    );
+    println!("Start line: {}", packet.start_line);
+
+    if let Some(nt) = packet.header("nt") {
+        println!("  NT: {}", nt);
+    }
+    if let Some(st) = packet.header("st") {
+        println!("  ST: {}", st);
+    }
+    if let Some(usn) = packet.header("usn") {
+        println!("  USN: {}", usn);
+    }
+    if let Some(server) = packet.header("server") {
+        println!("  Server: {}", server);
+    }
+    if let Some(location) = packet.header("location") {
+        println!("  Location: {}", location);
+    }
+
+    if updated_count > 0 {
+        println!(
+            "-> [CSV Updated] {} device(s), Total: {}",
+            updated_count, total
+        );
     }
     println!("------------------------------");
 }
@@ -297,6 +402,10 @@ struct Config {
     mdns_query: bool,
     #[cfg(feature = "mdns")]
     services_file: Option<String>,
+    #[cfg(feature = "ssdp")]
+    enable_ssdp: bool,
+    #[cfg(feature = "ssdp")]
+    ssdp_query: bool,
     oui_file: Option<String>,
 }
 
@@ -311,6 +420,10 @@ fn parse_args(args: &[String]) -> Config {
     let mut mdns_query = false;
     #[cfg(feature = "mdns")]
     let mut services_file: Option<String> = None;
+    #[cfg(feature = "ssdp")]
+    let mut enable_ssdp = false;
+    #[cfg(feature = "ssdp")]
+    let mut ssdp_query = false;
     let mut oui_file: Option<String> = None;
 
     let mut i = 1;
@@ -343,6 +456,17 @@ fn parse_args(args: &[String]) -> Config {
             #[cfg(feature = "mdns")]
             "-m" | "--mdns" => {
                 enable_mdns = true;
+                i += 1;
+            }
+            #[cfg(feature = "ssdp")]
+            "-p" | "--ssdp" | "--upnp" => {
+                enable_ssdp = true;
+                i += 1;
+            }
+            #[cfg(feature = "ssdp")]
+            "--ssdp-query" => {
+                enable_ssdp = true;
+                ssdp_query = true;
                 i += 1;
             }
             #[cfg(feature = "mdns")]
@@ -406,6 +530,10 @@ fn parse_args(args: &[String]) -> Config {
         mdns_query,
         #[cfg(feature = "mdns")]
         services_file,
+        #[cfg(feature = "ssdp")]
+        enable_ssdp,
+        #[cfg(feature = "ssdp")]
+        ssdp_query,
         oui_file,
     }
 }
@@ -427,17 +555,30 @@ fn print_usage() {
         println!("  --mdns-query           Enable mDNS and send active queries for services");
         println!("  -s, --services <FILE>  Load mDNS service definitions from file");
     }
+    #[cfg(feature = "ssdp")]
+    {
+        println!("  -p, --ssdp             Enable SSDP/UPnP sniffing for device discovery");
+        println!("  --ssdp-query           Enable SSDP and send active M-SEARCH discovery probes");
+        println!("  --upnp                 Alias for --ssdp");
+    }
     println!("  -h, --help             Show this help message");
     println!();
     println!("OUI Database Commands:");
     println!("  --download-oui [FILE]  Download latest IEEE OUI database");
-    println!("                         Default output: {}", DEFAULT_OUI_DOWNLOAD_PATH);
+    println!(
+        "                         Default output: {}",
+        DEFAULT_OUI_DOWNLOAD_PATH
+    );
     println!();
-    println!("CSV Format: first_seen,last_seen,mac_address,ip_address,ipv6_address,hostname,device_type,vendor,services");
+    println!(
+        "CSV Format: first_seen,last_seen,mac_address,ip_address,ipv6_address,hostname,device_type,vendor,services"
+    );
     println!();
     println!("OUI Database:");
     println!("  Uses IEEE OUI database (40,000+ vendors) for MAC address identification.");
-    println!("  Use -u/--oui to load additional custom entries that override the built-in database.");
+    println!(
+        "  Use -u/--oui to load additional custom entries that override the built-in database."
+    );
     println!("  Download latest from: {}", IEEE_OUI_URL);
     #[cfg(feature = "http-api")]
     {
@@ -454,13 +595,22 @@ fn print_usage() {
         println!("  Passively captures mDNS traffic to identify device hostnames and services.");
         println!("  Use --mdns-query to also send active discovery queries.");
     }
+    #[cfg(feature = "ssdp")]
+    {
+        println!();
+        println!("SSDP/UPnP Discovery (when --ssdp is enabled):");
+        println!(
+            "  Passively captures SSDP advertisements and responses to identify UPnP devices."
+        );
+        println!("  Use --ssdp-query to also send active M-SEARCH discovery probes.");
+    }
 }
 
 /// Handle --download-oui command
 fn handle_download_oui(args: &[String]) {
     // Find the output path (argument after --download-oui, if any)
     let mut output_path = DEFAULT_OUI_DOWNLOAD_PATH;
-    
+
     for i in 0..args.len() {
         if args[i] == "--download-oui" {
             if i + 1 < args.len() && !args[i + 1].starts_with('-') {
@@ -489,7 +639,10 @@ fn handle_download_oui(args: &[String]) {
                 Ok(count) => {
                     println!("  Entries: {} vendors", count);
                     println!();
-                    println!("Download complete! Use with: lanwatch <interface> -u {}", output_path);
+                    println!(
+                        "Download complete! Use with: lanwatch <interface> -u {}",
+                        output_path
+                    );
                 }
                 Err(e) => {
                     eprintln!("Warning: Downloaded but failed to parse: {}", e);

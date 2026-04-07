@@ -23,12 +23,12 @@
 //! ```
 
 use pnet::datalink::{self, Channel::Ethernet, DataLinkReceiver, NetworkInterface};
+use pnet::packet::Packet;
 use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
 use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::ipv4::Ipv4Packet;
 use pnet::packet::ipv6::Ipv6Packet;
 use pnet::packet::udp::UdpPacket;
-use pnet::packet::Packet;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
@@ -286,8 +286,8 @@ pub enum DhcpEvent {
     V6(Dhcpv6Packet),
 }
 
-/// Network event - DHCP or mDNS packet
-#[cfg(feature = "mdns")]
+/// Network event - DHCP, mDNS, or SSDP packet
+#[cfg(any(feature = "mdns", feature = "ssdp"))]
 #[derive(Debug, Clone)]
 pub enum NetworkEvent {
     /// DHCPv4 packet
@@ -295,10 +295,14 @@ pub enum NetworkEvent {
     /// DHCPv6 packet
     Dhcpv6(Dhcpv6Packet),
     /// mDNS packet
+    #[cfg(feature = "mdns")]
     Mdns(MdnsPacket),
+    /// SSDP/UPnP packet
+    #[cfg(feature = "ssdp")]
+    Ssdp(SsdpPacket),
 }
 
-#[cfg(feature = "mdns")]
+#[cfg(any(feature = "mdns", feature = "ssdp"))]
 impl From<DhcpEvent> for NetworkEvent {
     fn from(event: DhcpEvent) -> Self {
         match event {
@@ -381,7 +385,7 @@ pub fn parse_dhcpv4_payload(
             12 => {
                 // Hostname
                 if let Ok(h) = std::str::from_utf8(value) {
-                    hostname = Some(h.to_string());
+                    hostname = sanitize_hostname(h);
                 }
             }
             50 => {
@@ -446,8 +450,8 @@ pub fn parse_dhcpv6_payload(
             2 => Dhcpv6Option::ServerId(value.to_vec()),
             3 => Dhcpv6Option::IaNa,
             39 => {
-                if let Ok(fqdn) = std::str::from_utf8(value) {
-                    Dhcpv6Option::ClientFqdn(fqdn.to_string())
+                if let Some(fqdn) = parse_dhcpv6_client_fqdn(value) {
+                    Dhcpv6Option::ClientFqdn(fqdn)
                 } else {
                     Dhcpv6Option::Other {
                         code: opt_code,
@@ -474,6 +478,105 @@ pub fn parse_dhcpv6_payload(
         transaction_id,
         options,
     })
+}
+
+/// Keep hostnames printable and safe for CSV/UI output.
+fn sanitize_hostname(input: &str) -> Option<String> {
+    let cleaned: String = input
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .collect();
+
+    let cleaned = cleaned
+        .trim_matches('.')
+        .trim_matches('-')
+        .trim_matches('_')
+        .to_string();
+
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
+}
+
+/// Parse DHCPv6 Client FQDN (option 39).
+/// RFC 4704 format: 1-byte flags followed by a DNS wire-format name.
+fn parse_dhcpv6_client_fqdn(value: &[u8]) -> Option<String> {
+    if value.len() < 2 {
+        return None;
+    }
+
+    // Skip flags byte
+    let name = decode_dns_name(&value[1..])?;
+    sanitize_hostname(&name)
+}
+
+/// Decode a basic DNS wire-format name (no compression pointers expected here).
+fn decode_dns_name(data: &[u8]) -> Option<String> {
+    let mut labels = Vec::new();
+    let mut index = 0usize;
+
+    while index < data.len() {
+        let label_len = data[index] as usize;
+        index += 1;
+
+        if label_len == 0 {
+            break;
+        }
+
+        if label_len > 63 || index + label_len > data.len() {
+            return None;
+        }
+
+        let label_bytes = &data[index..index + label_len];
+        let label = std::str::from_utf8(label_bytes).ok()?;
+        labels.push(label.to_string());
+        index += label_len;
+    }
+
+    if labels.is_empty() {
+        None
+    } else {
+        Some(labels.join("."))
+    }
+}
+
+fn format_duid_identifier(duid: &[u8]) -> String {
+    let hex = duid
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<Vec<_>>()
+        .join(":");
+    format!("duid:{}", hex)
+}
+
+/// Extract a 6-byte Ethernet MAC from DUID-LLT or DUID-LL when possible.
+fn extract_mac_from_duid(duid: &[u8]) -> Option<String> {
+    if duid.len() < 4 {
+        return None;
+    }
+
+    let duid_type = u16::from_be_bytes([duid[0], duid[1]]);
+    let hw_type = u16::from_be_bytes([duid[2], duid[3]]);
+
+    // Hardware type 1 == Ethernet
+    if hw_type != 1 {
+        return None;
+    }
+
+    let mac_bytes = match duid_type {
+        // DUID-LLT: type(2) + hw(2) + time(4) + lladdr(n)
+        1 if duid.len() >= 14 => &duid[8..14],
+        // DUID-LL: type(2) + hw(2) + lladdr(n)
+        3 if duid.len() >= 10 => &duid[4..10],
+        _ => return None,
+    };
+
+    Some(format!(
+        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        mac_bytes[0], mac_bytes[1], mac_bytes[2], mac_bytes[3], mac_bytes[4], mac_bytes[5]
+    ))
 }
 
 /// Check if UDP ports indicate DHCPv4 traffic
@@ -598,40 +701,160 @@ impl MdnsServiceRegistry {
     /// Add default well-known services
     fn add_default_services(&mut self) {
         // Apple TV / Streaming devices
-        self.add_full("_airplay._tcp", "AirPlay", Some("Apple"), Some("Media Streamer"));
-        self.add_full("_raop._tcp", "Remote Audio (AirPlay)", Some("Apple"), Some("Media Streamer"));
-        self.add_full("_companion-link._tcp", "AirPlay 2 Companion", Some("Apple"), Some("Media Streamer"));
-        self.add_full("_touch-able._tcp", "Apple TV Remote", Some("Apple"), Some("Apple TV"));
-        self.add_full("_mediaremotetv._tcp", "Apple TV Media Remote", Some("Apple"), Some("Apple TV"));
-        self.add_full("_appletv-v2._tcp", "Apple TV", Some("Apple"), Some("Apple TV"));
+        self.add_full(
+            "_airplay._tcp",
+            "AirPlay",
+            Some("Apple"),
+            Some("Media Streamer"),
+        );
+        self.add_full(
+            "_raop._tcp",
+            "Remote Audio (AirPlay)",
+            Some("Apple"),
+            Some("Media Streamer"),
+        );
+        self.add_full(
+            "_companion-link._tcp",
+            "AirPlay 2 Companion",
+            Some("Apple"),
+            Some("Media Streamer"),
+        );
+        self.add_full(
+            "_touch-able._tcp",
+            "Apple TV Remote",
+            Some("Apple"),
+            Some("Apple TV"),
+        );
+        self.add_full(
+            "_mediaremotetv._tcp",
+            "Apple TV Media Remote",
+            Some("Apple"),
+            Some("Apple TV"),
+        );
+        self.add_full(
+            "_appletv-v2._tcp",
+            "Apple TV",
+            Some("Apple"),
+            Some("Apple TV"),
+        );
 
         // Apple Mobile / Mac devices
-        self.add_full("_airdrop._tcp", "AirDrop", Some("Apple"), Some("Apple Device"));
-        self.add_full("_device-info._tcp", "Device Info", Some("Apple"), Some("Apple Device"));
-        self.add_full("_apple-mobdev._tcp", "Apple Mobile Device", Some("Apple"), Some("Apple iPhone"));
-        self.add_full("_apple-mobdev2._tcp", "Apple Mobile Device", Some("Apple"), Some("Apple iPhone"));
-        self.add_full("_remotepairing._tcp", "Apple Remote Pairing", Some("Apple"), Some("Apple iPhone"));
-        self.add_full("_atc._tcp", "Apple Transfer Control", Some("Apple"), Some("Apple iPhone"));
-        self.add_full("_rdlink._tcp", "Apple Remote Device Link", Some("Apple"), Some("Apple iPhone"));
+        self.add_full(
+            "_airdrop._tcp",
+            "AirDrop",
+            Some("Apple"),
+            Some("Apple Device"),
+        );
+        self.add_full(
+            "_device-info._tcp",
+            "Device Info",
+            Some("Apple"),
+            Some("Apple Device"),
+        );
+        self.add_full(
+            "_apple-mobdev._tcp",
+            "Apple Mobile Device",
+            Some("Apple"),
+            Some("Apple iPhone"),
+        );
+        self.add_full(
+            "_apple-mobdev2._tcp",
+            "Apple Mobile Device",
+            Some("Apple"),
+            Some("Apple iPhone"),
+        );
+        self.add_full(
+            "_remotepairing._tcp",
+            "Apple Remote Pairing",
+            Some("Apple"),
+            Some("Apple iPhone"),
+        );
+        self.add_full(
+            "_atc._tcp",
+            "Apple Transfer Control",
+            Some("Apple"),
+            Some("Apple iPhone"),
+        );
+        self.add_full(
+            "_rdlink._tcp",
+            "Apple Remote Device Link",
+            Some("Apple"),
+            Some("Apple iPhone"),
+        );
 
         // Apple Smart Home
-        self.add_full("_homekit._tcp", "HomeKit", Some("Apple"), Some("Smart Home Hub"));
-        self.add_full("_hap._tcp", "HomeKit Accessory", Some("Apple"), Some("Smart Home Device"));
+        self.add_full(
+            "_homekit._tcp",
+            "HomeKit",
+            Some("Apple"),
+            Some("Smart Home Hub"),
+        );
+        self.add_full(
+            "_hap._tcp",
+            "HomeKit Accessory",
+            Some("Apple"),
+            Some("Smart Home Device"),
+        );
 
         // Apple Network/Storage
-        self.add_full("_airport._tcp", "AirPort Base Station", Some("Apple"), Some("Router"));
-        self.add_full("_daap._tcp", "iTunes Library (DAAP)", Some("Apple"), Some("Media Server"));
-        self.add_full("_dpap._tcp", "iPhoto Library", Some("Apple"), Some("Media Server"));
-        self.add_full("_afpovertcp._tcp", "Apple File Sharing (AFP)", Some("Apple"), Some("File Server"));
+        self.add_full(
+            "_airport._tcp",
+            "AirPort Base Station",
+            Some("Apple"),
+            Some("Router"),
+        );
+        self.add_full(
+            "_daap._tcp",
+            "iTunes Library (DAAP)",
+            Some("Apple"),
+            Some("Media Server"),
+        );
+        self.add_full(
+            "_dpap._tcp",
+            "iPhoto Library",
+            Some("Apple"),
+            Some("Media Server"),
+        );
+        self.add_full(
+            "_afpovertcp._tcp",
+            "Apple File Sharing (AFP)",
+            Some("Apple"),
+            Some("File Server"),
+        );
 
         // Google Chromecast / Android TV
-        self.add_full("_googlecast._tcp", "Google Chromecast", Some("Google"), Some("Chromecast"));
-        self.add_full("_googlezone._tcp", "Google Zone", Some("Google"), Some("Chromecast"));
-        self.add_full("_androidtvremote._tcp", "Android TV Remote", Some("Google"), Some("Android TV"));
-        self.add_full("_physicalweb._tcp", "Physical Web", Some("Google"), Some("IoT Beacon"));
+        self.add_full(
+            "_googlecast._tcp",
+            "Google Chromecast",
+            Some("Google"),
+            Some("Chromecast"),
+        );
+        self.add_full(
+            "_googlezone._tcp",
+            "Google Zone",
+            Some("Google"),
+            Some("Chromecast"),
+        );
+        self.add_full(
+            "_androidtvremote._tcp",
+            "Android TV Remote",
+            Some("Google"),
+            Some("Android TV"),
+        );
+        self.add_full(
+            "_physicalweb._tcp",
+            "Physical Web",
+            Some("Google"),
+            Some("IoT Beacon"),
+        );
 
         // Amazon Fire TV
-        self.add_full("_amzn-wplay._tcp", "Amazon Fire TV", Some("Amazon"), Some("Fire TV"));
+        self.add_full(
+            "_amzn-wplay._tcp",
+            "Amazon Fire TV",
+            Some("Amazon"),
+            Some("Fire TV"),
+        );
 
         // Printers & Scanners
         self.add_full("_printer._tcp", "LPR Printer", None, Some("Printer"));
@@ -648,31 +871,91 @@ impl MdnsServiceRegistry {
         self.add_full("_ssh._tcp", "SSH Server", None, Some("Server"));
         self.add_full("_sftp-ssh._tcp", "SFTP over SSH", None, Some("Server"));
         self.add_full("_ftp._tcp", "FTP Server", None, Some("Server"));
-        self.add_full("_smb._tcp", "Windows/Samba Sharing", None, Some("File Server"));
-        self.add_full("_nfs._tcp", "Network File System", None, Some("File Server"));
+        self.add_full(
+            "_smb._tcp",
+            "Windows/Samba Sharing",
+            None,
+            Some("File Server"),
+        );
+        self.add_full(
+            "_nfs._tcp",
+            "Network File System",
+            None,
+            Some("File Server"),
+        );
         self.add_full("_rfb._tcp", "Screen Sharing (VNC)", None, Some("Desktop"));
         self.add_full("_telnet._tcp", "Telnet", None, Some("Server"));
         self.add_full("_workstation._tcp", "Workstation", None, Some("Desktop"));
 
         // Media/Entertainment
-        self.add_full("_spotify-connect._tcp", "Spotify Connect", Some("Spotify"), Some("Speaker"));
-        self.add_full("_nvstream_dbd._tcp", "NVIDIA GameStream", Some("NVIDIA"), Some("Gaming PC"));
+        self.add_full(
+            "_spotify-connect._tcp",
+            "Spotify Connect",
+            Some("Spotify"),
+            Some("Speaker"),
+        );
+        self.add_full(
+            "_nvstream_dbd._tcp",
+            "NVIDIA GameStream",
+            Some("NVIDIA"),
+            Some("Gaming PC"),
+        );
 
         // Smart Home / IoT
-        self.add_full("_hue._tcp", "Philips Hue", Some("Philips"), Some("Smart Light"));
-        self.add_full("_miio._udp", "Xiaomi IoT", Some("Xiaomi"), Some("IoT Device"));
+        self.add_full(
+            "_hue._tcp",
+            "Philips Hue",
+            Some("Philips"),
+            Some("Smart Light"),
+        );
+        self.add_full(
+            "_miio._udp",
+            "Xiaomi IoT",
+            Some("Xiaomi"),
+            Some("IoT Device"),
+        );
 
         // NAS / Storage
-        self.add_full("_readynas._tcp", "Netgear ReadyNAS", Some("Netgear"), Some("NAS"));
-        self.add_full("_udisks-ssh._tcp", "Linux Disk Service", Some("Linux"), Some("NAS"));
+        self.add_full(
+            "_readynas._tcp",
+            "Netgear ReadyNAS",
+            Some("Netgear"),
+            Some("NAS"),
+        );
+        self.add_full(
+            "_udisks-ssh._tcp",
+            "Linux Disk Service",
+            Some("Linux"),
+            Some("NAS"),
+        );
 
         // Network Equipment
-        self.add_full("_csco-sb._tcp", "Cisco Small Business", Some("Cisco"), Some("Router/Switch"));
+        self.add_full(
+            "_csco-sb._tcp",
+            "Cisco Small Business",
+            Some("Cisco"),
+            Some("Router/Switch"),
+        );
 
         // Other
-        self.add_full("_teamviewer._tcp", "TeamViewer", Some("TeamViewer"), Some("Desktop"));
-        self.add_full("_1password4._tcp", "1Password Sync", Some("1Password"), Some("Desktop"));
-        self.add_full("_privet._tcp", "Google Cloud Print", Some("Google"), Some("Printer"));
+        self.add_full(
+            "_teamviewer._tcp",
+            "TeamViewer",
+            Some("TeamViewer"),
+            Some("Desktop"),
+        );
+        self.add_full(
+            "_1password4._tcp",
+            "1Password Sync",
+            Some("1Password"),
+            Some("Desktop"),
+        );
+        self.add_full(
+            "_privet._tcp",
+            "Google Cloud Print",
+            Some("Google"),
+            Some("Printer"),
+        );
         self.add_full("_arduino._tcp", "Arduino", None, Some("Microcontroller"));
         self.add_full("_tivo-videos._tcp", "TiVo", Some("TiVo"), Some("DVR"));
         self.add_full("_psia._tcp", "IP Camera (PSIA)", None, Some("IP Camera"));
@@ -685,7 +968,13 @@ impl MdnsServiceRegistry {
     }
 
     /// Add a service to the registry with all fields
-    pub fn add_full(&mut self, service_type: &str, description: &str, vendor: Option<&str>, device_type: Option<&str>) {
+    pub fn add_full(
+        &mut self,
+        service_type: &str,
+        description: &str,
+        vendor: Option<&str>,
+        device_type: Option<&str>,
+    ) {
         let normalized = Self::normalize_service_type(service_type);
         self.services.insert(
             normalized.clone(),
@@ -731,7 +1020,12 @@ impl MdnsServiceRegistry {
             let vendor = Self::detect_vendor_from_description(&description);
             let device_type = Self::detect_device_type_from_description(&description);
 
-            self.add_full(service_type, &description, vendor.as_deref(), device_type.as_deref());
+            self.add_full(
+                service_type,
+                &description,
+                vendor.as_deref(),
+                device_type.as_deref(),
+            );
             count += 1;
         }
 
@@ -741,7 +1035,7 @@ impl MdnsServiceRegistry {
     /// Detect device type from description text
     fn detect_device_type_from_description(description: &str) -> Option<String> {
         let desc_lower = description.to_lowercase();
-        
+
         // Streaming devices
         if desc_lower.contains("chromecast") || desc_lower.contains("chrome cast") {
             return Some("Chromecast".to_string());
@@ -761,15 +1055,18 @@ impl MdnsServiceRegistry {
         if desc_lower.contains("tivo") {
             return Some("DVR".to_string());
         }
-        
+
         // Mobile devices
-        if desc_lower.contains("iphone") || desc_lower.contains("ipad") || desc_lower.contains("ios device") {
+        if desc_lower.contains("iphone")
+            || desc_lower.contains("ipad")
+            || desc_lower.contains("ios device")
+        {
             return Some("Apple iPhone".to_string());
         }
         if desc_lower.contains("mobile device") {
             return Some("Mobile Device".to_string());
         }
-        
+
         // Printers & Scanners
         if desc_lower.contains("printer") || desc_lower.contains("printing") {
             return Some("Printer".to_string());
@@ -777,7 +1074,7 @@ impl MdnsServiceRegistry {
         if desc_lower.contains("scanner") || desc_lower.contains("scanning") {
             return Some("Scanner".to_string());
         }
-        
+
         // Network equipment
         if desc_lower.contains("router") || desc_lower.contains("base station") {
             return Some("Router".to_string());
@@ -785,10 +1082,13 @@ impl MdnsServiceRegistry {
         if desc_lower.contains("switch") {
             return Some("Router/Switch".to_string());
         }
-        if desc_lower.contains("nas") || desc_lower.contains("network attached storage") || desc_lower.contains("readynas") {
+        if desc_lower.contains("nas")
+            || desc_lower.contains("network attached storage")
+            || desc_lower.contains("readynas")
+        {
             return Some("NAS".to_string());
         }
-        
+
         // Smart home
         if desc_lower.contains("homekit") && desc_lower.contains("accessory") {
             return Some("Smart Home Device".to_string());
@@ -802,12 +1102,12 @@ impl MdnsServiceRegistry {
         if desc_lower.contains("smart speaker") || desc_lower.contains("speaker") {
             return Some("Speaker".to_string());
         }
-        
+
         // Cameras
         if desc_lower.contains("camera") || desc_lower.contains("ip cam") {
             return Some("IP Camera".to_string());
         }
-        
+
         // Servers
         if desc_lower.contains("file sharing") || desc_lower.contains("file server") {
             return Some("File Server".to_string());
@@ -815,10 +1115,11 @@ impl MdnsServiceRegistry {
         if desc_lower.contains("web server") || desc_lower.contains("http") {
             return Some("Server".to_string());
         }
-        if desc_lower.contains("ssh") || desc_lower.contains("ftp") || desc_lower.contains("telnet") {
+        if desc_lower.contains("ssh") || desc_lower.contains("ftp") || desc_lower.contains("telnet")
+        {
             return Some("Server".to_string());
         }
-        
+
         // Development
         if desc_lower.contains("arduino") {
             return Some("Microcontroller".to_string());
@@ -829,39 +1130,56 @@ impl MdnsServiceRegistry {
         if desc_lower.contains("jenkins") {
             return Some("CI Server".to_string());
         }
-        
+
         // Desktop/Workstation
-        if desc_lower.contains("screen sharing") || desc_lower.contains("remote desktop") || desc_lower.contains("vnc") {
+        if desc_lower.contains("screen sharing")
+            || desc_lower.contains("remote desktop")
+            || desc_lower.contains("vnc")
+        {
             return Some("Desktop".to_string());
         }
         if desc_lower.contains("workstation") || desc_lower.contains("workgroup") {
             return Some("Desktop".to_string());
         }
-        
+
         // Media servers
-        if desc_lower.contains("itunes") || desc_lower.contains("media server") || desc_lower.contains("plex") {
+        if desc_lower.contains("itunes")
+            || desc_lower.contains("media server")
+            || desc_lower.contains("plex")
+        {
             return Some("Media Server".to_string());
         }
         if desc_lower.contains("spotify") {
             return Some("Speaker".to_string());
         }
-        
+
         // Gaming
         if desc_lower.contains("gamestream") || desc_lower.contains("nvidia shield") {
             return Some("Gaming Device".to_string());
         }
-        
+
         None
     }
 
     /// Detect vendor from description text
     fn detect_vendor_from_description(description: &str) -> Option<String> {
         let desc_lower = description.to_lowercase();
-        if desc_lower.contains("apple") || desc_lower.contains("osx") || desc_lower.contains("itunes") || desc_lower.contains("iphone") || desc_lower.contains("ipad") {
+        if desc_lower.contains("apple")
+            || desc_lower.contains("osx")
+            || desc_lower.contains("itunes")
+            || desc_lower.contains("iphone")
+            || desc_lower.contains("ipad")
+        {
             Some("Apple".to_string())
-        } else if desc_lower.contains("google") || desc_lower.contains("chrome") || desc_lower.contains("android") {
+        } else if desc_lower.contains("google")
+            || desc_lower.contains("chrome")
+            || desc_lower.contains("android")
+        {
             Some("Google".to_string())
-        } else if desc_lower.contains("amazon") || desc_lower.contains("fire tv") || desc_lower.contains("alexa") {
+        } else if desc_lower.contains("amazon")
+            || desc_lower.contains("fire tv")
+            || desc_lower.contains("alexa")
+        {
             Some("Amazon".to_string())
         } else if desc_lower.contains("samsung") {
             Some("Samsung".to_string())
@@ -871,7 +1189,10 @@ impl MdnsServiceRegistry {
             Some("HP".to_string())
         } else if desc_lower.contains("canon") {
             Some("Canon".to_string())
-        } else if desc_lower.contains("ubuntu") || desc_lower.contains("linux") || desc_lower.contains("raspberry") {
+        } else if desc_lower.contains("ubuntu")
+            || desc_lower.contains("linux")
+            || desc_lower.contains("raspberry")
+        {
             Some("Linux".to_string())
         } else if desc_lower.contains("cisco") {
             Some("Cisco".to_string())
@@ -908,7 +1229,8 @@ impl MdnsServiceRegistry {
 
     /// Get device type for a service type
     pub fn get_device_type(&self, service_type: &str) -> Option<&str> {
-        self.lookup(service_type).and_then(|s| s.device_type.as_deref())
+        self.lookup(service_type)
+            .and_then(|s| s.device_type.as_deref())
     }
 
     /// Get all registered services
@@ -1158,10 +1480,13 @@ pub fn download_ieee_oui<P: AsRef<Path>>(output_path: P, url: Option<&str>) -> R
     // Use curl to download the file
     let output = std::process::Command::new("curl")
         .args([
-            "-fsSL",           // fail silently, follow redirects, show errors
-            "--connect-timeout", "30",
-            "--max-time", "120",
-            "-o", output_path.to_str().ok_or("Invalid output path")?,
+            "-fsSL", // fail silently, follow redirects, show errors
+            "--connect-timeout",
+            "30",
+            "--max-time",
+            "120",
+            "-o",
+            output_path.to_str().ok_or("Invalid output path")?,
             url,
         ])
         .output()
@@ -1386,7 +1711,8 @@ pub fn parse_mdns_payload(
             return None;
         }
 
-        let record_type = MdnsRecordType::from(u16::from_be_bytes([payload[offset], payload[offset + 1]]));
+        let record_type =
+            MdnsRecordType::from(u16::from_be_bytes([payload[offset], payload[offset + 1]]));
         // Skip QCLASS (2 bytes)
         offset += 4;
 
@@ -1467,7 +1793,11 @@ fn parse_dns_name(payload: &[u8], start: usize) -> Option<(String, usize)> {
 
 /// Parse DNS resource records
 #[cfg(feature = "mdns")]
-fn parse_dns_records(payload: &[u8], start: usize, count: usize) -> Option<(Vec<MdnsRecord>, usize)> {
+fn parse_dns_records(
+    payload: &[u8],
+    start: usize,
+    count: usize,
+) -> Option<(Vec<MdnsRecord>, usize)> {
     let mut records = Vec::with_capacity(count);
     let mut offset = start;
 
@@ -1479,7 +1809,8 @@ fn parse_dns_records(payload: &[u8], start: usize, count: usize) -> Option<(Vec<
             return None;
         }
 
-        let record_type = MdnsRecordType::from(u16::from_be_bytes([payload[offset], payload[offset + 1]]));
+        let record_type =
+            MdnsRecordType::from(u16::from_be_bytes([payload[offset], payload[offset + 1]]));
         // Skip CLASS (2 bytes) - usually IN (1) with cache-flush bit
         offset += 4;
 
@@ -1575,7 +1906,9 @@ fn parse_record_data(
             }
             Some(MdnsRecordData::Txt(strings))
         }
-        _ => Some(MdnsRecordData::Raw(payload[offset..offset + length].to_vec())),
+        _ => Some(MdnsRecordData::Raw(
+            payload[offset..offset + length].to_vec(),
+        )),
     }
 }
 
@@ -1594,50 +1927,52 @@ impl MdnsQuerier {
     /// Create a new mDNS querier
     pub fn new() -> std::io::Result<Self> {
         use std::net::{Ipv4Addr, SocketAddrV4};
-        
+
         let socket = std::net::UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))?;
-        
+
         // Set multicast TTL
         socket.set_multicast_ttl_v4(255)?;
-        
+
         // Enable reuse
         socket.set_nonblocking(false)?;
-        
+
         Ok(Self { socket })
     }
 
     /// Send a query for a specific service type (e.g., "_http._tcp.local")
     pub fn query_service(&self, service_type: &str) -> std::io::Result<()> {
         let packet = build_mdns_query(service_type, MdnsRecordType::Ptr);
-        self.socket.send_to(&packet, (MDNS_IPV4_MULTICAST, MDNS_PORT))?;
+        self.socket
+            .send_to(&packet, (MDNS_IPV4_MULTICAST, MDNS_PORT))?;
         Ok(())
     }
 
     /// Send a query for a specific hostname (e.g., "mydevice.local")
     pub fn query_hostname(&self, hostname: &str) -> std::io::Result<()> {
         let packet = build_mdns_query(hostname, MdnsRecordType::Any);
-        self.socket.send_to(&packet, (MDNS_IPV4_MULTICAST, MDNS_PORT))?;
+        self.socket
+            .send_to(&packet, (MDNS_IPV4_MULTICAST, MDNS_PORT))?;
         Ok(())
     }
 
     /// Query common service types for device discovery
     pub fn query_common_services(&self) -> std::io::Result<()> {
         let services = [
-            "_services._dns-sd._udp.local",   // Service enumeration
-            "_http._tcp.local",               // HTTP servers
-            "_https._tcp.local",              // HTTPS servers
-            "_airplay._tcp.local",            // Apple AirPlay
-            "_raop._tcp.local",               // Apple Remote Audio
-            "_googlecast._tcp.local",         // Google Chromecast
-            "_googlezone._tcp.local",         // Google Chromecast
-            "_spotify-connect._tcp.local",    // Spotify Connect
-            "_smb._tcp.local",                // SMB file sharing
-            "_afpovertcp._tcp.local",         // AFP file sharing
-            "_ssh._tcp.local",                // SSH servers
-            "_printer._tcp.local",            // Printers
-            "_ipp._tcp.local",                // IPP printers
-            "_hap._tcp.local",                // HomeKit accessories
-            "_homekit._tcp.local",            // HomeKit
+            "_services._dns-sd._udp.local", // Service enumeration
+            "_http._tcp.local",             // HTTP servers
+            "_https._tcp.local",            // HTTPS servers
+            "_airplay._tcp.local",          // Apple AirPlay
+            "_raop._tcp.local",             // Apple Remote Audio
+            "_googlecast._tcp.local",       // Google Chromecast
+            "_googlezone._tcp.local",       // Google Chromecast
+            "_spotify-connect._tcp.local",  // Spotify Connect
+            "_smb._tcp.local",              // SMB file sharing
+            "_afpovertcp._tcp.local",       // AFP file sharing
+            "_ssh._tcp.local",              // SSH servers
+            "_printer._tcp.local",          // Printers
+            "_ipp._tcp.local",              // IPP printers
+            "_hap._tcp.local",              // HomeKit accessories
+            "_homekit._tcp.local",          // HomeKit
         ];
 
         for service in services {
@@ -1687,6 +2022,221 @@ pub fn build_mdns_query(name: &str, record_type: MdnsRecordType) -> Vec<u8> {
     packet
 }
 
+// ============================================================================
+// SSDP / UPnP Support
+// ============================================================================
+
+/// SSDP port used for discovery and responses
+#[cfg(feature = "ssdp")]
+pub const SSDP_PORT: u16 = 1900;
+
+/// SSDP IPv4 multicast address
+#[cfg(feature = "ssdp")]
+pub const SSDP_IPV4_MULTICAST: Ipv4Addr = Ipv4Addr::new(239, 255, 255, 250);
+
+/// SSDP IPv6 multicast address
+#[cfg(feature = "ssdp")]
+pub const SSDP_IPV6_MULTICAST: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0x000c);
+
+/// SSDP message types
+#[cfg(feature = "ssdp")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SsdpMessageType {
+    /// NOTIFY advertisement
+    Notify,
+    /// M-SEARCH discovery request
+    Search,
+    /// HTTP/1.1 200 OK response
+    Response,
+    /// Unknown start line
+    Unknown(String),
+}
+
+#[cfg(feature = "ssdp")]
+impl std::fmt::Display for SsdpMessageType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SsdpMessageType::Notify => write!(f, "NOTIFY"),
+            SsdpMessageType::Search => write!(f, "M-SEARCH"),
+            SsdpMessageType::Response => write!(f, "RESPONSE"),
+            SsdpMessageType::Unknown(value) => write!(f, "UNKNOWN({})", value),
+        }
+    }
+}
+
+/// Parsed SSDP / UPnP packet information
+#[cfg(feature = "ssdp")]
+#[derive(Debug, Clone)]
+pub struct SsdpPacket {
+    /// Source MAC address
+    pub source_mac: String,
+    /// Source IP address
+    pub source_ip: std::net::IpAddr,
+    /// Destination IP address
+    pub dest_ip: std::net::IpAddr,
+    /// Message type inferred from the HTTP-style start line
+    pub message_type: SsdpMessageType,
+    /// First line of the SSDP message
+    pub start_line: String,
+    /// Parsed headers keyed by lowercase header name
+    pub headers: HashMap<String, String>,
+}
+
+#[cfg(feature = "ssdp")]
+impl SsdpPacket {
+    /// Get a header value by name
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .get(&name.to_lowercase())
+            .map(|value| value.as_str())
+    }
+
+    /// Collect the discovery-oriented identifiers advertised by this packet
+    pub fn service_terms(&self) -> Vec<String> {
+        let mut terms = Vec::new();
+        for header in ["nt", "st", "usn"] {
+            if let Some(value) = self.header(header) {
+                let normalized = value.trim().to_string();
+                if !normalized.is_empty() && !terms.contains(&normalized) {
+                    terms.push(normalized);
+                }
+            }
+        }
+        terms
+    }
+
+    /// Combine the useful fingerprint headers into a single string for heuristic matching
+    pub fn fingerprint_text(&self) -> String {
+        let mut parts = vec![self.start_line.clone()];
+        for header in ["nt", "st", "usn", "server", "location"] {
+            if let Some(value) = self.header(header) {
+                parts.push(value.to_string());
+            }
+        }
+        parts.join(" ")
+    }
+}
+
+/// SSDP querier for active M-SEARCH discovery
+#[cfg(feature = "ssdp")]
+pub struct SsdpQuerier {
+    socket: std::net::UdpSocket,
+}
+
+#[cfg(feature = "ssdp")]
+impl SsdpQuerier {
+    /// Create a new SSDP querier
+    pub fn new() -> std::io::Result<Self> {
+        use std::net::{Ipv4Addr, SocketAddrV4};
+
+        let socket = std::net::UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))?;
+
+        // Set multicast TTL
+        socket.set_multicast_ttl_v4(255)?;
+
+        // Enable reuse
+        socket.set_nonblocking(false)?;
+
+        Ok(Self { socket })
+    }
+
+    /// Send an M-SEARCH discovery request for a specific device type (e.g., "ssdp:all" or "upnp:rootdevice")
+    pub fn search_device(&self, device_type: &str) -> std::io::Result<()> {
+        let request = build_ssdp_search_request(device_type);
+        self.socket
+            .send_to(&request, (SSDP_IPV4_MULTICAST, SSDP_PORT))?;
+        Ok(())
+    }
+
+    /// Query common device types for UPnP discovery
+    pub fn search_common_devices(&self) -> std::io::Result<()> {
+        let device_types = [
+            "ssdp:all",        // All SSDP devices
+            "upnp:rootdevice", // All UPnP root devices
+            "urn:schemas-upnp-org:device:MediaServer:1",
+            "urn:schemas-upnp-org:device:MediaRenderer:1",
+            "urn:schemas-upnp-org:device:InternetGatewayDevice:1", // Routers
+            "urn:schemas-upnp-org:device:PrinterBasic:1",          // Printers
+            "urn:dial-multiscreen-org:service:dial-second-screen-service:1", // DIAL servers
+        ];
+
+        for device_type in device_types {
+            self.search_device(device_type)?;
+            // Small delay to avoid flooding
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        Ok(())
+    }
+}
+
+/// Build an SSDP M-SEARCH request packet
+#[cfg(feature = "ssdp")]
+pub fn build_ssdp_search_request(search_target: &str) -> Vec<u8> {
+    // M-SEARCH request format per UPnP specification
+    let request = format!(
+        "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 2\r\nST: {}\r\n\r\n",
+        search_target
+    );
+    request.into_bytes()
+}
+
+/// Check if UDP ports indicate SSDP traffic
+#[cfg(feature = "ssdp")]
+pub fn is_ssdp_ports(src: u16, dest: u16) -> bool {
+    src == SSDP_PORT || dest == SSDP_PORT
+}
+
+/// Parse an SSDP / UPnP packet from raw UDP payload
+#[cfg(feature = "ssdp")]
+pub fn parse_ssdp_payload(
+    payload: &[u8],
+    source_mac: String,
+    source_ip: std::net::IpAddr,
+    dest_ip: std::net::IpAddr,
+) -> Option<SsdpPacket> {
+    if payload.is_empty() {
+        return None;
+    }
+
+    let text = String::from_utf8_lossy(payload);
+    let mut lines = text
+        .lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty());
+    let start_line = lines.next()?.to_string();
+    let upper_start = start_line.to_ascii_uppercase();
+
+    let message_type = if upper_start.starts_with("M-SEARCH * HTTP/1.1") {
+        SsdpMessageType::Search
+    } else if upper_start.starts_with("NOTIFY * HTTP/1.1") {
+        SsdpMessageType::Notify
+    } else if upper_start.starts_with("HTTP/1.1 200") {
+        SsdpMessageType::Response
+    } else {
+        SsdpMessageType::Unknown(start_line.clone())
+    };
+
+    let mut headers = HashMap::new();
+    for line in lines {
+        if let Some((name, value)) = line.split_once(':') {
+            let key = name.trim().to_lowercase();
+            let value = value.trim().to_string();
+            if !key.is_empty() {
+                headers.insert(key, value);
+            }
+        }
+    }
+
+    Some(SsdpPacket {
+        source_mac,
+        source_ip,
+        dest_ip,
+        message_type,
+        start_line,
+        headers,
+    })
+}
+
 /// Process an Ethernet frame and extract DHCP event if present
 pub fn process_ethernet_frame(frame: &[u8]) -> Option<DhcpEvent> {
     let ethernet = EthernetPacket::new(frame)?;
@@ -1698,8 +2248,8 @@ pub fn process_ethernet_frame(frame: &[u8]) -> Option<DhcpEvent> {
     }
 }
 
-/// Process an Ethernet frame and extract NetworkEvent (DHCP or mDNS) if present
-#[cfg(feature = "mdns")]
+/// Process an Ethernet frame and extract NetworkEvent (DHCP, mDNS, or SSDP) if present
+#[cfg(any(feature = "mdns", feature = "ssdp"))]
 pub fn process_ethernet_frame_extended(frame: &[u8]) -> Option<NetworkEvent> {
     let ethernet = EthernetPacket::new(frame)?;
 
@@ -1736,7 +2286,7 @@ fn process_ipv4_packet(ethernet: &EthernetPacket) -> Option<DhcpEvent> {
     Some(DhcpEvent::V4(packet))
 }
 
-#[cfg(feature = "mdns")]
+#[cfg(any(feature = "mdns", feature = "ssdp"))]
 fn process_ipv4_packet_extended(ethernet: &EthernetPacket) -> Option<NetworkEvent> {
     let ipv4 = Ipv4Packet::new(ethernet.payload())?;
 
@@ -1748,7 +2298,7 @@ fn process_ipv4_packet_extended(ethernet: &EthernetPacket) -> Option<NetworkEven
     let src = udp.get_source();
     let dest = udp.get_destination();
 
-    // Check for mDNS first
+    #[cfg(feature = "mdns")]
     if is_mdns_ports(src, dest) {
         let source_mac = ethernet.get_source().to_string().to_lowercase();
         let packet = parse_mdns_payload(
@@ -1758,6 +2308,18 @@ fn process_ipv4_packet_extended(ethernet: &EthernetPacket) -> Option<NetworkEven
             std::net::IpAddr::V4(ipv4.get_destination()),
         )?;
         return Some(NetworkEvent::Mdns(packet));
+    }
+
+    #[cfg(feature = "ssdp")]
+    if is_ssdp_ports(src, dest) {
+        let source_mac = ethernet.get_source().to_string().to_lowercase();
+        let packet = parse_ssdp_payload(
+            udp.payload(),
+            source_mac,
+            std::net::IpAddr::V4(ipv4.get_source()),
+            std::net::IpAddr::V4(ipv4.get_destination()),
+        )?;
+        return Some(NetworkEvent::Ssdp(packet));
     }
 
     // Check for DHCPv4
@@ -1801,7 +2363,7 @@ fn process_ipv6_packet(ethernet: &EthernetPacket) -> Option<DhcpEvent> {
     Some(DhcpEvent::V6(packet))
 }
 
-#[cfg(feature = "mdns")]
+#[cfg(any(feature = "mdns", feature = "ssdp"))]
 fn process_ipv6_packet_extended(ethernet: &EthernetPacket) -> Option<NetworkEvent> {
     let ipv6 = Ipv6Packet::new(ethernet.payload())?;
 
@@ -1813,7 +2375,7 @@ fn process_ipv6_packet_extended(ethernet: &EthernetPacket) -> Option<NetworkEven
     let src = udp.get_source();
     let dest = udp.get_destination();
 
-    // Check for mDNS first
+    #[cfg(feature = "mdns")]
     if is_mdns_ports(src, dest) {
         let source_mac = ethernet.get_source().to_string().to_lowercase();
         let packet = parse_mdns_payload(
@@ -1823,6 +2385,18 @@ fn process_ipv6_packet_extended(ethernet: &EthernetPacket) -> Option<NetworkEven
             std::net::IpAddr::V6(ipv6.get_destination()),
         )?;
         return Some(NetworkEvent::Mdns(packet));
+    }
+
+    #[cfg(feature = "ssdp")]
+    if is_ssdp_ports(src, dest) {
+        let source_mac = ethernet.get_source().to_string().to_lowercase();
+        let packet = parse_ssdp_payload(
+            udp.payload(),
+            source_mac,
+            std::net::IpAddr::V6(ipv6.get_source()),
+            std::net::IpAddr::V6(ipv6.get_destination()),
+        )?;
+        return Some(NetworkEvent::Ssdp(packet));
     }
 
     // Check for DHCPv6
@@ -1899,14 +2473,14 @@ impl DhcpSniffer {
     }
 }
 
-/// Network sniffer that captures both DHCP and mDNS traffic
-#[cfg(feature = "mdns")]
+/// Network sniffer that captures DHCP plus optional discovery traffic
+#[cfg(any(feature = "mdns", feature = "ssdp"))]
 pub struct NetworkSniffer {
     interface_name: String,
     rx: Box<dyn DataLinkReceiver>,
 }
 
-#[cfg(feature = "mdns")]
+#[cfg(any(feature = "mdns", feature = "ssdp"))]
 impl NetworkSniffer {
     /// Create a new network sniffer for the specified interface
     pub fn new(interface_name: &str) -> Result<Self, DhcpError> {
@@ -2031,7 +2605,10 @@ impl DeviceInfo {
 
     /// Add a service to the device if not already present
     pub fn add_service(&mut self, service: &str) -> bool {
-        let normalized = service.to_lowercase().trim_end_matches(".local").to_string();
+        let normalized = service
+            .to_lowercase()
+            .trim_end_matches(".local")
+            .to_string();
         if !self.services.contains(&normalized) {
             self.services.push(normalized);
             self.services.sort();
@@ -2104,8 +2681,8 @@ impl DeviceInfo {
         } else {
             first_seen.clone()
         };
-        // Normalize MAC address to lowercase
-        let mac_address = parts[2].to_lowercase();
+        // Normalize MAC address and migrate legacy DHCPv6 DUID-like identifiers.
+        let mac_address = normalize_device_identifier(&parts[2]);
         let ip_address = parts[3].to_string();
         let ipv6_address = if parts.len() > 4 {
             let v6 = parts[4].trim_matches('"').to_string();
@@ -2115,7 +2692,7 @@ impl DeviceInfo {
         };
         let hostname = if parts.len() > 5 {
             let h = parts[5].trim_matches('"').to_string();
-            if h.is_empty() { None } else { Some(h) }
+            sanitize_hostname(&h)
         } else {
             None
         };
@@ -2229,6 +2806,41 @@ fn is_leap_year(year: i32) -> bool {
     (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
+fn normalize_device_identifier(raw: &str) -> String {
+    let candidate = raw.trim().to_lowercase();
+    let mut bytes: Vec<u8> = Vec::new();
+
+    let source = candidate.strip_prefix("duid:").unwrap_or(&candidate);
+    for token in source.split(':') {
+        if token.len() != 2 {
+            return candidate;
+        }
+        let byte = match u8::from_str_radix(token, 16) {
+            Ok(b) => b,
+            Err(_) => return candidate,
+        };
+        bytes.push(byte);
+    }
+
+    // DUID-LL (type 3), Ethernet hw type 1: 00:03:00:01:xx:xx:xx:xx:xx:xx
+    if bytes.len() == 10 && bytes[0..4] == [0x00, 0x03, 0x00, 0x01] {
+        return format!(
+            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9]
+        );
+    }
+
+    // DUID-LLT (type 1), Ethernet hw type 1: 00:01:00:01:time(4):mac(6)
+    if bytes.len() >= 14 && bytes[0..4] == [0x00, 0x01, 0x00, 0x01] {
+        return format!(
+            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13]
+        );
+    }
+
+    candidate
+}
+
 /// Device tracker that maintains a list of seen devices and saves to CSV
 pub struct DeviceTracker {
     devices: HashMap<String, DeviceInfo>,
@@ -2292,7 +2904,10 @@ impl DeviceTracker {
         for line in reader.lines() {
             let line = line?;
             // Skip header (supports both old and new formats)
-            if line.starts_with("timestamp,") || line.starts_with("last_seen,") || line.starts_with("first_seen,") {
+            if line.starts_with("timestamp,")
+                || line.starts_with("last_seen,")
+                || line.starts_with("first_seen,")
+            {
                 continue;
             }
             if let Some(device) = DeviceInfo::from_csv_line(&line) {
@@ -2308,7 +2923,10 @@ impl DeviceTracker {
         let mut file = File::create(&self.csv_path)?;
 
         // Write header
-        writeln!(file, "first_seen,last_seen,mac_address,ip_address,ipv6_address,hostname,device_type,vendor,services")?;
+        writeln!(
+            file,
+            "first_seen,last_seen,mac_address,ip_address,ipv6_address,hostname,device_type,vendor,services"
+        )?;
 
         // Write devices sorted by last_seen
         let mut devices: Vec<_> = self.devices.values().collect();
@@ -2344,19 +2962,15 @@ impl DeviceTracker {
     /// Update or add a device from a DHCPv6 packet
     /// Returns true if the device was new or updated
     pub fn update_from_dhcpv6(&mut self, packet: &Dhcpv6Packet) -> bool {
-        // For DHCPv6, we use client DUID as identifier (converted to hex string)
-        let mut duid = None;
+        // For DHCPv6, use Ethernet MAC from DUID-LL/LLT when available.
+        // Fall back to a prefixed DUID identifier for non-Ethernet DUID types.
+        let mut client_id = None;
         let mut fqdn = None;
 
         for option in &packet.options {
             match option {
                 Dhcpv6Option::ClientId(data) => {
-                    duid = Some(
-                        data.iter()
-                            .map(|b| format!("{:02X}", b))
-                            .collect::<Vec<_>>()
-                            .join(":"),
-                    );
+                    client_id = Some(data.as_slice());
                 }
                 Dhcpv6Option::ClientFqdn(name) => {
                     fqdn = Some(name.as_str());
@@ -2365,9 +2979,11 @@ impl DeviceTracker {
             }
         }
 
-        // If no DUID, we can't track this device
-        let mac = match duid {
-            Some(d) => d,
+        // If no client-id, we can't track this device
+        let mac = match client_id {
+            Some(data) => {
+                extract_mac_from_duid(data).unwrap_or_else(|| format_duid_identifier(data))
+            }
             None => return false,
         };
 
@@ -2434,7 +3050,11 @@ impl DeviceTracker {
         }
 
         // Get the first hostname for detection purposes
-        let first_hostname = hostname_to_ipv4.keys().chain(hostname_to_ipv6.keys()).next().cloned();
+        let first_hostname = hostname_to_ipv4
+            .keys()
+            .chain(hostname_to_ipv6.keys())
+            .next()
+            .cloned();
 
         // Determine vendor and device type from services and hostname (before borrowing device)
         // Hostname-based detection takes priority for certain patterns
@@ -2516,38 +3136,43 @@ impl DeviceTracker {
     #[cfg(feature = "mdns")]
     fn detect_vendor_from_hostname(hostname: Option<&str>) -> Option<String> {
         let hostname = hostname?.to_lowercase();
-        
+
         // Google/Nest devices often use WICED platform
         if hostname.starts_with("wiced-hap") || hostname.contains("nest") {
             return Some("Google".to_string());
         }
-        
+
         // Google Pixel phones
         if hostname.contains("pixel") {
             return Some("Google".to_string());
         }
-        
+
         // Apple devices
-        if hostname.contains("iphone") || hostname.contains("ipad") || hostname.contains("macbook") 
-            || hostname.contains("imac") || hostname.contains("mac-mini") || hostname.contains("apple") {
+        if hostname.contains("iphone")
+            || hostname.contains("ipad")
+            || hostname.contains("macbook")
+            || hostname.contains("imac")
+            || hostname.contains("mac-mini")
+            || hostname.contains("apple")
+        {
             return Some("Apple".to_string());
         }
-        
+
         // Samsung devices
         if hostname.contains("samsung") || hostname.contains("galaxy") {
             return Some("Samsung".to_string());
         }
-        
+
         // Android devices
         if hostname.starts_with("android") || hostname.starts_with("android_") {
             return Some("Google".to_string());
         }
-        
+
         // HP printers (NPI prefix)
         if hostname.starts_with("npi") {
             return Some("HP".to_string());
         }
-        
+
         None
     }
 
@@ -2555,17 +3180,17 @@ impl DeviceTracker {
     #[cfg(feature = "mdns")]
     fn detect_device_type_from_hostname(hostname: Option<&str>) -> Option<String> {
         let hostname = hostname?.to_lowercase();
-        
+
         // Google Pixel phones - check before other patterns
         if hostname.contains("pixel") {
             return Some("Pixel Phone".to_string());
         }
-        
+
         // Google/Nest thermostats use WICED-hap prefix
         if hostname.starts_with("wiced-hap") {
             return Some("Thermostat".to_string());
         }
-        
+
         // Nest devices
         if hostname.contains("nest") {
             if hostname.contains("thermostat") {
@@ -2576,7 +3201,7 @@ impl DeviceTracker {
             }
             return Some("Smart Home Device".to_string());
         }
-        
+
         // iPhones/iPads
         if hostname.contains("iphone") {
             return Some("Apple iPhone".to_string());
@@ -2584,22 +3209,26 @@ impl DeviceTracker {
         if hostname.contains("ipad") {
             return Some("Apple iPad".to_string());
         }
-        
+
         // Macs
-        if hostname.contains("macbook") || hostname.contains("imac") || hostname.contains("mac-mini") || hostname.contains("mac-pro") {
+        if hostname.contains("macbook")
+            || hostname.contains("imac")
+            || hostname.contains("mac-mini")
+            || hostname.contains("mac-pro")
+        {
             return Some("Mac".to_string());
         }
-        
+
         // HP printers (NPI prefix = Network Peripheral Interface)
         if hostname.starts_with("npi") {
             return Some("Printer".to_string());
         }
-        
+
         // Android phones
         if hostname.starts_with("android") || hostname.starts_with("android_") {
             return Some("Android Phone".to_string());
         }
-        
+
         None
     }
 
@@ -2610,17 +3239,21 @@ impl DeviceTracker {
         // (e.g., a printer that supports AirPrint shouldn't be labeled as Apple)
         let mut has_printer_services = false;
         let mut has_scanner_services = false;
-        
+
         for service in services {
             let s = service.to_lowercase();
-            if s.contains("_printer") || s.contains("_ipp") || s.contains("_pdl-datastream") || s.contains("_print-caps") {
+            if s.contains("_printer")
+                || s.contains("_ipp")
+                || s.contains("_pdl-datastream")
+                || s.contains("_print-caps")
+            {
                 has_printer_services = true;
             }
             if s.contains("_scanner") || s.contains("_uscan") {
                 has_scanner_services = true;
             }
         }
-        
+
         // If it's a printer/scanner, don't assume vendor from generic protocols
         // (Printers often support AirPrint which uses Apple protocols but doesn't mean vendor is Apple)
         let is_peripheral = has_printer_services || has_scanner_services;
@@ -2642,7 +3275,8 @@ impl DeviceTracker {
         for service in services {
             let s = service.to_lowercase();
             // Google services (specific enough to identify vendor)
-            if s.contains("googlecast") || s.contains("googlezone") || s.contains("androidtvremote") {
+            if s.contains("googlecast") || s.contains("googlezone") || s.contains("androidtvremote")
+            {
                 return Some("Google".to_string());
             }
             // Amazon services
@@ -2658,20 +3292,21 @@ impl DeviceTracker {
                 return Some("NVIDIA".to_string());
             }
             // Apple services - only for non-peripheral devices
-            if !is_peripheral && (s.contains("airplay")
-                || s.contains("airdrop")
-                || s.contains("homekit")
-                || s.contains("raop")
-                || s.contains("airport")
-                || s.contains("daap")
-                || s.contains("dpap")
-                || s.contains("afpovertcp")
-                || s.contains("apple")
-                || s.contains("companion-link")
-                || s.contains("touch-able")
-                || s.contains("mediaremotetv")
-                || s.contains("hap._tcp")
-                || s.contains("appletv"))
+            if !is_peripheral
+                && (s.contains("airplay")
+                    || s.contains("airdrop")
+                    || s.contains("homekit")
+                    || s.contains("raop")
+                    || s.contains("airport")
+                    || s.contains("daap")
+                    || s.contains("dpap")
+                    || s.contains("afpovertcp")
+                    || s.contains("apple")
+                    || s.contains("companion-link")
+                    || s.contains("touch-able")
+                    || s.contains("mediaremotetv")
+                    || s.contains("hap._tcp")
+                    || s.contains("appletv"))
             {
                 return Some("Apple".to_string());
             }
@@ -2684,7 +3319,7 @@ impl DeviceTracker {
     fn detect_device_type_from_services(&self, services: &[String]) -> Option<String> {
         // Priority-based detection: check for specific device types first
         // before falling back to registry lookup (which may give generic results)
-        
+
         for service in services {
             let s = service.to_lowercase();
             // Chromecast devices (high priority)
@@ -2708,7 +3343,11 @@ impl DeviceTracker {
                 return Some("Fire TV".to_string());
             }
             // Printers - check BEFORE generic server detection
-            if s.contains("_printer") || s.contains("_ipp") || s.contains("_pdl-datastream") || s.contains("_print-caps") {
+            if s.contains("_printer")
+                || s.contains("_ipp")
+                || s.contains("_pdl-datastream")
+                || s.contains("_print-caps")
+            {
                 return Some("Printer".to_string());
             }
             // Scanners
@@ -2753,10 +3392,211 @@ impl DeviceTracker {
         None
     }
 
+    /// Update or add devices from an SSDP packet
+    /// Returns number of devices updated/added
+    #[cfg(feature = "ssdp")]
+    pub fn update_from_ssdp(&mut self, packet: &SsdpPacket) -> usize {
+        let mut updated = 0;
+        let mac = &packet.source_mac;
+        let fingerprint = packet.fingerprint_text();
+        let services = packet.service_terms();
+
+        let vendor = self.detect_vendor_from_ssdp(&fingerprint);
+        let device_type = self.detect_device_type_from_ssdp(&fingerprint);
+
+        let source_ipv4 = match packet.source_ip {
+            std::net::IpAddr::V4(ip) => Some(ip.to_string()),
+            _ => None,
+        };
+        let source_ipv6 = match packet.source_ip {
+            std::net::IpAddr::V6(ip) => Some(ip.to_string()),
+            _ => None,
+        };
+
+        let initial_ip = source_ipv4.clone().unwrap_or_else(|| "0.0.0.0".to_string());
+
+        let device = self.devices.entry(mac.clone()).or_insert_with(|| {
+            updated += 1;
+            DeviceInfo::new(mac.clone(), initial_ip, None)
+        });
+
+        if let Some(ipv4) = source_ipv4 {
+            if device.ip_address == "0.0.0.0" || device.ip_address.is_empty() {
+                device.ip_address = ipv4;
+                updated += 1;
+            }
+        }
+
+        if let Some(ipv6) = source_ipv6 {
+            if device.set_ipv6_address(&ipv6) {
+                updated += 1;
+            }
+        }
+
+        for service in &services {
+            if device.add_service(service) {
+                updated += 1;
+            }
+        }
+
+        if let Some(v) = vendor {
+            if device.set_vendor(&v) {
+                updated += 1;
+            }
+        }
+
+        if let Some(t) = device_type {
+            if device.set_device_type(&t) {
+                updated += 1;
+            }
+        }
+
+        device.last_seen = format_timestamp(SystemTime::now());
+
+        if updated > 0 {
+            let _ = self.save_to_csv();
+        }
+
+        updated
+    }
+
+    /// Detect vendor from SSDP fingerprints
+    #[cfg(feature = "ssdp")]
+    fn detect_vendor_from_ssdp(&self, fingerprint: &str) -> Option<String> {
+        let fingerprint = fingerprint.to_lowercase();
+
+        if fingerprint.contains("apple")
+            || fingerprint.contains("airport")
+            || fingerprint.contains("airplay")
+        {
+            return Some("Apple".to_string());
+        }
+        if fingerprint.contains("google")
+            || fingerprint.contains("chromecast")
+            || fingerprint.contains("android tv")
+        {
+            return Some("Google".to_string());
+        }
+        if fingerprint.contains("amazon")
+            || fingerprint.contains("alexa")
+            || fingerprint.contains("fire tv")
+        {
+            return Some("Amazon".to_string());
+        }
+        if fingerprint.contains("samsung") {
+            return Some("Samsung".to_string());
+        }
+        if fingerprint.contains("lg ") || fingerprint.contains("lge") {
+            return Some("LG".to_string());
+        }
+        if fingerprint.contains("sony") {
+            return Some("Sony".to_string());
+        }
+        if fingerprint.contains("roku") {
+            return Some("Roku".to_string());
+        }
+        if fingerprint.contains("sonos") {
+            return Some("Sonos".to_string());
+        }
+        if fingerprint.contains("microsoft") || fingerprint.contains("windows") {
+            return Some("Microsoft".to_string());
+        }
+        if fingerprint.contains("philips") || fingerprint.contains("hue") {
+            return Some("Philips".to_string());
+        }
+        if fingerprint.contains("netgear") {
+            return Some("Netgear".to_string());
+        }
+        if fingerprint.contains("tp-link") || fingerprint.contains("tplink") {
+            return Some("TP-Link".to_string());
+        }
+        if fingerprint.contains("ubiquiti") || fingerprint.contains("unifi") {
+            return Some("Ubiquiti".to_string());
+        }
+        if fingerprint.contains("d-link") {
+            return Some("D-Link".to_string());
+        }
+        if fingerprint.contains("bose") {
+            return Some("Bose".to_string());
+        }
+        if fingerprint.contains("denon") {
+            return Some("Denon".to_string());
+        }
+        if fingerprint.contains("yamaha") {
+            return Some("Yamaha".to_string());
+        }
+        if fingerprint.contains("synology") {
+            return Some("Synology".to_string());
+        }
+        if fingerprint.contains("qnap") {
+            return Some("QNAP".to_string());
+        }
+
+        None
+    }
+
+    /// Detect device type from SSDP fingerprints
+    #[cfg(feature = "ssdp")]
+    fn detect_device_type_from_ssdp(&self, fingerprint: &str) -> Option<String> {
+        let fingerprint = fingerprint.to_lowercase();
+
+        if fingerprint.contains("mediarenderer") || fingerprint.contains("renderer") {
+            return Some("Media Renderer".to_string());
+        }
+        if fingerprint.contains("mediaserver") {
+            return Some("Media Server".to_string());
+        }
+        if fingerprint.contains("internetgatewaydevice")
+            || fingerprint.contains("wanconnectiondevice")
+            || fingerprint.contains("router")
+        {
+            return Some("Router".to_string());
+        }
+        if fingerprint.contains("printer") || fingerprint.contains("print") {
+            return Some("Printer".to_string());
+        }
+        if fingerprint.contains("scanner") {
+            return Some("Scanner".to_string());
+        }
+        if fingerprint.contains("television")
+            || fingerprint.contains("tvdevice")
+            || fingerprint.contains("smarttv")
+        {
+            return Some("TV".to_string());
+        }
+        if fingerprint.contains("camera") || fingerprint.contains("ipcamera") {
+            return Some("IP Camera".to_string());
+        }
+        if fingerprint.contains("speaker") || fingerprint.contains("soundbar") {
+            return Some("Speaker".to_string());
+        }
+        if fingerprint.contains("gameconsole")
+            || fingerprint.contains("xbox")
+            || fingerprint.contains("playstation")
+        {
+            return Some("Gaming Console".to_string());
+        }
+        if fingerprint.contains("set-top") || fingerprint.contains("settop") {
+            return Some("Set Top Box".to_string());
+        }
+        if fingerprint.contains("nas") || fingerprint.contains("storage") {
+            return Some("NAS".to_string());
+        }
+        if fingerprint.contains("bridge")
+            || fingerprint.contains("light")
+            || fingerprint.contains("bulb")
+            || fingerprint.contains("homekit")
+        {
+            return Some("Smart Home Device".to_string());
+        }
+
+        None
+    }
+
     /// Detect device type from vendor name
     fn detect_device_type_from_vendor(vendor: &str) -> Option<String> {
         let v = vendor.to_lowercase();
-        
+
         // Security systems
         if v.contains("simplisafe") {
             return Some("Security System".to_string());
@@ -2773,7 +3613,7 @@ impl DeviceTracker {
         if v.contains("alarm") || v.contains("security") {
             return Some("Security System".to_string());
         }
-        
+
         // Smart home devices
         if v.contains("tuya") || v.contains("smartlife") {
             return Some("Smart Home Device".to_string());
@@ -2787,15 +3627,19 @@ impl DeviceTracker {
         if v.contains("ecobee") || v.contains("honeywell") {
             return Some("Thermostat".to_string());
         }
-        
+
         // Networking equipment
-        if v.contains("ubiquiti") || v.contains("netgear") || v.contains("tp-link") || v.contains("linksys") {
+        if v.contains("ubiquiti")
+            || v.contains("netgear")
+            || v.contains("tp-link")
+            || v.contains("linksys")
+        {
             return Some("Network Equipment".to_string());
         }
         if v.contains("cisco") {
             return Some("Network Equipment".to_string());
         }
-        
+
         // Gaming consoles
         if v.contains("nintendo") {
             return Some("Gaming Console".to_string());
@@ -2806,7 +3650,7 @@ impl DeviceTracker {
         if v.contains("microsoft") && v.contains("xbox") {
             return Some("Gaming Console".to_string());
         }
-        
+
         // IoT / Microcontrollers
         if v.contains("espressif") {
             return Some("IoT Device".to_string());
@@ -2817,20 +3661,24 @@ impl DeviceTracker {
         if v.contains("arduino") {
             return Some("Microcontroller".to_string());
         }
-        
+
         // Printers
         if v.contains("hp") && v.contains("print") {
             return Some("Printer".to_string());
         }
-        if v.contains("canon") || v.contains("epson") || v.contains("brother") || v.contains("lexmark") {
+        if v.contains("canon")
+            || v.contains("epson")
+            || v.contains("brother")
+            || v.contains("lexmark")
+        {
             return Some("Printer".to_string());
         }
-        
+
         // Storage
         if v.contains("synology") || v.contains("qnap") || v.contains("western digital") {
             return Some("NAS".to_string());
         }
-        
+
         None
     }
 
@@ -2838,13 +3686,16 @@ impl DeviceTracker {
     fn update_device(&mut self, mac: &str, ip: &str, hostname: Option<&str>) -> bool {
         // Normalize MAC address to lowercase to avoid duplicates
         let mac = mac.to_lowercase();
+        let hostname = hostname.and_then(sanitize_hostname);
         // Look up vendor from OUI registry if available
         let vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(&mac));
         // Infer device type from vendor name
-        let device_type_from_vendor = vendor.as_ref().and_then(|v| Self::detect_device_type_from_vendor(v));
+        let device_type_from_vendor = vendor
+            .as_ref()
+            .and_then(|v| Self::detect_device_type_from_vendor(v));
 
         if let Some(device) = self.devices.get_mut(&mac) {
-            let changed = device.update(ip, hostname);
+            let changed = device.update(ip, hostname.as_deref());
             // Set vendor if not already set and we found one
             if let Some(v) = vendor {
                 device.set_vendor(v);
@@ -2858,11 +3709,7 @@ impl DeviceTracker {
             changed
         } else {
             // New device
-            let mut device = DeviceInfo::new(
-                mac.clone(),
-                ip.to_string(),
-                hostname.map(|s| s.to_string()),
-            );
+            let mut device = DeviceInfo::new(mac.clone(), ip.to_string(), hostname);
             // Set vendor if we found one
             if let Some(v) = vendor {
                 device.set_vendor(v);
@@ -2948,15 +3795,17 @@ struct ApiError {
 impl ApiServer {
     /// Create a new API server on the specified address (e.g., "0.0.0.0:8080")
     pub fn new(addr: &str, tracker: Arc<RwLock<DeviceTracker>>) -> std::io::Result<Self> {
-        let server = Server::http(addr).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
-        })?;
+        let server = Server::http(addr)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
         Ok(Self { server, tracker })
     }
 
     /// Run the API server (blocking)
     pub fn run(&self) {
-        println!("API server listening on http://{}", self.server.server_addr());
+        println!(
+            "API server listening on http://{}",
+            self.server.server_addr()
+        );
         println!("Endpoints:");
         println!("  GET /devices     - List all devices (JSON)");
         println!("  GET /devices/count - Get device count");
@@ -2988,16 +3837,17 @@ impl ApiServer {
             Ok(tracker) => {
                 let mut devices: Vec<&DeviceInfo> = tracker.devices().values().collect();
                 devices.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
-                
+
                 let response = ApiResponse {
                     success: true,
                     count: devices.len(),
                     data: devices,
                 };
-                
+
                 let json = serde_json::to_string_pretty(&response).unwrap_or_default();
-                Response::from_string(json)
-                    .with_header(tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap())
+                Response::from_string(json).with_header(
+                    tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap(),
+                )
             }
             Err(_) => self.handle_error("Failed to read device data"),
         }
@@ -3010,8 +3860,9 @@ impl ApiServer {
                     "success": true,
                     "count": tracker.device_count()
                 });
-                Response::from_string(json.to_string())
-                    .with_header(tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap())
+                Response::from_string(json.to_string()).with_header(
+                    tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap(),
+                )
             }
             Err(_) => self.handle_error("Failed to read device count"),
         }
@@ -3063,7 +3914,10 @@ impl ApiServer {
 
 /// Start the API server in a background thread
 #[cfg(feature = "http-api")]
-pub fn start_api_server(addr: &str, tracker: Arc<RwLock<DeviceTracker>>) -> std::io::Result<thread::JoinHandle<()>> {
+pub fn start_api_server(
+    addr: &str,
+    tracker: Arc<RwLock<DeviceTracker>>,
+) -> std::io::Result<thread::JoinHandle<()>> {
     let server = ApiServer::new(addr, tracker)?;
     Ok(thread::spawn(move || {
         server.run();
@@ -3104,10 +3958,7 @@ mod tests {
         assert_eq!(Dhcpv6MessageType::from(1), Dhcpv6MessageType::Solicit);
         assert_eq!(Dhcpv6MessageType::from(2), Dhcpv6MessageType::Advertise);
         assert_eq!(Dhcpv6MessageType::from(7), Dhcpv6MessageType::Reply);
-        assert_eq!(
-            Dhcpv6MessageType::from(11),
-            Dhcpv6MessageType::InfoRequest
-        );
+        assert_eq!(Dhcpv6MessageType::from(11), Dhcpv6MessageType::InfoRequest);
         assert_eq!(Dhcpv6MessageType::from(99), Dhcpv6MessageType::Unknown(99));
     }
 
@@ -3183,10 +4034,7 @@ mod tests {
         let packet = result.unwrap();
         assert_eq!(packet.operation, Dhcpv4Operation::BootRequest);
         assert_eq!(packet.client_mac, [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
-        assert_eq!(
-            packet.client_mac_string(),
-            "aa:bb:cc:dd:ee:ff"
-        );
+        assert_eq!(packet.client_mac_string(), "aa:bb:cc:dd:ee:ff");
         assert_eq!(packet.message_type, Some(Dhcpv4MessageType::Discover));
         assert_eq!(packet.source_port, 68);
         assert_eq!(packet.dest_port, 67);
@@ -3266,13 +4114,8 @@ mod tests {
         payload[2] = 0x34; // Transaction ID byte 2
         payload[3] = 0x56; // Transaction ID byte 3
 
-        let result = parse_dhcpv6_payload(
-            &payload,
-            Ipv6Addr::LOCALHOST,
-            Ipv6Addr::LOCALHOST,
-            546,
-            547,
-        );
+        let result =
+            parse_dhcpv6_payload(&payload, Ipv6Addr::LOCALHOST, Ipv6Addr::LOCALHOST, 546, 547);
 
         assert!(result.is_some());
         let packet = result.unwrap();
@@ -3285,20 +4128,15 @@ mod tests {
     fn test_parse_dhcpv6_with_client_id() {
         // Exactly 12 bytes: 4 header + 8 option (4 header + 4 data)
         let payload = vec![
-            0x01,       // Message type: SOLICIT
+            0x01, // Message type: SOLICIT
             0xAB, 0xCD, 0xEF, // Transaction ID
             0x00, 0x01, // Option code: 1 (Client ID)
             0x00, 0x04, // Length: 4
             0xDE, 0xAD, 0xBE, 0xEF, // Client ID data
         ];
 
-        let result = parse_dhcpv6_payload(
-            &payload,
-            Ipv6Addr::LOCALHOST,
-            Ipv6Addr::LOCALHOST,
-            546,
-            547,
-        );
+        let result =
+            parse_dhcpv6_payload(&payload, Ipv6Addr::LOCALHOST, Ipv6Addr::LOCALHOST, 546, 547);
 
         assert!(result.is_some());
         let packet = result.unwrap();
@@ -3308,6 +4146,31 @@ mod tests {
                 assert_eq!(data, &vec![0xDE, 0xAD, 0xBE, 0xEF]);
             }
             _ => panic!("Expected ClientId option"),
+        }
+    }
+
+    #[test]
+    fn test_parse_dhcpv6_with_client_fqdn_dns_wire_format() {
+        // SOLICIT + option 39 (Client FQDN)
+        // value: [flags=0x00][len=8]['CircleV2'][root=0]
+        let payload = vec![
+            0x01, // Message type: SOLICIT
+            0x11, 0x22, 0x33, // Transaction ID
+            0x00, 0x27, // Option code: 39 (Client FQDN)
+            0x00, 0x0B, // Length: 11
+            0x00, // Flags
+            0x08, b'C', b'i', b'r', b'c', b'l', b'e', b'V', b'2', 0x00, // Root label
+        ];
+
+        let result =
+            parse_dhcpv6_payload(&payload, Ipv6Addr::LOCALHOST, Ipv6Addr::LOCALHOST, 546, 547);
+
+        assert!(result.is_some());
+        let packet = result.unwrap();
+        assert_eq!(packet.options.len(), 1);
+        match &packet.options[0] {
+            Dhcpv6Option::ClientFqdn(name) => assert_eq!(name, "CircleV2"),
+            _ => panic!("Expected ClientFqdn option"),
         }
     }
 
@@ -3369,6 +4232,15 @@ mod tests {
         assert_eq!(parsed.device_type, device.device_type);
         assert_eq!(parsed.first_seen, device.first_seen);
         assert_eq!(parsed.last_seen, device.last_seen);
+    }
+
+    #[test]
+    fn test_device_info_from_csv_normalizes_legacy_dhcpv6_duid_identifier() {
+        let line = "2026-04-07T02:41:49Z,2026-04-07T03:12:39Z,00:03:00:01:8c:e2:da:bc:78:7a,fe80::8ee2:daff:febc:787a,\"\",\"\0\x08CircleV2\0\",\"\",\"Barracuda Networks, Inc.\",\"\"";
+        let parsed = DeviceInfo::from_csv_line(line).unwrap();
+
+        assert_eq!(parsed.mac_address, "8c:e2:da:bc:78:7a");
+        assert_eq!(parsed.hostname.as_deref(), Some("CircleV2"));
     }
 
     #[test]
@@ -3485,7 +4357,10 @@ mod tests {
             message_type: Dhcpv6MessageType::Solicit,
             transaction_id: [0x12, 0x34, 0x56],
             options: vec![
-                Dhcpv6Option::ClientId(vec![0xAA, 0xBB, 0xCC, 0xDD]),
+                // DUID-LL (type 3), hw type Ethernet (1), MAC aa:bb:cc:dd:ee:ff
+                Dhcpv6Option::ClientId(vec![
+                    0x00, 0x03, 0x00, 0x01, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF,
+                ]),
                 Dhcpv6Option::ClientFqdn("myhost.local".to_string()),
             ],
         };
@@ -3494,9 +4369,15 @@ mod tests {
         assert!(is_new);
         assert_eq!(tracker.device_count(), 1);
 
-        // Verify the device was stored with DUID as identifier (lowercase)
+        // Verify the device was stored with extracted Ethernet MAC
         let devices = tracker.devices();
-        assert!(devices.contains_key("aa:bb:cc:dd"));
+        assert!(devices.contains_key("aa:bb:cc:dd:ee:ff"));
+        assert_eq!(
+            devices
+                .get("aa:bb:cc:dd:ee:ff")
+                .and_then(|d| d.hostname.as_deref()),
+            Some("myhost.local")
+        );
 
         // Clean up
         let _ = std::fs::remove_file(temp_path);
@@ -3506,7 +4387,6 @@ mod tests {
     fn test_device_tracker_dhcpv6_no_client_id() {
         let temp_path = "/tmp/lanwatch_test_v6_no_id.csv";
         let _ = std::fs::remove_file(temp_path);
-
         let mut tracker = DeviceTracker::new(temp_path).unwrap();
 
         // DHCPv6 packet without ClientId should not be tracked
@@ -3525,6 +4405,27 @@ mod tests {
         assert_eq!(tracker.device_count(), 0);
 
         let _ = std::fs::remove_file(temp_path);
+    }
+
+    #[test]
+    fn test_extract_mac_from_duid_llt() {
+        // DUID-LLT type 1, hw type 1 (Ethernet), time 0x12345678, MAC 8c:e2:da:bc:78:7a
+        let duid = vec![
+            0x00, 0x01, 0x00, 0x01, 0x12, 0x34, 0x56, 0x78, 0x8C, 0xE2, 0xDA, 0xBC, 0x78, 0x7A,
+        ];
+        assert_eq!(
+            extract_mac_from_duid(&duid).as_deref(),
+            Some("8c:e2:da:bc:78:7a")
+        );
+    }
+
+    #[test]
+    fn test_sanitize_hostname_removes_control_bytes() {
+        assert_eq!(
+            sanitize_hostname("\0\u{0008}CircleV2\0").as_deref(),
+            Some("CircleV2")
+        );
+        assert_eq!(sanitize_hostname("....").as_deref(), None);
     }
 
     #[test]
@@ -3554,7 +4455,7 @@ mod tests {
         {
             let tracker = DeviceTracker::new(temp_path).unwrap();
             assert_eq!(tracker.device_count(), 1);
-            
+
             let devices = tracker.devices();
             let device = devices.get("11:22:33:44:55:66").unwrap();
             assert_eq!(device.ip_address, "192.168.1.100");
@@ -3639,20 +4540,15 @@ mod tests {
     #[test]
     fn test_parse_dhcpv6_with_server_id() {
         let payload = vec![
-            0x02,       // Message type: ADVERTISE
+            0x02, // Message type: ADVERTISE
             0x12, 0x34, 0x56, // Transaction ID
             0x00, 0x02, // Option code: 2 (Server ID)
             0x00, 0x04, // Length: 4
             0x01, 0x02, 0x03, 0x04, // Server ID data
         ];
 
-        let result = parse_dhcpv6_payload(
-            &payload,
-            Ipv6Addr::LOCALHOST,
-            Ipv6Addr::LOCALHOST,
-            547,
-            546,
-        );
+        let result =
+            parse_dhcpv6_payload(&payload, Ipv6Addr::LOCALHOST, Ipv6Addr::LOCALHOST, 547, 546);
 
         assert!(result.is_some());
         let packet = result.unwrap();
@@ -3670,23 +4566,28 @@ mod tests {
     fn test_parse_dhcpv6_with_client_fqdn() {
         let fqdn = "myhost.example.com";
         let mut payload = vec![
-            0x01,       // Message type: SOLICIT
+            0x01, // Message type: SOLICIT
             0xAB, 0xCD, 0xEF, // Transaction ID
             0x00, 0x27, // Option code: 39 (Client FQDN)
         ];
+
+        // RFC 4704 encoding: flags + DNS wire-format labels
+        let fqdn_data = vec![
+            0x00, // Flags
+            0x06, b'm', b'y', b'h', b'o', b's', b't', // myhost
+            0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e', // example
+            0x03, b'c', b'o', b'm', // com
+            0x00, // root
+        ];
+
         // Add length (2 bytes big-endian)
         payload.push(0x00);
-        payload.push(fqdn.len() as u8);
+        payload.push(fqdn_data.len() as u8);
         // Add FQDN data
-        payload.extend_from_slice(fqdn.as_bytes());
+        payload.extend_from_slice(&fqdn_data);
 
-        let result = parse_dhcpv6_payload(
-            &payload,
-            Ipv6Addr::LOCALHOST,
-            Ipv6Addr::LOCALHOST,
-            546,
-            547,
-        );
+        let result =
+            parse_dhcpv6_payload(&payload, Ipv6Addr::LOCALHOST, Ipv6Addr::LOCALHOST, 546, 547);
 
         assert!(result.is_some());
         let packet = result.unwrap();
@@ -3702,19 +4603,14 @@ mod tests {
     #[test]
     fn test_parse_dhcpv6_with_ia_na() {
         let payload = vec![
-            0x03,       // Message type: REQUEST
+            0x03, // Message type: REQUEST
             0x11, 0x22, 0x33, // Transaction ID
             0x00, 0x03, // Option code: 3 (IA_NA)
             0x00, 0x00, // Length: 0 (minimal)
         ];
 
-        let result = parse_dhcpv6_payload(
-            &payload,
-            Ipv6Addr::LOCALHOST,
-            Ipv6Addr::LOCALHOST,
-            546,
-            547,
-        );
+        let result =
+            parse_dhcpv6_payload(&payload, Ipv6Addr::LOCALHOST, Ipv6Addr::LOCALHOST, 546, 547);
 
         assert!(result.is_some());
         let packet = result.unwrap();
@@ -3726,7 +4622,7 @@ mod tests {
     #[test]
     fn test_parse_dhcpv6_multiple_options() {
         let payload = vec![
-            0x01,       // Message type: SOLICIT
+            0x01, // Message type: SOLICIT
             0x00, 0x00, 0x01, // Transaction ID
             // Option 1: ClientId
             0x00, 0x01, // Option code: 1
@@ -3737,13 +4633,8 @@ mod tests {
             0x00, 0x00, // Length: 0
         ];
 
-        let result = parse_dhcpv6_payload(
-            &payload,
-            Ipv6Addr::LOCALHOST,
-            Ipv6Addr::LOCALHOST,
-            546,
-            547,
-        );
+        let result =
+            parse_dhcpv6_payload(&payload, Ipv6Addr::LOCALHOST, Ipv6Addr::LOCALHOST, 546, 547);
 
         assert!(result.is_some());
         let packet = result.unwrap();
@@ -3776,20 +4667,15 @@ mod tests {
     fn test_parse_dhcpv6_truncated_option() {
         // Option claims 100 bytes but only 2 available
         let payload = vec![
-            0x01,       // Message type
+            0x01, // Message type
             0x00, 0x00, 0x01, // Transaction ID
             0x00, 0x01, // Option code
             0x00, 0x64, // Length: 100 (but not enough data)
             0xAA, 0xBB, // Only 2 bytes of data
         ];
 
-        let result = parse_dhcpv6_payload(
-            &payload,
-            Ipv6Addr::LOCALHOST,
-            Ipv6Addr::LOCALHOST,
-            546,
-            547,
-        );
+        let result =
+            parse_dhcpv6_payload(&payload, Ipv6Addr::LOCALHOST, Ipv6Addr::LOCALHOST, 546, 547);
 
         // Should parse but truncated option won't be included
         assert!(result.is_some());
@@ -4136,26 +5022,29 @@ mod tests {
     fn test_mdns_constants() {
         assert_eq!(MDNS_PORT, 5353);
         assert_eq!(MDNS_IPV4_MULTICAST, Ipv4Addr::new(224, 0, 0, 251));
-        assert_eq!(MDNS_IPV6_MULTICAST, Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0xfb));
+        assert_eq!(
+            MDNS_IPV6_MULTICAST,
+            Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0xfb)
+        );
     }
 
     #[test]
     #[cfg(feature = "mdns")]
     fn test_mdns_service_registry_defaults() {
         let registry = MdnsServiceRegistry::with_defaults();
-        
+
         // Should have some default services
         assert!(!registry.is_empty());
-        
+
         // Test Apple service lookup
         let airplay = registry.lookup("_airplay._tcp");
         assert!(airplay.is_some());
         let airplay = airplay.unwrap();
         assert_eq!(airplay.vendor, Some("Apple".to_string()));
-        
+
         // Test Google service lookup
         assert_eq!(registry.get_vendor("_googlecast._tcp"), Some("Google"));
-        
+
         // Test service without vendor
         let http = registry.lookup("_http._tcp");
         assert!(http.is_some());
@@ -4166,9 +5055,9 @@ mod tests {
     #[cfg(feature = "mdns")]
     fn test_mdns_service_registry_add() {
         let mut registry = MdnsServiceRegistry::new();
-        
+
         registry.add("_custom._tcp", "Custom Service", Some("MyVendor"));
-        
+
         let service = registry.lookup("_custom._tcp");
         assert!(service.is_some());
         assert_eq!(service.unwrap().description, "Custom Service");
@@ -4179,14 +5068,14 @@ mod tests {
     #[cfg(feature = "mdns")]
     fn test_mdns_service_registry_normalize() {
         let mut registry = MdnsServiceRegistry::new();
-        
+
         // Add with .local suffix
         registry.add("_test._tcp.local", "Test Service", None);
-        
+
         // Should be found with or without .local
         assert!(registry.lookup("_test._tcp").is_some());
         assert!(registry.lookup("_test._tcp.local").is_some());
-        
+
         // Case insensitive
         assert!(registry.lookup("_TEST._TCP").is_some());
     }
@@ -4198,18 +5087,18 @@ mod tests {
             "192.168.1.100".to_string(),
             None,
         );
-        
+
         // Adding a new service should return true
         assert!(device.add_service("_http._tcp"));
         assert_eq!(device.services, vec!["_http._tcp"]);
-        
+
         // Adding the same service should return false
         assert!(!device.add_service("_http._tcp"));
-        
+
         // Adding with .local suffix should normalize
         assert!(device.add_service("_ssh._tcp.local"));
         assert!(device.services.contains(&"_ssh._tcp".to_string()));
-        
+
         // Services should be sorted
         assert_eq!(device.services, vec!["_http._tcp", "_ssh._tcp"]);
     }
@@ -4221,11 +5110,11 @@ mod tests {
             "192.168.1.100".to_string(),
             None,
         );
-        
+
         // Setting vendor first time should return true
         assert!(device.set_vendor("Apple"));
         assert_eq!(device.vendor, Some("Apple".to_string()));
-        
+
         // Setting vendor again should return false (first wins)
         assert!(!device.set_vendor("Google"));
         assert_eq!(device.vendor, Some("Apple".to_string()));
@@ -4238,11 +5127,11 @@ mod tests {
             "192.168.1.100".to_string(),
             None,
         );
-        
+
         // Setting device type first time should return true
         assert!(device.set_device_type("Chromecast"));
         assert_eq!(device.device_type, Some("Chromecast".to_string()));
-        
+
         // Setting device type again should return false (first wins)
         assert!(!device.set_device_type("Apple TV"));
         assert_eq!(device.device_type, Some("Chromecast".to_string()));
@@ -4258,10 +5147,10 @@ mod tests {
         device.add_service("_googlecast._tcp");
         device.set_vendor("Google");
         device.set_device_type("Chromecast");
-        
+
         let csv = device.to_csv_line();
         let parsed = DeviceInfo::from_csv_line(&csv).unwrap();
-        
+
         assert_eq!(parsed.mac_address, device.mac_address);
         assert_eq!(parsed.ip_address, device.ip_address);
         assert_eq!(parsed.hostname, device.hostname);
@@ -4296,48 +5185,58 @@ mod tests {
     #[test]
     fn test_oui_registry_lookup_known_vendor() {
         let registry = OuiRegistry::new();
-        
+
         // Apple's OUI (well-known)
         let vendor = registry.lookup("00:1B:63:00:00:00");
-        assert!(vendor.is_some(), "Apple OUI should be found in IEEE database");
-        
+        assert!(
+            vendor.is_some(),
+            "Apple OUI should be found in IEEE database"
+        );
+
         // Intel's OUI (well-known)
         let vendor = registry.lookup("00:1B:21:00:00:00");
-        assert!(vendor.is_some(), "Intel OUI should be found in IEEE database");
+        assert!(
+            vendor.is_some(),
+            "Intel OUI should be found in IEEE database"
+        );
     }
 
     #[test]
     fn test_oui_registry_normalize_mac() {
         let registry = OuiRegistry::new();
-        
+
         // All these formats should normalize to the same OUI lookup
         let mac_formats = [
-            "00:1B:63:AA:BB:CC",  // colon separated full
-            "00-1B-63-AA-BB-CC",  // dash separated full
-            "001B63AABBCC",       // no separator
-            "00:1B:63",           // OUI only
-            "001B63",             // OUI only no separator
+            "00:1B:63:AA:BB:CC", // colon separated full
+            "00-1B-63-AA-BB-CC", // dash separated full
+            "001B63AABBCC",      // no separator
+            "00:1B:63",          // OUI only
+            "001B63",            // OUI only no separator
         ];
-        
+
         // They should all find the same vendor (or none)
         let first_result = registry.lookup(mac_formats[0]);
         for mac in &mac_formats[1..] {
-            assert_eq!(registry.lookup(mac), first_result, 
-                "All MAC formats should resolve to same vendor: {}", mac);
+            assert_eq!(
+                registry.lookup(mac),
+                first_result,
+                "All MAC formats should resolve to same vendor: {}",
+                mac
+            );
         }
     }
 
     #[test]
     fn test_oui_registry_custom_override() {
         let mut registry = OuiRegistry::new();
-        
+
         // Add a custom override
         registry.add("AA:BB:CC", "My Custom Vendor");
-        
+
         // Custom override should take priority
         let vendor = registry.lookup("AA:BB:CC:DD:EE:FF");
         assert_eq!(vendor, Some("My Custom Vendor"));
-        
+
         // Custom count should increase
         assert_eq!(registry.custom_count(), 1);
     }
@@ -4345,17 +5244,17 @@ mod tests {
     #[test]
     fn test_oui_registry_custom_overrides_builtin() {
         let mut registry = OuiRegistry::new();
-        
+
         // Apple's real OUI - check if it exists and remember if we found one
         let has_original = registry.lookup("00:1B:63:00:00:00").is_some();
-        
+
         // Override Apple's OUI with custom vendor
         registry.add("00:1B:63", "Fake Vendor Override");
-        
+
         // Custom should now take priority
         let vendor = registry.lookup("00:1B:63:AA:BB:CC");
         assert_eq!(vendor, Some("Fake Vendor Override"));
-        
+
         // If original existed, verify the override hides it
         if has_original {
             // The override should be what we set, not the original
@@ -4366,7 +5265,7 @@ mod tests {
     #[test]
     fn test_oui_registry_lookup_unknown() {
         let registry = OuiRegistry::new();
-        
+
         // This OUI is unlikely to exist (private range)
         let vendor = registry.lookup("FE:FF:FF:00:00:00");
         // May or may not be found - just ensure no panic
@@ -4376,31 +5275,31 @@ mod tests {
     #[test]
     fn test_oui_registry_load_from_file() {
         use std::io::Write;
-        
+
         let mut registry = OuiRegistry::new();
-        
+
         // Create a temporary file with OUI entries
         let temp_dir = std::env::temp_dir();
         let temp_file = temp_dir.join("test_oui.txt");
         {
             let mut file = File::create(&temp_file).unwrap();
             writeln!(file, "# Comment line").unwrap();
-            writeln!(file, "").unwrap();  // Empty line
+            writeln!(file, "").unwrap(); // Empty line
             writeln!(file, "AA:BB:CC\tTest Vendor 1").unwrap();
             writeln!(file, "DD:EE:FF  Test Vendor 2").unwrap();
             writeln!(file, "11-22-33  Test Vendor 3").unwrap();
         }
-        
+
         // Load the file
         let count = registry.load_from_file(&temp_file).unwrap();
         assert_eq!(count, 3);
         assert_eq!(registry.custom_count(), 3);
-        
+
         // Check lookups
         assert_eq!(registry.lookup("AA:BB:CC:00:00:00"), Some("Test Vendor 1"));
         assert_eq!(registry.lookup("DD:EE:FF:00:00:00"), Some("Test Vendor 2"));
         assert_eq!(registry.lookup("11:22:33:00:00:00"), Some("Test Vendor 3"));
-        
+
         // Clean up
         std::fs::remove_file(&temp_file).unwrap();
     }
@@ -4409,11 +5308,11 @@ mod tests {
     fn test_oui_registry_len() {
         let mut registry = OuiRegistry::new();
         let initial_len = registry.len();
-        
+
         // Add custom entries
         registry.add("AA:BB:CC", "Vendor 1");
         registry.add("DD:EE:FF", "Vendor 2");
-        
+
         // Length should increase
         assert_eq!(registry.len(), initial_len + 2);
     }
@@ -4421,9 +5320,9 @@ mod tests {
     #[test]
     fn test_oui_registry_load_from_ieee_file() {
         use std::io::Write;
-        
+
         let mut registry = OuiRegistry::new();
-        
+
         // Create a temporary file with IEEE OUI format entries
         let temp_dir = std::env::temp_dir();
         let temp_file = temp_dir.join("test_ieee_oui.txt");
@@ -4441,16 +5340,22 @@ mod tests {
             writeln!(file, "00-00-0C   (hex)\t\tCisco Systems, Inc").unwrap();
             writeln!(file, "00-17-F2   (hex)\t\tApple, Inc.").unwrap();
         }
-        
+
         // Load the file
         let count = registry.load_from_ieee_file(&temp_file).unwrap();
         assert_eq!(count, 4); // Only (hex) lines are parsed
-        
+
         // Check lookups
-        assert_eq!(registry.lookup("00:00:00:11:22:33"), Some("Xerox Corporation"));
-        assert_eq!(registry.lookup("00:00:0C:AA:BB:CC"), Some("Cisco Systems, Inc"));
+        assert_eq!(
+            registry.lookup("00:00:00:11:22:33"),
+            Some("Xerox Corporation")
+        );
+        assert_eq!(
+            registry.lookup("00:00:0C:AA:BB:CC"),
+            Some("Cisco Systems, Inc")
+        );
         assert_eq!(registry.lookup("00:17:F2:12:34:56"), Some("Apple, Inc."));
-        
+
         // Clean up
         std::fs::remove_file(&temp_file).unwrap();
     }
@@ -4473,5 +5378,70 @@ mod tests {
         assert!(result.is_none());
         let result = OuiRegistry::parse_ieee_oui_line("   ");
         assert!(result.is_none());
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_build_ssdp_search_request_all() {
+        let request = build_ssdp_search_request("ssdp:all");
+        let request_str = String::from_utf8_lossy(&request);
+
+        // Verify M-SEARCH format
+        assert!(request_str.starts_with("M-SEARCH * HTTP/1.1\r\n"));
+        assert!(request_str.contains("HOST: 239.255.255.250:1900\r\n"));
+        assert!(request_str.contains("MAN: \"ssdp:discover\"\r\n"));
+        assert!(request_str.contains("MX: 2\r\n"));
+        assert!(request_str.contains("ST: ssdp:all\r\n"));
+        assert!(request_str.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_build_ssdp_search_request_upnp_root() {
+        let request = build_ssdp_search_request("upnp:rootdevice");
+        let request_str = String::from_utf8_lossy(&request);
+
+        // Verify format with different search target
+        assert!(request_str.contains("ST: upnp:rootdevice\r\n"));
+        assert!(request_str.starts_with("M-SEARCH * HTTP/1.1\r\n"));
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_build_ssdp_search_request_media_renderer() {
+        let request = build_ssdp_search_request("urn:schemas-upnp-org:device:MediaRenderer:1");
+        let request_str = String::from_utf8_lossy(&request);
+
+        // Verify format with URN
+        assert!(request_str.contains("urn:schemas-upnp-org:device:MediaRenderer:1"));
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_ssdp_querier_new() {
+        // Test that SsdpQuerier can be created
+        let result = SsdpQuerier::new();
+        assert!(result.is_ok(), "SsdpQuerier::new() should succeed");
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_ssdp_message_type_notify() {
+        let msg_type = SsdpMessageType::Notify;
+        assert_eq!(format!("{}", msg_type), "NOTIFY");
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_ssdp_message_type_search() {
+        let msg_type = SsdpMessageType::Search;
+        assert_eq!(format!("{}", msg_type), "M-SEARCH");
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_ssdp_message_type_response() {
+        let msg_type = SsdpMessageType::Response;
+        assert_eq!(format!("{}", msg_type), "RESPONSE");
     }
 }
