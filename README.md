@@ -1,12 +1,13 @@
 # LANwatch
 
-A Rust library and CLI tool for network device discovery and tracking via DHCP, mDNS, and IEEE-OUI identification.
+A Rust library and CLI tool for network device discovery and tracking via DHCP, mDNS, SSDP/UPnP, and IEEE-OUI identification.
 
 ## Features
 
 - **DHCPv4 Support**: Capture and parse DHCP DISCOVER, OFFER, REQUEST, ACK, NAK, RELEASE, and INFORM messages
 - **DHCPv6 Support**: Capture and parse SOLICIT, ADVERTISE, REQUEST, CONFIRM, RENEW, REBIND, REPLY, RELEASE, DECLINE, RECONFIGURE, and INFO-REQUEST messages
 - **mDNS Support** (optional): Passive and active mDNS discovery for enhanced device identification
+- **SSDP/UPnP Support** (optional): Passive SSDP discovery for UPnP and media devices
 - **Device Classification**: Automatic identification of device types (phones, printers, thermostats, etc.) from hostnames, services, and vendor data
 - **IEEE OUI Database**: Built-in vendor identification from MAC addresses using IEEE OUI (Organizationally Unique Identifier) prefixes
 - **Device Tracking**: Automatically track detected devices and save to CSV file
@@ -73,11 +74,17 @@ sudo cargo run -- en0 --api-default
 # Enable mDNS sniffing for enhanced device discovery (requires mdns feature)
 sudo cargo run --features mdns -- en0 --mdns
 
+# Enable SSDP/UPnP sniffing for enhanced device discovery (requires ssdp feature)
+sudo cargo run --features ssdp -- en0 --ssdp
+
 # Enable mDNS with active querying (sends discovery probes)
 sudo cargo run --features mdns -- en0 --mdns-query
 
+# Enable SSDP with active M-SEARCH discovery probes
+sudo cargo run --features ssdp -- en0 --ssdp-query
+
 # Combine all options
-sudo cargo run --all-features -- en0 -o devices.csv --api 0.0.0.0:8080 --mdns-query -u oui.txt
+sudo cargo run --all-features -- en0 -o devices.csv --api 0.0.0.0:8080 --mdns-query --ssdp-query -u oui.txt
 
 # Show help
 cargo run -- --help
@@ -403,6 +410,27 @@ When the `mdns` feature is enabled, the tool can capture mDNS traffic to discove
 - `_printer._tcp.local` - Network printers
 - `_smb._tcp.local` - SMB file shares
 - And more...
+
+### SSDP/UPnP Discovery
+
+When the `ssdp` feature is enabled, the tool can capture SSDP (Simple Service Discovery Protocol) traffic to discover UPnP devices:
+
+- Media servers and renderers (DLNA/UPnP)
+- Network routers and gateways
+- Smart home devices and IoT equipment
+- Printers and scanning devices
+- Vendor fingerprinting via SSDP headers
+
+**Passive mode** (`--ssdp` or `--upnp`): Listens for SSDP announcements (NOTIFY messages and responses).
+
+**Active mode** (`--ssdp-query`): Also sends M-SEARCH discovery probes for:
+- `ssdp:all` - All SSDP devices
+- `upnp:rootdevice` - All UPnP root devices
+- MediaServer and MediaRenderer devices
+- Internet Gateway Devices (routers)
+- Printer and DIAL-enabled devices (Chromecast, etc.)
+
+The tool extracts vendor information and device types from SSDP server headers and service descriptors.
 
 ## Testing
 
