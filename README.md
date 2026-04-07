@@ -7,7 +7,7 @@ A Rust library and CLI tool for network device discovery and tracking via DHCP, 
 - **DHCPv4 Support**: Capture and parse DHCP DISCOVER, OFFER, REQUEST, ACK, NAK, RELEASE, and INFORM messages
 - **DHCPv6 Support**: Capture and parse SOLICIT, ADVERTISE, REQUEST, CONFIRM, RENEW, REBIND, REPLY, RELEASE, DECLINE, RECONFIGURE, and INFO-REQUEST messages
 - **mDNS Support** (optional): Passive and active mDNS discovery for enhanced device identification
-- **SSDP/UPnP Support** (optional): Passive SSDP discovery for UPnP and media devices
+- **SSDP/UPnP Support** (optional): Passive and active SSDP discovery for UPnP and media devices
 - **Device Classification**: Automatic identification of device types (phones, printers, thermostats, etc.) from hostnames, services, and vendor data
 - **IEEE OUI Database**: Built-in vendor identification from MAC addresses using IEEE OUI (Organizationally Unique Identifier) prefixes
 - **Device Tracking**: Automatically track detected devices and save to CSV file
@@ -104,7 +104,7 @@ first_seen,last_seen,mac_address,ip_address,ipv6_address,hostname,device_type,ve
 
 - **first_seen**: ISO 8601 timestamp of first detection
 - **last_seen**: ISO 8601 timestamp of last DHCP/mDNS activity
-- **mac_address**: Device MAC address (or DUID for DHCPv6)
+- **mac_address**: Device MAC address (for DHCPv6, extracted from DUID-LL/LLT when available; otherwise stored as `duid:...`)
 - **ip_address**: IPv4 address (requested or assigned)
 - **ipv6_address**: IPv6 address if available (from mDNS AAAA records)
 - **hostname**: Device hostname if available (empty if not)
@@ -112,7 +112,7 @@ first_seen,last_seen,mac_address,ip_address,ipv6_address,hostname,device_type,ve
 - **vendor**: Detected vendor based on mDNS services (e.g., "Apple", "Google", "Amazon")
 - **services**: Semicolon-separated list of mDNS services (requires `mdns` feature)
 
-The CSV file is updated in real-time as new devices are detected or existing devices change.
+The CSV file is flushed in short batches for performance as devices are detected or updated.
 
 ### mDNS Service Identification
 
@@ -324,14 +324,16 @@ cargo run --example parse_payload
 ### Main Types
 
 - `DhcpSniffer` - Main sniffer struct for capturing DHCP packets
-- `NetworkSniffer` - Extended sniffer for DHCP + mDNS (requires `mdns` feature)
+- `NetworkSniffer` - Extended sniffer for DHCP + mDNS/SSDP (requires `mdns` and/or `ssdp` feature)
 - `DhcpEvent` - Enum containing either `V4(Dhcpv4Packet)` or `V6(Dhcpv6Packet)`
-- `NetworkEvent` - Enum for DHCP or mDNS events (requires `mdns` feature)
+- `NetworkEvent` - Enum for DHCP, mDNS, or SSDP events (requires `mdns` and/or `ssdp` feature)
 - `Dhcpv4Packet` - Parsed DHCPv4 packet with all fields
 - `Dhcpv6Packet` - Parsed DHCPv6 packet with all fields
 - `MdnsPacket` - Parsed mDNS packet (requires `mdns` feature)
 - `MdnsRecord` - DNS resource record from mDNS
 - `MdnsQuerier` - Active mDNS query sender (requires `mdns` feature)
+- `SsdpPacket` - Parsed SSDP packet (requires `ssdp` feature)
+- `SsdpQuerier` - Active SSDP M-SEARCH sender (requires `ssdp` feature)
 - `DeviceTracker` - Track detected devices and save to CSV
 - `DeviceInfo` - Information about a detected device
 - `OuiRegistry` - IEEE OUI database for MAC-to-vendor lookups
@@ -357,6 +359,9 @@ cargo run --example parse_payload
 - `MDNS_PORT` (5353) - requires `mdns` feature
 - `MDNS_IPV4_MULTICAST` (224.0.0.251) - requires `mdns` feature
 - `MDNS_IPV6_MULTICAST` (ff02::fb) - requires `mdns` feature
+- `SSDP_PORT` (1900) - requires `ssdp` feature
+- `SSDP_IPV4_MULTICAST` (239.255.255.250) - requires `ssdp` feature
+- `SSDP_IPV6_MULTICAST` (ff02::c) - requires `ssdp` feature
 
 ### Helper Functions
 
@@ -365,10 +370,13 @@ cargo run --example parse_payload
 - `is_dhcpv4_ports(src, dest)` - Check if ports indicate DHCPv4
 - `is_dhcpv6_ports(src, dest)` - Check if ports indicate DHCPv6
 - `is_mdns_ports(src, dest)` - Check if ports indicate mDNS (requires `mdns` feature)
+- `is_ssdp_ports(src, dest)` - Check if ports indicate SSDP (requires `ssdp` feature)
 - `parse_dhcpv4_payload(payload, src, dst, src_port, dst_port)` - Parse DHCPv4 from raw bytes
 - `parse_dhcpv6_payload(payload, src, dst, src_port, dst_port)` - Parse DHCPv6 from raw bytes
 - `parse_mdns_payload(payload, src, dst)` - Parse mDNS from raw bytes (requires `mdns` feature)
+- `parse_ssdp_payload(payload, source_mac, src, dst)` - Parse SSDP from raw bytes (requires `ssdp` feature)
 - `build_mdns_query(name, record_type)` - Build an mDNS query packet (requires `mdns` feature)
+- `build_ssdp_search_request(search_target)` - Build an SSDP M-SEARCH request (requires `ssdp` feature)
 - `start_api_server(addr, tracker)` - Start HTTP API server in background thread (requires `http-api` feature)
 - `to_json()` / `to_json_sorted()` - Export devices as JSON (requires `http-api` feature)
 
@@ -378,6 +386,7 @@ cargo run --example parse_payload
 |---------|---------|-------------|
 | `http-api` | ✓ | Enables the HTTP REST API server, JSON export, and serde serialization |
 | `mdns` | ✗ | Enables mDNS (Multicast DNS) sniffing for enhanced device discovery |
+| `ssdp` | ✗ | Enables SSDP/UPnP sniffing and active M-SEARCH discovery |
 
 ```bash
 # Build with default features (http-api)
@@ -385,6 +394,9 @@ cargo build --release
 
 # Build with mDNS support
 cargo build --release --features mdns
+
+# Build with SSDP support
+cargo build --release --features ssdp
 
 # Build with all features
 cargo build --release --all-features
