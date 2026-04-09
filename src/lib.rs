@@ -353,6 +353,12 @@ pub fn parse_dhcpv4_payload(
     let mut hostname = None;
     let mut requested_ip = None;
 
+    // BOOTP/DHCP fixed header fields
+    // ciaddr: client IP address (set by client in bound/renewing states)
+    let ciaddr = Ipv4Addr::new(payload[12], payload[13], payload[14], payload[15]);
+    // yiaddr: 'your' (client) IP address assigned by server
+    let yiaddr = Ipv4Addr::new(payload[16], payload[17], payload[18], payload[19]);
+
     // Parse options starting at offset 240
     let mut index = 240;
     while index < payload.len() {
@@ -397,6 +403,16 @@ pub fn parse_dhcpv4_payload(
             _ => {}
         }
         index += 2 + len;
+    }
+
+    // If option 50 wasn't present, fall back to ciaddr/yiaddr when available.
+    // This keeps the tracking field useful for both client requests and server replies.
+    if requested_ip.is_none() {
+        if ciaddr != Ipv4Addr::new(0, 0, 0, 0) {
+            requested_ip = Some(ciaddr);
+        } else if yiaddr != Ipv4Addr::new(0, 0, 0, 0) {
+            requested_ip = Some(yiaddr);
+        }
     }
 
     Some(Dhcpv4Packet {
@@ -2957,13 +2973,22 @@ impl DeviceTracker {
     pub fn update_from_dhcpv4(&mut self, packet: &Dhcpv4Packet) -> bool {
         let mac = packet.client_mac_string();
 
-        // Determine IP address - use requested_ip if available, otherwise use source
+        // Determine client IP address.
+        // Prefer DHCP client/assigned fields parsed into requested_ip; avoid treating
+        // server source IP (port 67) as client identity.
         let ip = packet
             .requested_ip
             .map(|ip| ip.to_string())
             .unwrap_or_else(|| {
-                if packet.source_ip != Ipv4Addr::new(0, 0, 0, 0) {
+                if packet.source_port == DHCPV4_CLIENT_PORT
+                    && packet.source_ip != Ipv4Addr::new(0, 0, 0, 0)
+                {
                     packet.source_ip.to_string()
+                } else if packet.dest_port == DHCPV4_CLIENT_PORT
+                    && packet.dest_ip != Ipv4Addr::new(0, 0, 0, 0)
+                    && packet.dest_ip != Ipv4Addr::new(255, 255, 255, 255)
+                {
+                    packet.dest_ip.to_string()
                 } else {
                     "0.0.0.0".to_string()
                 }
@@ -4110,6 +4135,38 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_dhcpv4_fallback_to_yiaddr() {
+        // Minimal DHCPv4 packet where yiaddr is populated by server reply.
+        let mut payload = vec![0u8; 300];
+        payload[0] = 2; // BootReply
+        // yiaddr (bytes 16..20)
+        payload[16] = 192;
+        payload[17] = 168;
+        payload[18] = 4;
+        payload[19] = 81;
+        // Client MAC
+        payload[28] = 0xAA;
+        payload[29] = 0xBB;
+        payload[30] = 0xCC;
+        payload[31] = 0xDD;
+        payload[32] = 0xEE;
+        payload[33] = 0xFF;
+        // End options
+        payload[240] = 255;
+
+        let packet = parse_dhcpv4_payload(
+            &payload,
+            Ipv4Addr::new(192, 168, 4, 1),
+            Ipv4Addr::new(255, 255, 255, 255),
+            67,
+            68,
+        )
+        .unwrap();
+
+        assert_eq!(packet.requested_ip, Some(Ipv4Addr::new(192, 168, 4, 81)));
+    }
+
+    #[test]
     fn test_parse_dhcpv6_payload_too_short() {
         let payload = vec![0u8; 2];
         let result = parse_dhcpv6_payload(
@@ -4355,6 +4412,34 @@ mod tests {
         assert_eq!(tracker.device_count(), 1);
 
         // Clean up
+        let _ = std::fs::remove_file(temp_path);
+    }
+
+    #[test]
+    fn test_device_tracker_dhcpv4_does_not_use_server_source_ip() {
+        let temp_path = "/tmp/lanwatch_test_dhcpv4_server_ip.csv";
+        let _ = std::fs::remove_file(temp_path);
+
+        let mut tracker = DeviceTracker::new(temp_path).unwrap();
+
+        // Simulate DHCPv4 server reply without requested_ip/yiaddr fallback data.
+        // The server source IP (router) must not be attributed to client MAC.
+        let packet = Dhcpv4Packet {
+            source_ip: Ipv4Addr::new(192, 168, 4, 1),
+            dest_ip: Ipv4Addr::new(255, 255, 255, 255),
+            source_port: 67,
+            dest_port: 68,
+            operation: Dhcpv4Operation::BootReply,
+            client_mac: [0x10, 0x20, 0x30, 0x40, 0x50, 0x60],
+            message_type: Some(Dhcpv4MessageType::Offer),
+            hostname: None,
+            requested_ip: None,
+        };
+
+        tracker.update_from_dhcpv4(&packet);
+        let device = tracker.devices().get("10:20:30:40:50:60").unwrap();
+        assert_eq!(device.ip_address, "0.0.0.0");
+
         let _ = std::fs::remove_file(temp_path);
     }
 
