@@ -226,7 +226,12 @@ pub struct Dhcpv4Packet {
 }
 
 impl Dhcpv4Packet {
-    /// Format the client MAC address as a lowercase string
+    /// Formats the client MAC address as a lowercase colon-separated string.
+    ///
+    /// # Returns
+    /// A `String` in the format "aa:bb:cc:dd:ee:ff".
+    ///
+    /// This is useful for device identification and tracking keys.
     pub fn client_mac_string(&self) -> String {
         format!(
             "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
@@ -270,7 +275,12 @@ pub struct Dhcpv6Packet {
 }
 
 impl Dhcpv6Packet {
-    /// Format the transaction ID as a hex string
+    /// Formats the 3-byte DHCPv6 transaction ID as a hex string.
+    ///
+    /// # Returns
+    /// A string prefixed with "0x" followed by the 6-character hex representation.
+    ///
+    /// Used to correlate DHCPv6 messages across a single transaction.
     pub fn transaction_id_string(&self) -> String {
         format!(
             "0x{:02X}{:02X}{:02X}",
@@ -312,7 +322,12 @@ impl From<DhcpEvent> for NetworkEvent {
     }
 }
 
-/// Returns a list of available network interface names
+/// Returns a list of names for all available network interfaces on the system.
+///
+/// # Returns
+/// A `Vec<String>` containing the names (e.g., "eth0", "en0", "wlan0").
+///
+/// This list is useful for providing users with options for which interface to sniff.
 pub fn list_interfaces() -> Vec<String> {
     datalink::interfaces()
         .into_iter()
@@ -320,14 +335,30 @@ pub fn list_interfaces() -> Vec<String> {
         .collect()
 }
 
-/// Find a network interface by name
+/// Finds a network interface structure by its name.
+///
+/// # Arguments
+/// * `name` - The string name of the interface to locate.
+///
+/// # Returns
+/// `Some(NetworkInterface)` if found, or `None` if no interface matches the name.
 pub fn find_interface(name: &str) -> Option<NetworkInterface> {
     datalink::interfaces()
         .into_iter()
         .find(|iface| iface.name == name)
 }
 
-/// Parse a DHCPv4 payload into structured data
+/// Parses a raw DHCPv4 UDP payload into a structured `Dhcpv4Packet`.
+///
+/// # Arguments
+/// * `payload` - The raw bytes of the UDP payload (starts at the BOOTP header).
+/// * `source_ip` - The IPv4 source address from the IP header.
+/// * `dest_ip` - The IPv4 destination address from the IP header.
+/// * `source_port` - The UDP source port.
+/// * `dest_port` - The UDP destination port.
+///
+/// # Returns
+/// `Some(Dhcpv4Packet)` if the payload is valid and meets minimum length requirements, otherwise `None`.
 pub fn parse_dhcpv4_payload(
     payload: &[u8],
     source_ip: Ipv4Addr,
@@ -428,7 +459,17 @@ pub fn parse_dhcpv4_payload(
     })
 }
 
-/// Parse a DHCPv6 payload into structured data
+/// Parses a raw DHCPv6 UDP payload into a structured `Dhcpv6Packet`.
+///
+/// # Arguments
+/// * `payload` - The raw bytes of the UDP payload (starts at the DHCPv6 message type).
+/// * `source_ip` - The IPv6 source address from the IP header.
+/// * `dest_ip` - The IPv6 destination address from the IP header.
+/// * `source_port` - The UDP source port.
+/// * `dest_port` - The UDP destination port.
+///
+/// # Returns
+/// `Some(Dhcpv6Packet)` if the payload is valid and meets minimum length requirements, otherwise `None`.
 pub fn parse_dhcpv6_payload(
     payload: &[u8],
     source_ip: Ipv6Addr,
@@ -595,7 +636,11 @@ fn extract_mac_from_duid(duid: &[u8]) -> Option<String> {
     ))
 }
 
-/// Check if UDP ports indicate DHCPv4 traffic
+/// Checks if a pair of UDP ports corresponds to standard DHCPv4 traffic.
+///
+/// # Arguments
+/// * `src` - UDP source port.
+/// * `dest` - UDP destination port.
 pub fn is_dhcpv4_ports(src: u16, dest: u16) -> bool {
     src == DHCPV4_SERVER_PORT
         || src == DHCPV4_CLIENT_PORT
@@ -603,7 +648,11 @@ pub fn is_dhcpv4_ports(src: u16, dest: u16) -> bool {
         || dest == DHCPV4_CLIENT_PORT
 }
 
-/// Check if UDP ports indicate DHCPv6 traffic
+/// Checks if a pair of UDP ports corresponds to standard DHCPv6 traffic.
+///
+/// # Arguments
+/// * `src` - UDP source port.
+/// * `dest` - UDP destination port.
 pub fn is_dhcpv6_ports(src: u16, dest: u16) -> bool {
     src == DHCPV6_CLIENT_PORT
         || src == DHCPV6_SERVER_PORT
@@ -700,14 +749,14 @@ pub struct MdnsServiceRegistry {
 
 #[cfg(feature = "mdns")]
 impl MdnsServiceRegistry {
-    /// Create a new empty service registry
+    /// Creates a new, empty mDNS service registry.
     pub fn new() -> Self {
         Self {
             services: HashMap::new(),
         }
     }
 
-    /// Create a registry with built-in common services
+    /// Creates an mDNS service registry pre-populated with common network services.
     pub fn with_defaults() -> Self {
         let mut registry = Self::new();
         registry.add_default_services();
@@ -983,7 +1032,7 @@ impl MdnsServiceRegistry {
         self.add_full(service_type, description, vendor, device_type.as_deref());
     }
 
-    /// Add a service to the registry with all fields
+    /// Adds a service to the registry with explicit vendor and device type metadata.
     pub fn add_full(
         &mut self,
         service_type: &str,
@@ -1003,7 +1052,16 @@ impl MdnsServiceRegistry {
         );
     }
 
-    /// Load services from a file (format: service_type # description)
+    /// Loads service definitions from a flat file.
+    ///
+    /// # Arguments
+    /// * `path` - Path to the file containing service definitions.
+    ///
+    /// # Returns
+    /// The number of services successfully loaded.
+    ///
+    /// # File Format
+    /// `_service._tcp.local # Description of the service`
     pub fn load_from_file<P: AsRef<Path>>(&mut self, path: P) -> std::io::Result<usize> {
         let file = File::open(path)?;
         let reader = BufReader::new(file);
@@ -1227,34 +1285,34 @@ impl MdnsServiceRegistry {
             .to_string()
     }
 
-    /// Look up a service by type
+    /// Looks up service metadata based on the service type string.
     pub fn lookup(&self, service_type: &str) -> Option<&MdnsServiceInfo> {
         let normalized = Self::normalize_service_type(service_type);
         self.services.get(&normalized)
     }
 
-    /// Get description for a service type
+    /// Returns the human-readable description for a service type.
     pub fn get_description(&self, service_type: &str) -> Option<&str> {
         self.lookup(service_type).map(|s| s.description.as_str())
     }
 
-    /// Get vendor for a service type
+    /// Returns the detected vendor associated with a service type.
     pub fn get_vendor(&self, service_type: &str) -> Option<&str> {
         self.lookup(service_type).and_then(|s| s.vendor.as_deref())
     }
 
-    /// Get device type for a service type
+    /// Returns the inferred device type associated with a service type.
     pub fn get_device_type(&self, service_type: &str) -> Option<&str> {
         self.lookup(service_type)
             .and_then(|s| s.device_type.as_deref())
     }
 
-    /// Get all registered services
+    /// Returns a reference to the internal map of registered services.
     pub fn services(&self) -> &HashMap<String, MdnsServiceInfo> {
         &self.services
     }
 
-    /// Get number of registered services
+    /// Returns the total number of services in the registry.
     pub fn len(&self) -> usize {
         self.services.len()
     }
@@ -1279,14 +1337,15 @@ pub struct OuiRegistry {
 }
 
 impl OuiRegistry {
-    /// Create a new empty OUI registry (still has access to built-in oui-data database)
+    /// Creates a new empty OUI registry.
+    /// Note: The built-in `oui-data` database is still accessible for lookups.
     pub fn new() -> Self {
         Self {
             custom_overrides: HashMap::new(),
         }
     }
 
-    /// Create a new OUI registry with the built-in IEEE database.
+    /// Creates a new OUI registry with the built-in IEEE database initialized.
     /// This is equivalent to `new()` since oui-data is always available.
     pub fn with_defaults() -> Self {
         Self::new()
@@ -1350,13 +1409,13 @@ impl OuiRegistry {
         Ok(count)
     }
 
-    /// Add a custom OUI entry (override)
+    /// Adds a manual OUI-to-vendor mapping to the registry.
     pub fn add(&mut self, mac_prefix: &str, vendor: &str) {
         let normalized = Self::normalize_mac(mac_prefix);
         self.custom_overrides.insert(normalized, vendor.to_string());
     }
 
-    /// Get the total number of entries available (custom + built-in IEEE database)
+    /// Returns the total count of OUI entries available (custom plus built-in).
     pub fn len(&self) -> usize {
         // oui-data contains the full IEEE OUI database
         oui_data::OUI_ENTRIES.len() + self.custom_overrides.len()
@@ -1367,12 +1426,12 @@ impl OuiRegistry {
         oui_data::OUI_ENTRIES.is_empty() && self.custom_overrides.is_empty()
     }
 
-    /// Get the number of custom override entries
+    /// Returns the number of custom override entries loaded.
     pub fn custom_count(&self) -> usize {
         self.custom_overrides.len()
     }
 
-    /// Get the number of built-in IEEE database entries
+    /// Returns the number of entries in the built-in IEEE database.
     pub fn builtin_count() -> usize {
         oui_data::OUI_ENTRIES.len()
     }
@@ -1636,7 +1695,7 @@ pub struct MdnsQuestion {
 
 #[cfg(feature = "mdns")]
 impl MdnsPacket {
-    /// Get all records (answers + authority + additional)
+    /// Returns an iterator over every record in the packet (Answers, Authority, and Additional).
     pub fn all_records(&self) -> impl Iterator<Item = &MdnsRecord> {
         self.answers
             .iter()
@@ -1644,7 +1703,10 @@ impl MdnsPacket {
             .chain(self.additional.iter())
     }
 
-    /// Extract service name from PTR records (e.g., "My Device" from "My Device._http._tcp.local")
+    /// Extracts service instance names from PTR records.
+    ///
+    /// # Returns
+    /// A vector of tuples containing (instance_name, service_type).
     pub fn get_service_instances(&self) -> Vec<(&str, &str)> {
         self.answers
             .iter()
@@ -1660,7 +1722,10 @@ impl MdnsPacket {
             .collect()
     }
 
-    /// Get IPv4 addresses from A records
+    /// Extracts all IPv4 addresses from A records found in the packet.
+    ///
+    /// # Returns
+    /// A vector of tuples containing (host_name, ipv4_address).
     pub fn get_ipv4_addresses(&self) -> Vec<(String, Ipv4Addr)> {
         self.all_records()
             .filter_map(|r| {
@@ -1673,7 +1738,10 @@ impl MdnsPacket {
             .collect()
     }
 
-    /// Get IPv6 addresses from AAAA records
+    /// Extracts all IPv6 addresses from AAAA records found in the packet.
+    ///
+    /// # Returns
+    /// A vector of tuples containing (host_name, ipv6_address).
     pub fn get_ipv6_addresses(&self) -> Vec<(String, Ipv6Addr)> {
         self.all_records()
             .filter_map(|r| {
@@ -1687,13 +1755,23 @@ impl MdnsPacket {
     }
 }
 
-/// Check if UDP ports indicate mDNS traffic
+/// Checks if a pair of UDP ports corresponds to standard mDNS traffic (5353).
+///
+/// # Arguments
+/// * `src` - UDP source port.
+/// * `dest` - UDP destination port.
 #[cfg(feature = "mdns")]
 pub fn is_mdns_ports(src: u16, dest: u16) -> bool {
     src == MDNS_PORT || dest == MDNS_PORT
 }
 
-/// Parse an mDNS packet from raw UDP payload
+/// Parses a raw mDNS UDP payload into a structured `MdnsPacket`.
+///
+/// # Arguments
+/// * `payload` - The raw bytes of the UDP payload.
+/// * `source_mac` - The source MAC address as a string.
+/// * `source_ip` - The sender's IP address.
+/// * `dest_ip` - The destination IP address.
 #[cfg(feature = "mdns")]
 pub fn parse_mdns_payload(
     payload: &[u8],
@@ -1940,7 +2018,7 @@ pub struct MdnsQuerier {
 
 #[cfg(feature = "mdns")]
 impl MdnsQuerier {
-    /// Create a new mDNS querier
+    /// Creates a new mDNS querier and binds a UDP socket.
     pub fn new() -> std::io::Result<Self> {
         use std::net::{Ipv4Addr, SocketAddrV4};
 
@@ -1955,7 +2033,10 @@ impl MdnsQuerier {
         Ok(Self { socket })
     }
 
-    /// Send a query for a specific service type (e.g., "_http._tcp.local")
+    /// Sends a PTR query for a specific mDNS service type.
+    ///
+    /// # Arguments
+    /// * `service_type` - The service type to query (e.g., "_http._tcp.local").
     pub fn query_service(&self, service_type: &str) -> std::io::Result<()> {
         let packet = build_mdns_query(service_type, MdnsRecordType::Ptr);
         self.socket
@@ -1963,7 +2044,10 @@ impl MdnsQuerier {
         Ok(())
     }
 
-    /// Send a query for a specific hostname (e.g., "mydevice.local")
+    /// Sends an ANY query for a specific hostname.
+    ///
+    /// # Arguments
+    /// * `hostname` - The hostname to query (e.g., "mydevice.local").
     pub fn query_hostname(&self, hostname: &str) -> std::io::Result<()> {
         let packet = build_mdns_query(hostname, MdnsRecordType::Any);
         self.socket
@@ -1971,7 +2055,7 @@ impl MdnsQuerier {
         Ok(())
     }
 
-    /// Query common service types for device discovery
+    /// Sends discovery queries for common well-known mDNS service types.
     pub fn query_common_services(&self) -> std::io::Result<()> {
         let services = [
             "_services._dns-sd._udp.local", // Service enumeration
@@ -2000,7 +2084,11 @@ impl MdnsQuerier {
     }
 }
 
-/// Build an mDNS query packet
+/// Builds a raw mDNS query packet for the specified name and record type.
+///
+/// # Arguments
+/// * `name` - The domain name to query.
+/// * `record_type` - The record type requested (e.g., PTR, A).
 #[cfg(feature = "mdns")]
 pub fn build_mdns_query(name: &str, record_type: MdnsRecordType) -> Vec<u8> {
     let mut packet = Vec::with_capacity(64);
@@ -2100,11 +2188,16 @@ pub struct SsdpPacket {
 
 #[cfg(feature = "ssdp")]
 impl SsdpPacket {
-    /// Get a header value by name
+    /// Returns the value of a specific header, if present.
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .get(&name.to_lowercase())
             .map(|value| value.as_str())
+    }
+
+    /// Returns a reference to the complete map of SSDP headers.
+    pub fn headers(&self) -> &HashMap<String, String> {
+        &self.headers
     }
 
     /// Collect the discovery-oriented identifiers advertised by this packet
@@ -2141,7 +2234,7 @@ pub struct SsdpQuerier {
 
 #[cfg(feature = "ssdp")]
 impl SsdpQuerier {
-    /// Create a new SSDP querier
+    /// Creates a new SSDP querier and binds a UDP socket.
     pub fn new() -> std::io::Result<Self> {
         use std::net::{Ipv4Addr, SocketAddrV4};
 
@@ -2156,7 +2249,10 @@ impl SsdpQuerier {
         Ok(Self { socket })
     }
 
-    /// Send an M-SEARCH discovery request for a specific device type (e.g., "ssdp:all" or "upnp:rootdevice")
+    /// Sends an M-SEARCH discovery request for a specific SSDP search target.
+    ///
+    /// # Arguments
+    /// * `device_type` - The search target (ST) header value (e.g., "ssdp:all").
     pub fn search_device(&self, device_type: &str) -> std::io::Result<()> {
         let request = build_ssdp_search_request(device_type);
         self.socket
@@ -2164,7 +2260,7 @@ impl SsdpQuerier {
         Ok(())
     }
 
-    /// Query common device types for UPnP discovery
+    /// Sends discovery probes for common well-known UPnP device types.
     pub fn search_common_devices(&self) -> std::io::Result<()> {
         let device_types = [
             "ssdp:all",        // All SSDP devices
@@ -2185,7 +2281,10 @@ impl SsdpQuerier {
     }
 }
 
-/// Build an SSDP M-SEARCH request packet
+/// Builds a raw SSDP M-SEARCH request packet string.
+///
+/// # Arguments
+/// * `search_target` - The value for the ST (Search Target) header.
 #[cfg(feature = "ssdp")]
 pub fn build_ssdp_search_request(search_target: &str) -> Vec<u8> {
     // M-SEARCH request format per UPnP specification
@@ -2196,13 +2295,23 @@ pub fn build_ssdp_search_request(search_target: &str) -> Vec<u8> {
     request.into_bytes()
 }
 
-/// Check if UDP ports indicate SSDP traffic
+/// Checks if a pair of UDP ports corresponds to standard SSDP traffic (1900).
+///
+/// # Arguments
+/// * `src` - UDP source port.
+/// * `dest` - UDP destination port.
 #[cfg(feature = "ssdp")]
 pub fn is_ssdp_ports(src: u16, dest: u16) -> bool {
     src == SSDP_PORT || dest == SSDP_PORT
 }
 
-/// Parse an SSDP / UPnP packet from raw UDP payload
+/// Parses a raw SSDP/UPnP UDP payload into a structured `SsdpPacket`.
+///
+/// # Arguments
+/// * `payload` - The raw bytes of the UDP payload.
+/// * `source_mac` - The source MAC address as a string.
+/// * `source_ip` - The sender's IP address.
+/// * `dest_ip` - The destination IP address.
 #[cfg(feature = "ssdp")]
 pub fn parse_ssdp_payload(
     payload: &[u8],
@@ -2253,7 +2362,13 @@ pub fn parse_ssdp_payload(
     })
 }
 
-/// Process an Ethernet frame and extract DHCP event if present
+/// Processes a raw Ethernet frame and extracts a DHCP event (v4 or v6) if present.
+///
+/// # Arguments
+/// * `frame` - Raw bytes of the Ethernet frame.
+///
+/// # Returns
+/// `Some(DhcpEvent)` if the frame contains a valid DHCP packet, otherwise `None`.
 pub fn process_ethernet_frame(frame: &[u8]) -> Option<DhcpEvent> {
     let ethernet = EthernetPacket::new(frame)?;
 
@@ -2264,7 +2379,13 @@ pub fn process_ethernet_frame(frame: &[u8]) -> Option<DhcpEvent> {
     }
 }
 
-/// Process an Ethernet frame and extract NetworkEvent (DHCP, mDNS, or SSDP) if present
+/// Processes a raw Ethernet frame and extracts a `NetworkEvent` (DHCP, mDNS, or SSDP) if present.
+///
+/// # Arguments
+/// * `frame` - Raw bytes of the Ethernet frame.
+///
+/// # Returns
+/// `Some(NetworkEvent)` if the frame contains one of the supported protocols, otherwise `None`.
 #[cfg(any(feature = "mdns", feature = "ssdp"))]
 pub fn process_ethernet_frame_extended(frame: &[u8]) -> Option<NetworkEvent> {
     let ethernet = EthernetPacket::new(frame)?;
@@ -2437,7 +2558,10 @@ pub struct DhcpSniffer {
 }
 
 impl DhcpSniffer {
-    /// Create a new DHCP sniffer for the specified interface
+    /// Creates a new DHCP packet sniffer bound to the specified network interface.
+    ///
+    /// # Arguments
+    /// * `interface_name` - The system name of the interface to sniff (e.g., "eth0").
     pub fn new(interface_name: &str) -> Result<Self, DhcpError> {
         let interface = find_interface(interface_name)
             .ok_or_else(|| DhcpError::InterfaceNotFound(interface_name.to_string()))?;
@@ -2454,12 +2578,12 @@ impl DhcpSniffer {
         })
     }
 
-    /// Get the interface name
+    /// Returns the name of the network interface used by the sniffer.
     pub fn interface_name(&self) -> &str {
         &self.interface_name
     }
 
-    /// Read the next packet and return a DHCP event if it's a DHCP packet
+    /// Reads the next packet from the interface and parses it if it is a DHCP message.
     pub fn next_packet(&mut self) -> Result<Option<DhcpEvent>, DhcpError> {
         match self.rx.next() {
             Ok(packet) => Ok(process_ethernet_frame(packet)),
@@ -2467,8 +2591,12 @@ impl DhcpSniffer {
         }
     }
 
-    /// Run the sniffer with a callback for each DHCP event
-    /// The callback should return `true` to continue sniffing, `false` to stop
+    /// Runs the capture loop, invoking a callback for every detected DHCP event.
+    ///
+    /// # Arguments
+    /// * `callback` - A closure that receives a `DhcpEvent`.
+    ///
+    /// The loop terminates if the callback returns `false`.
     pub fn run<F>(&mut self, mut callback: F)
     where
         F: FnMut(DhcpEvent) -> bool,
@@ -2498,7 +2626,10 @@ pub struct NetworkSniffer {
 
 #[cfg(any(feature = "mdns", feature = "ssdp"))]
 impl NetworkSniffer {
-    /// Create a new network sniffer for the specified interface
+    /// Creates a new multi-protocol network sniffer bound to the specified interface.
+    ///
+    /// # Arguments
+    /// * `interface_name` - The system name of the interface to sniff.
     pub fn new(interface_name: &str) -> Result<Self, DhcpError> {
         let interface = find_interface(interface_name)
             .ok_or_else(|| DhcpError::InterfaceNotFound(interface_name.to_string()))?;
@@ -2515,12 +2646,12 @@ impl NetworkSniffer {
         })
     }
 
-    /// Get the interface name
+    /// Returns the name of the network interface used by the sniffer.
     pub fn interface_name(&self) -> &str {
         &self.interface_name
     }
 
-    /// Read the next packet and return a NetworkEvent if it's DHCP or mDNS
+    /// Reads the next packet and parses it if it matches DHCP, mDNS, or SSDP.
     pub fn next_packet(&mut self) -> Result<Option<NetworkEvent>, DhcpError> {
         match self.rx.next() {
             Ok(packet) => Ok(process_ethernet_frame_extended(packet)),
@@ -2528,8 +2659,12 @@ impl NetworkSniffer {
         }
     }
 
-    /// Run the sniffer with a callback for each network event
-    /// The callback should return `true` to continue sniffing, `false` to stop
+    /// Runs the capture loop, invoking a callback for every detected `NetworkEvent`.
+    ///
+    /// # Arguments
+    /// * `callback` - A closure that receives a `NetworkEvent`.
+    ///
+    /// The loop terminates if the callback returns `false`.
     pub fn run<F>(&mut self, mut callback: F)
     where
         F: FnMut(NetworkEvent) -> bool,
@@ -2583,7 +2718,7 @@ pub struct DeviceInfo {
 }
 
 impl DeviceInfo {
-    /// Create a new DeviceInfo with current timestamp
+    /// Creates a new `DeviceInfo` instance with timestamps initialized to now.
     pub fn new(mac_address: String, ip_address: String, hostname: Option<String>) -> Self {
         let timestamp = format_timestamp(SystemTime::now());
         Self {
@@ -2599,7 +2734,10 @@ impl DeviceInfo {
         }
     }
 
-    /// Update the device info if something changed, returns true if updated
+    /// Updates the device information with a new IP address and optional hostname.
+    ///
+    /// # Returns
+    /// `true` if any fields were updated, `false` otherwise.
     pub fn update(&mut self, ip_address: &str, hostname: Option<&str>) -> bool {
         let mut changed = false;
         let timestamp = format_timestamp(SystemTime::now());
@@ -2619,7 +2757,10 @@ impl DeviceInfo {
         changed
     }
 
-    /// Add a service to the device if not already present
+    /// Adds a service to the device's service list if not already present.
+    ///
+    /// # Returns
+    /// `true` if a new service was added, `false` if it was already in the list.
     pub fn add_service(&mut self, service: &str) -> bool {
         let normalized = service
             .to_lowercase()
@@ -2634,7 +2775,10 @@ impl DeviceInfo {
         }
     }
 
-    /// Set vendor if not already set (first vendor wins)
+    /// Sets the device vendor if it is not already defined.
+    ///
+    /// # Returns
+    /// `true` if the vendor was set, `false` if a vendor already existed.
     pub fn set_vendor(&mut self, vendor: &str) -> bool {
         if self.vendor.is_none() {
             self.vendor = Some(vendor.to_string());
@@ -2644,7 +2788,10 @@ impl DeviceInfo {
         }
     }
 
-    /// Set device type if not already set (first type wins)
+    /// Sets the device type if it is not already defined.
+    ///
+    /// # Returns
+    /// `true` if the device type was set, `false` if it already existed.
     pub fn set_device_type(&mut self, device_type: &str) -> bool {
         if self.device_type.is_none() {
             self.device_type = Some(device_type.to_string());
@@ -2654,7 +2801,10 @@ impl DeviceInfo {
         }
     }
 
-    /// Set IPv6 address (updates if different)
+    /// Sets or updates the device's IPv6 address.
+    ///
+    /// # Returns
+    /// `true` if the address was changed or set, `false` if it was already identical.
     pub fn set_ipv6_address(&mut self, ipv6: &str) -> bool {
         let new_ipv6 = Some(ipv6.to_string());
         if self.ipv6_address != new_ipv6 {
@@ -2665,8 +2815,10 @@ impl DeviceInfo {
         }
     }
 
-    /// Convert to CSV line
-    /// Format: first_seen,last_seen,mac_address,ip_address,"ipv6_address","hostname","device_type","vendor","services"
+    /// Serializes the device information into a CSV string.
+    ///
+    /// # Format
+    /// `first_seen,last_seen,mac_address,ip_address,"ipv6_address","hostname","device_type","vendor","services"`
     pub fn to_csv_line(&self) -> String {
         let services_str = self.services.join(";");
         format!(
@@ -2683,7 +2835,13 @@ impl DeviceInfo {
         )
     }
 
-    /// Parse from CSV line
+    /// Parses a device from a CSV line string.
+    ///
+    /// # Arguments
+    /// * `line` - A string representing a single row from a `lanwatch` CSV file.
+    ///
+    /// # Returns
+    /// `Some(DeviceInfo)` if the line is valid, otherwise `None`.
     pub fn from_csv_line(line: &str) -> Option<Self> {
         // Handle quoted fields properly
         let parts = parse_csv_line(line);
@@ -2869,7 +3027,10 @@ pub struct DeviceTracker {
 }
 
 impl DeviceTracker {
-    /// Create a new device tracker with the specified CSV file path
+    /// Creates a new device tracker, loading existing data from the specified CSV file.
+    ///
+    /// # Arguments
+    /// * `csv_path` - The path to the file used for persistence.
     pub fn new<P: AsRef<Path>>(csv_path: P) -> std::io::Result<Self> {
         let csv_path = csv_path.as_ref().to_string_lossy().to_string();
         let mut tracker = Self {
@@ -2887,23 +3048,23 @@ impl DeviceTracker {
         Ok(tracker)
     }
 
-    /// Set the OUI registry for MAC address vendor lookup
+    /// Sets the OUI registry used to identify device manufacturers from MAC addresses.
     pub fn set_oui_registry(&mut self, registry: OuiRegistry) {
         self.oui_registry = Some(registry);
     }
 
-    /// Get the OUI registry
+    /// Returns a reference to the active OUI registry, if set.
     pub fn oui_registry(&self) -> Option<&OuiRegistry> {
         self.oui_registry.as_ref()
     }
 
-    /// Set the mDNS service registry for vendor/service identification
+    /// Sets the mDNS service registry used for fingerprinting devices based on their services.
     #[cfg(feature = "mdns")]
     pub fn set_service_registry(&mut self, registry: MdnsServiceRegistry) {
         self.service_registry = Some(registry);
     }
 
-    /// Get the mDNS service registry
+    /// Returns a reference to the active mDNS service registry, if set.
     #[cfg(feature = "mdns")]
     pub fn service_registry(&self) -> Option<&MdnsServiceRegistry> {
         self.service_registry.as_ref()
@@ -2936,7 +3097,7 @@ impl DeviceTracker {
         Ok(())
     }
 
-    /// Save all devices to CSV file
+    /// Persists all current device information to the CSV file.
     pub fn save_to_csv(&self) -> std::io::Result<()> {
         let mut file = File::create(&self.csv_path)?;
 
@@ -2963,13 +3124,16 @@ impl DeviceTracker {
         self.auto_save = enabled;
     }
 
-    /// Flush current in-memory device state to CSV.
+    /// Explicitly flushes the current in-memory device state to the CSV file.
     pub fn flush_to_csv(&self) -> std::io::Result<()> {
         self.save_to_csv()
     }
 
-    /// Update or add a device from a DHCPv4 packet
-    /// Returns true if the device was new or updated
+    /// Updates the tracker state with information extracted from a DHCPv4 packet.
+    ///
+    /// # Returns
+    /// `true` if a new device was detected or an existing device was significantly updated 
+    /// (IP change, hostname change, etc.).
     pub fn update_from_dhcpv4(&mut self, packet: &Dhcpv4Packet) -> bool {
         let mac = packet.client_mac_string();
 
@@ -2997,8 +3161,10 @@ impl DeviceTracker {
         self.update_device(&mac, &ip, packet.hostname.as_deref())
     }
 
-    /// Update or add a device from a DHCPv6 packet
-    /// Returns true if the device was new or updated
+    /// Updates the tracker state with information extracted from a DHCPv6 packet.
+    ///
+    /// # Returns
+    /// `true` if a new device was detected or an existing device was updated.
     pub fn update_from_dhcpv6(&mut self, packet: &Dhcpv6Packet) -> bool {
         // For DHCPv6, use Ethernet MAC from DUID-LL/LLT when available.
         // Fall back to a prefixed DUID identifier for non-Ethernet DUID types.
@@ -3029,8 +3195,10 @@ impl DeviceTracker {
         self.update_device(&mac, &ip, fqdn)
     }
 
-    /// Update or add devices from an mDNS packet
-    /// Returns number of devices updated/added
+    /// Updates the tracker state with hostnames, IP addresses, and services from an mDNS packet.
+    ///
+    /// # Returns
+    /// The count of unique updates applied across all detected devices.
     #[cfg(feature = "mdns")]
     pub fn update_from_mdns(&mut self, packet: &MdnsPacket) -> usize {
         let mut updated = 0;
@@ -3430,8 +3598,10 @@ impl DeviceTracker {
         None
     }
 
-    /// Update or add devices from an SSDP packet
-    /// Returns number of devices updated/added
+    /// Updates the tracker state with information from an SSDP/UPnP advertisement or response.
+    ///
+    /// # Returns
+    /// The count of unique updates applied to the device entry.
     #[cfg(feature = "ssdp")]
     pub fn update_from_ssdp(&mut self, packet: &SsdpPacket) -> usize {
         let mut updated = 0;
@@ -3767,29 +3937,40 @@ impl DeviceTracker {
         }
     }
 
-    /// Get all tracked devices
+    /// Returns a reference to the internal map of all tracked devices.
     pub fn devices(&self) -> &HashMap<String, DeviceInfo> {
         &self.devices
     }
 
-    /// Get device count
+    /// Returns the total number of devices currently being tracked.
     pub fn device_count(&self) -> usize {
         self.devices.len()
     }
 
-    /// Get the CSV file path
+    /// Returns a reference to a device by its MAC address.
+    /// Handles normalization of the provided MAC string.
+    pub fn get_device(&self, mac: &str) -> Option<&DeviceInfo> {
+        // Try direct lookup with lowercase first
+        if let Some(device) = self.devices.get(&mac.to_lowercase()) {
+            return Some(device);
+        }
+        // Fallback to normalized identifier check
+        self.devices.get(&normalize_device_identifier(mac))
+    }
+
+    /// Returns the path to the CSV file used for persistence.
     pub fn csv_path(&self) -> &str {
         &self.csv_path
     }
 
-    /// Get all devices as a JSON string
+    /// Returns a JSON-formatted string of all tracked devices.
     #[cfg(feature = "http-api")]
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         let devices: Vec<&DeviceInfo> = self.devices.values().collect();
         serde_json::to_string_pretty(&devices)
     }
 
-    /// Get all devices as a JSON array sorted by last_seen (most recent first)
+    /// Returns a JSON string of all devices, sorted by the `last_seen` timestamp.
     #[cfg(feature = "http-api")]
     pub fn to_json_sorted(&self) -> Result<String, serde_json::Error> {
         let mut devices: Vec<&DeviceInfo> = self.devices.values().collect();
@@ -3835,14 +4016,18 @@ struct ApiError {
 
 #[cfg(feature = "http-api")]
 impl ApiServer {
-    /// Create a new API server on the specified address (e.g., "0.0.0.0:8080")
+    /// Creates a new HTTP API server instance.
+    ///
+    /// # Arguments
+    /// * `addr` - The socket address to listen on (e.g., "127.0.0.1:8080").
+    /// * `tracker` - An `Arc<RwLock<DeviceTracker>>` for safe sharing of device data.
     pub fn new(addr: &str, tracker: Arc<RwLock<DeviceTracker>>) -> std::io::Result<Self> {
         let server = Server::http(addr)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
         Ok(Self { server, tracker })
     }
 
-    /// Run the API server (blocking)
+    /// Starts the API server request handling loop (blocks the current thread).
     pub fn run(&self) {
         println!(
             "API server listening on http://{}",
@@ -3870,6 +4055,10 @@ impl ApiServer {
             ("GET", "/devices/count") => self.handle_device_count(),
             ("GET", "/health") => self.handle_health(),
             ("GET", "/") => self.handle_root(),
+            ("GET", p) if p.starts_with("/devices/") => {
+                let mac = &p[9..];
+                self.handle_device_by_mac(mac)
+            }
             _ => self.handle_not_found(),
         }
     }
@@ -3890,6 +4079,28 @@ impl ApiServer {
                 Response::from_string(json).with_header(
                     tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap(),
                 )
+            }
+            Err(_) => self.handle_error("Failed to read device data"),
+        }
+    }
+
+    fn handle_device_by_mac(&self, mac: &str) -> Response<std::io::Cursor<Vec<u8>>> {
+        match self.tracker.read() {
+            Ok(tracker) => {
+                if let Some(device) = tracker.get_device(mac) {
+                    let response = ApiResponse {
+                        success: true,
+                        count: 1,
+                        data: device,
+                    };
+
+                    let json = serde_json::to_string_pretty(&response).unwrap_or_default();
+                    Response::from_string(json).with_header(
+                        tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap(),
+                    )
+                } else {
+                    self.handle_not_found()
+                }
             }
             Err(_) => self.handle_error("Failed to read device data"),
         }
@@ -3925,6 +4136,7 @@ impl ApiServer {
             "version": env!("CARGO_PKG_VERSION"),
             "endpoints": {
                 "/devices": "GET - List all detected devices",
+                "/devices/{mac}": "GET - Get a specific device by MAC address",
                 "/devices/count": "GET - Get device count",
                 "/health": "GET - Health check"
             }
@@ -3954,7 +4166,11 @@ impl ApiServer {
     }
 }
 
-/// Start the API server in a background thread
+/// Starts the HTTP API server in a dedicated background thread.
+///
+/// # Arguments
+/// * `addr` - The address to bind to.
+/// * `tracker` - The shared device tracker.
 #[cfg(feature = "http-api")]
 pub fn start_api_server(
     addr: &str,
