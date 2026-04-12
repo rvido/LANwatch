@@ -209,6 +209,7 @@ When started with `--api` or `--api-default`, the tool exposes a REST API for qu
 |----------|--------|-------------|
 | `/` | GET | Service info and available endpoints |
 | `/devices` | GET | List all devices as JSON (sorted by last_seen) |
+| `/devices/{mac}` | GET | Get a specific device by MAC address |
 | `/devices/count` | GET | Get device count |
 | `/health` | GET | Health check endpoint |
 
@@ -220,6 +221,9 @@ curl http://localhost:3000/devices
 
 # Get device count
 curl http://localhost:3000/devices/count
+
+# Get a specific device
+curl http://localhost:3000/devices/AA:BB:CC:DD:EE:FF
 
 # Health check
 curl http://localhost:3000/health
