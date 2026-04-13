@@ -29,7 +29,7 @@ use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::ipv4::Ipv4Packet;
 use pnet::packet::ipv6::Ipv6Packet;
 use pnet::packet::udp::UdpPacket;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -1367,11 +1367,8 @@ impl OuiRegistry {
 
         // Fall back to oui-data crate (IEEE database with ~40,000 entries)
         if let Some(oui_entry) = oui_data::lookup(&normalized) {
-            // Return the organization name from oui-data
-            // We need to use Box::leak to get a &'static str since oui_data returns owned data
-            let org = oui_entry.organization();
-            // Use interning to avoid leaking memory for repeated lookups
-            Some(Box::leak(org.to_string().into_boxed_str()))
+            // organization() already provides a borrowed string; avoid allocating on every lookup.
+            Some(oui_entry.organization())
         } else {
             None
         }
@@ -2203,10 +2200,11 @@ impl SsdpPacket {
     /// Collect the discovery-oriented identifiers advertised by this packet
     pub fn service_terms(&self) -> Vec<String> {
         let mut terms = Vec::new();
+        let mut seen = HashSet::new();
         for header in ["nt", "st", "usn"] {
             if let Some(value) = self.header(header) {
                 let normalized = value.trim().to_string();
-                if !normalized.is_empty() && !terms.contains(&normalized) {
+                if !normalized.is_empty() && seen.insert(normalized.clone()) {
                     terms.push(normalized);
                 }
             }
@@ -2917,8 +2915,7 @@ fn parse_csv_line(line: &str) -> Vec<String> {
         match c {
             '"' => in_quotes = !in_quotes,
             ',' if !in_quotes => {
-                fields.push(current.clone());
-                current.clear();
+                fields.push(std::mem::take(&mut current));
             }
             _ => current.push(c),
         }
@@ -3210,6 +3207,7 @@ impl DeviceTracker {
         let mut hostname_to_ipv6: HashMap<String, String> = HashMap::new();
         // Collect services advertised by this device
         let mut services: Vec<String> = Vec::new();
+        let mut seen_services: HashSet<String> = HashSet::new();
 
         for record in packet.all_records() {
             match &record.data {
@@ -3227,7 +3225,7 @@ impl DeviceTracker {
                     // record.name is the service type (e.g., "_http._tcp.local")
                     // _target is the instance name (not needed for service tracking)
                     let service_type = record.name.trim_end_matches(".local").to_string();
-                    if service_type.starts_with('_') && !services.contains(&service_type) {
+                    if service_type.starts_with('_') && seen_services.insert(service_type.clone()) {
                         services.push(service_type);
                     }
                 }
@@ -3238,7 +3236,7 @@ impl DeviceTracker {
                         let service_type = record.name[service_start + 1..]
                             .trim_end_matches(".local")
                             .to_string();
-                        if !services.contains(&service_type) {
+                        if seen_services.insert(service_type.clone()) {
                             services.push(service_type);
                         }
                     }
@@ -3250,7 +3248,7 @@ impl DeviceTracker {
         // Also check questions for service browsing (queries indicate device capabilities)
         for question in &packet.questions {
             let service_type = question.name.trim_end_matches(".local").to_string();
-            if service_type.starts_with('_') && !services.contains(&service_type) {
+            if service_type.starts_with('_') && seen_services.insert(service_type.clone()) {
                 services.push(service_type);
             }
         }
