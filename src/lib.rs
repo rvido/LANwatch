@@ -29,7 +29,9 @@ use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::ipv4::Ipv4Packet;
 use pnet::packet::ipv6::Ipv6Packet;
 use pnet::packet::udp::UdpPacket;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+#[cfg(any(feature = "mdns", feature = "ssdp"))]
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -1837,7 +1839,7 @@ pub fn parse_mdns_payload(
 /// Parse a DNS name from the packet (handles compression)
 #[cfg(feature = "mdns")]
 fn parse_dns_name(payload: &[u8], start: usize) -> Option<(String, usize)> {
-    let mut name_parts = Vec::new();
+    let mut name_parts: Vec<&str> = Vec::new();
     let mut offset = start;
     let mut jumped = false;
     let mut return_offset = 0;
@@ -1873,7 +1875,7 @@ fn parse_dns_name(payload: &[u8], start: usize) -> Option<(String, usize)> {
             return None;
         }
 
-        let part = String::from_utf8_lossy(&payload[offset..offset + len]).to_string();
+        let part = std::str::from_utf8(&payload[offset..offset + len]).ok()?;
         name_parts.push(part);
         offset += len;
     }
@@ -2327,13 +2329,12 @@ pub fn parse_ssdp_payload(
         .map(|line| line.trim())
         .filter(|line| !line.is_empty());
     let start_line = lines.next()?.to_string();
-    let upper_start = start_line.to_ascii_uppercase();
 
-    let message_type = if upper_start.starts_with("M-SEARCH * HTTP/1.1") {
+    let message_type = if starts_with_ascii_case_insensitive(&start_line, "M-SEARCH * HTTP/1.1") {
         SsdpMessageType::Search
-    } else if upper_start.starts_with("NOTIFY * HTTP/1.1") {
+    } else if starts_with_ascii_case_insensitive(&start_line, "NOTIFY * HTTP/1.1") {
         SsdpMessageType::Notify
-    } else if upper_start.starts_with("HTTP/1.1 200") {
+    } else if starts_with_ascii_case_insensitive(&start_line, "HTTP/1.1 200") {
         SsdpMessageType::Response
     } else {
         SsdpMessageType::Unknown(start_line.clone())
@@ -2358,6 +2359,14 @@ pub fn parse_ssdp_payload(
         start_line,
         headers,
     })
+}
+
+#[cfg(feature = "ssdp")]
+#[inline(always)]
+fn starts_with_ascii_case_insensitive(value: &str, prefix: &str) -> bool {
+    value
+        .get(..prefix.len())
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix))
 }
 
 /// Processes a raw Ethernet frame and extracts a DHCP event (v4 or v6) if present.
@@ -2764,12 +2773,12 @@ impl DeviceInfo {
             .to_lowercase()
             .trim_end_matches(".local")
             .to_string();
-        if !self.services.contains(&normalized) {
-            self.services.push(normalized);
-            self.services.sort();
-            true
-        } else {
-            false
+        match self.services.binary_search(&normalized) {
+            Ok(_) => false,
+            Err(index) => {
+                self.services.insert(index, normalized);
+                true
+            }
         }
     }
 
