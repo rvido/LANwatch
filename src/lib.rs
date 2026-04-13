@@ -1692,8 +1692,185 @@ pub struct MdnsQuestion {
     pub record_type: MdnsRecordType,
 }
 
+/// Borrowed mDNS question.
+#[cfg(feature = "mdns")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MdnsQuestionView<'a> {
+    /// The name being queried
+    pub name: &'a str,
+    /// The record type being requested
+    pub record_type: MdnsRecordType,
+}
+
+/// Borrowed mDNS record data.
+#[cfg(feature = "mdns")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MdnsRecordDataView<'a> {
+    /// IPv4 address (A record)
+    A(Ipv4Addr),
+    /// IPv6 address (AAAA record)
+    Aaaa(Ipv6Addr),
+    /// Domain name (PTR record)
+    Ptr(&'a str),
+    /// Service record: priority, weight, port, target
+    Srv {
+        priority: u16,
+        weight: u16,
+        port: u16,
+        target: &'a str,
+    },
+    /// Text record (key=value pairs or raw strings)
+    Txt(Vec<&'a str>),
+    /// Raw data for unknown record types
+    Raw(&'a [u8]),
+}
+
+/// Borrowed mDNS record.
+#[cfg(feature = "mdns")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MdnsRecordView<'a> {
+    /// The domain name this record is for
+    pub name: &'a str,
+    /// Record type (A, AAAA, PTR, SRV, TXT)
+    pub record_type: MdnsRecordType,
+    /// Time-to-live in seconds
+    pub ttl: u32,
+    /// Record data (interpretation depends on record_type)
+    pub data: MdnsRecordDataView<'a>,
+}
+
+/// Borrowed view of a parsed mDNS packet.
+#[cfg(feature = "mdns")]
+#[derive(Debug, Clone)]
+pub struct MdnsPacketView<'a> {
+    /// Source MAC address
+    pub source_mac: &'a str,
+    /// Source IP address
+    pub source_ip: std::net::IpAddr,
+    /// Destination IP address
+    pub dest_ip: std::net::IpAddr,
+    /// Transaction ID
+    pub transaction_id: u16,
+    /// Is this a response? (false = query)
+    pub is_response: bool,
+    /// Questions (queries)
+    pub questions: Vec<MdnsQuestionView<'a>>,
+    /// Answer records
+    pub answers: Vec<MdnsRecordView<'a>>,
+    /// Authority records
+    pub authority: Vec<MdnsRecordView<'a>>,
+    /// Additional records
+    pub additional: Vec<MdnsRecordView<'a>>,
+}
+
 #[cfg(feature = "mdns")]
 impl MdnsPacket {
+    /// Creates a borrowed view of this packet.
+    pub fn view(&self) -> MdnsPacketView<'_> {
+        MdnsPacketView {
+            source_mac: self.source_mac.as_str(),
+            source_ip: self.source_ip,
+            dest_ip: self.dest_ip,
+            transaction_id: self.transaction_id,
+            is_response: self.is_response,
+            questions: self
+                .questions
+                .iter()
+                .map(|question| MdnsQuestionView {
+                    name: question.name.as_str(),
+                    record_type: question.record_type,
+                })
+                .collect(),
+            answers: self
+                .answers
+                .iter()
+                .map(|record| MdnsRecordView {
+                    name: record.name.as_str(),
+                    record_type: record.record_type,
+                    ttl: record.ttl,
+                    data: match &record.data {
+                        MdnsRecordData::A(addr) => MdnsRecordDataView::A(*addr),
+                        MdnsRecordData::Aaaa(addr) => MdnsRecordDataView::Aaaa(*addr),
+                        MdnsRecordData::Ptr(target) => MdnsRecordDataView::Ptr(target.as_str()),
+                        MdnsRecordData::Srv {
+                            priority,
+                            weight,
+                            port,
+                            target,
+                        } => MdnsRecordDataView::Srv {
+                            priority: *priority,
+                            weight: *weight,
+                            port: *port,
+                            target: target.as_str(),
+                        },
+                        MdnsRecordData::Txt(strings) => {
+                            MdnsRecordDataView::Txt(strings.iter().map(|s| s.as_str()).collect())
+                        }
+                        MdnsRecordData::Raw(bytes) => MdnsRecordDataView::Raw(bytes.as_slice()),
+                    },
+                })
+                .collect(),
+            authority: self
+                .authority
+                .iter()
+                .map(|record| MdnsRecordView {
+                    name: record.name.as_str(),
+                    record_type: record.record_type,
+                    ttl: record.ttl,
+                    data: match &record.data {
+                        MdnsRecordData::A(addr) => MdnsRecordDataView::A(*addr),
+                        MdnsRecordData::Aaaa(addr) => MdnsRecordDataView::Aaaa(*addr),
+                        MdnsRecordData::Ptr(target) => MdnsRecordDataView::Ptr(target.as_str()),
+                        MdnsRecordData::Srv {
+                            priority,
+                            weight,
+                            port,
+                            target,
+                        } => MdnsRecordDataView::Srv {
+                            priority: *priority,
+                            weight: *weight,
+                            port: *port,
+                            target: target.as_str(),
+                        },
+                        MdnsRecordData::Txt(strings) => {
+                            MdnsRecordDataView::Txt(strings.iter().map(|s| s.as_str()).collect())
+                        }
+                        MdnsRecordData::Raw(bytes) => MdnsRecordDataView::Raw(bytes.as_slice()),
+                    },
+                })
+                .collect(),
+            additional: self
+                .additional
+                .iter()
+                .map(|record| MdnsRecordView {
+                    name: record.name.as_str(),
+                    record_type: record.record_type,
+                    ttl: record.ttl,
+                    data: match &record.data {
+                        MdnsRecordData::A(addr) => MdnsRecordDataView::A(*addr),
+                        MdnsRecordData::Aaaa(addr) => MdnsRecordDataView::Aaaa(*addr),
+                        MdnsRecordData::Ptr(target) => MdnsRecordDataView::Ptr(target.as_str()),
+                        MdnsRecordData::Srv {
+                            priority,
+                            weight,
+                            port,
+                            target,
+                        } => MdnsRecordDataView::Srv {
+                            priority: *priority,
+                            weight: *weight,
+                            port: *port,
+                            target: target.as_str(),
+                        },
+                        MdnsRecordData::Txt(strings) => {
+                            MdnsRecordDataView::Txt(strings.iter().map(|s| s.as_str()).collect())
+                        }
+                        MdnsRecordData::Raw(bytes) => MdnsRecordDataView::Raw(bytes.as_slice()),
+                    },
+                })
+                .collect(),
+        }
+    }
+
     /// Returns an iterator over every record in the packet (Answers, Authority, and Additional).
     pub fn all_records(&self) -> impl Iterator<Item = &MdnsRecord> {
         self.answers
@@ -1746,6 +1923,58 @@ impl MdnsPacket {
             .filter_map(|r| {
                 if let MdnsRecordData::Aaaa(addr) = &r.data {
                     Some((r.name.clone(), *addr))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+}
+
+#[cfg(feature = "mdns")]
+impl<'a> MdnsPacketView<'a> {
+    /// Returns an iterator over every record in the packet (Answers, Authority, and Additional).
+    pub fn all_records(&self) -> impl Iterator<Item = &MdnsRecordView<'a>> {
+        self.answers
+            .iter()
+            .chain(self.authority.iter())
+            .chain(self.additional.iter())
+    }
+
+    /// Extracts service instance names from PTR records.
+    pub fn get_service_instances(&self) -> Vec<(&'a str, &'a str)> {
+        self.answers
+            .iter()
+            .chain(self.additional.iter())
+            .filter_map(|r| {
+                if let MdnsRecordDataView::Ptr(target) = &r.data {
+                    Some((*target, r.name))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Extracts all IPv4 addresses from A records found in the packet.
+    pub fn get_ipv4_addresses(&self) -> Vec<(&'a str, Ipv4Addr)> {
+        self.all_records()
+            .filter_map(|r| {
+                if let MdnsRecordDataView::A(addr) = &r.data {
+                    Some((r.name, *addr))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Extracts all IPv6 addresses from AAAA records found in the packet.
+    pub fn get_ipv6_addresses(&self) -> Vec<(&'a str, Ipv6Addr)> {
+        self.all_records()
+            .filter_map(|r| {
+                if let MdnsRecordDataView::Aaaa(addr) = &r.data {
+                    Some((r.name, *addr))
                 } else {
                     None
                 }
@@ -2155,6 +2384,20 @@ pub enum SsdpMessageType {
     Unknown(String),
 }
 
+/// Borrowed SSDP message types.
+#[cfg(feature = "ssdp")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SsdpMessageTypeView<'a> {
+    /// NOTIFY advertisement
+    Notify,
+    /// M-SEARCH discovery request
+    Search,
+    /// HTTP/1.1 200 OK response
+    Response,
+    /// Unknown start line
+    Unknown(&'a str),
+}
+
 #[cfg(feature = "ssdp")]
 impl std::fmt::Display for SsdpMessageType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -2185,8 +2428,47 @@ pub struct SsdpPacket {
     pub headers: HashMap<String, String>,
 }
 
+/// Borrowed view of a parsed SSDP / UPnP packet.
+#[cfg(feature = "ssdp")]
+#[derive(Debug, Clone)]
+pub struct SsdpPacketView<'a> {
+    /// Source MAC address
+    pub source_mac: &'a str,
+    /// Source IP address
+    pub source_ip: std::net::IpAddr,
+    /// Destination IP address
+    pub dest_ip: std::net::IpAddr,
+    /// Message type inferred from the HTTP-style start line
+    pub message_type: SsdpMessageTypeView<'a>,
+    /// First line of the SSDP message
+    pub start_line: &'a str,
+    /// Parsed headers keyed by lowercase header name
+    pub headers: Vec<(&'a str, &'a str)>,
+}
+
 #[cfg(feature = "ssdp")]
 impl SsdpPacket {
+    /// Creates a borrowed view of this packet.
+    pub fn view(&self) -> SsdpPacketView<'_> {
+        SsdpPacketView {
+            source_mac: self.source_mac.as_str(),
+            source_ip: self.source_ip,
+            dest_ip: self.dest_ip,
+            message_type: match &self.message_type {
+                SsdpMessageType::Notify => SsdpMessageTypeView::Notify,
+                SsdpMessageType::Search => SsdpMessageTypeView::Search,
+                SsdpMessageType::Response => SsdpMessageTypeView::Response,
+                SsdpMessageType::Unknown(value) => SsdpMessageTypeView::Unknown(value.as_str()),
+            },
+            start_line: self.start_line.as_str(),
+            headers: self
+                .headers
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_str()))
+                .collect(),
+        }
+    }
+
     /// Returns the value of a specific header, if present.
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
@@ -2224,6 +2506,182 @@ impl SsdpPacket {
         }
         parts.join(" ")
     }
+}
+
+#[cfg(feature = "ssdp")]
+impl<'a> SsdpPacketView<'a> {
+    /// Returns the value of a specific header, if present.
+    pub fn header(&self, name: &str) -> Option<&'a str> {
+        self.headers
+            .iter()
+            .find(|(header, _)| header.eq_ignore_ascii_case(name))
+            .map(|(_, value)| *value)
+    }
+
+    /// Collect the discovery-oriented identifiers advertised by this packet.
+    pub fn service_terms(&self) -> Vec<&'a str> {
+        let mut terms = Vec::new();
+        for header in ["nt", "st", "usn"] {
+            if let Some(value) = self.header(header) {
+                let normalized = value.trim();
+                if !normalized.is_empty() && !terms.contains(&normalized) {
+                    terms.push(normalized);
+                }
+            }
+        }
+        terms
+    }
+
+    /// Combine the useful fingerprint headers into a single string for heuristic matching.
+    pub fn fingerprint_text(&self) -> String {
+        let mut parts: Vec<&str> = vec![self.start_line];
+        for header in ["nt", "st", "usn", "server", "location"] {
+            if let Some(value) = self.header(header) {
+                parts.push(value.trim());
+            }
+        }
+        parts.join(" ")
+    }
+
+    /// Detect vendor from SSDP fingerprints without allocating a combined string.
+    pub fn detect_vendor_from_view(&self) -> Option<String> {
+        if self.view_contains_any(&["apple", "airport", "airplay"]) {
+            return Some("Apple".to_string());
+        }
+        if self.view_contains_any(&["google", "chromecast", "android tv"]) {
+            return Some("Google".to_string());
+        }
+        if self.view_contains_any(&["amazon", "alexa", "fire tv"]) {
+            return Some("Amazon".to_string());
+        }
+        if self.view_contains_any(&["samsung"]) {
+            return Some("Samsung".to_string());
+        }
+        if self.view_contains_any(&["lg ", "lge"]) {
+            return Some("LG".to_string());
+        }
+        if self.view_contains_any(&["sony"]) {
+            return Some("Sony".to_string());
+        }
+        if self.view_contains_any(&["roku"]) {
+            return Some("Roku".to_string());
+        }
+        if self.view_contains_any(&["sonos"]) {
+            return Some("Sonos".to_string());
+        }
+        if self.view_contains_any(&["microsoft", "windows"]) {
+            return Some("Microsoft".to_string());
+        }
+        if self.view_contains_any(&["philips", "hue"]) {
+            return Some("Philips".to_string());
+        }
+        if self.view_contains_any(&["netgear"]) {
+            return Some("Netgear".to_string());
+        }
+        if self.view_contains_any(&["tp-link", "tplink"]) {
+            return Some("TP-Link".to_string());
+        }
+        if self.view_contains_any(&["ubiquiti", "unifi"]) {
+            return Some("Ubiquiti".to_string());
+        }
+        if self.view_contains_any(&["d-link"]) {
+            return Some("D-Link".to_string());
+        }
+        if self.view_contains_any(&["bose"]) {
+            return Some("Bose".to_string());
+        }
+        if self.view_contains_any(&["denon"]) {
+            return Some("Denon".to_string());
+        }
+        if self.view_contains_any(&["yamaha"]) {
+            return Some("Yamaha".to_string());
+        }
+        if self.view_contains_any(&["synology"]) {
+            return Some("Synology".to_string());
+        }
+        if self.view_contains_any(&["qnap"]) {
+            return Some("QNAP".to_string());
+        }
+
+        None
+    }
+
+    /// Detect device type from SSDP fingerprints without allocating a combined string.
+    pub fn detect_device_type_from_view(&self) -> Option<String> {
+        if self.view_contains_any(&["mediarenderer", "renderer"]) {
+            return Some("Media Renderer".to_string());
+        }
+        if self.view_contains_any(&["mediaserver"]) {
+            return Some("Media Server".to_string());
+        }
+        if self.view_contains_any(&["internetgatewaydevice", "wanconnectiondevice", "router"]) {
+            return Some("Router".to_string());
+        }
+        if self.view_contains_any(&["printer", "print"]) {
+            return Some("Printer".to_string());
+        }
+        if self.view_contains_any(&["scanner"]) {
+            return Some("Scanner".to_string());
+        }
+        if self.view_contains_any(&["television", "tvdevice", "smarttv"]) {
+            return Some("TV".to_string());
+        }
+        if self.view_contains_any(&["camera", "ipcamera"]) {
+            return Some("IP Camera".to_string());
+        }
+        if self.view_contains_any(&["speaker", "soundbar"]) {
+            return Some("Speaker".to_string());
+        }
+        if self.view_contains_any(&["gameconsole", "xbox", "playstation"]) {
+            return Some("Gaming Console".to_string());
+        }
+        if self.view_contains_any(&["set-top", "settop"]) {
+            return Some("Set Top Box".to_string());
+        }
+        if self.view_contains_any(&["nas", "storage"]) {
+            return Some("NAS".to_string());
+        }
+        if self.view_contains_any(&["bridge", "light", "bulb", "homekit"]) {
+            return Some("Smart Home Device".to_string());
+        }
+
+        None
+    }
+
+    fn view_contains_any(&self, needles: &[&str]) -> bool {
+        self.view_contains_any_in(self.start_line, needles)
+            || self
+                .headers
+                .iter()
+                .any(|(name, value)| self.view_contains_any_in(name, needles) || self.view_contains_any_in(value, needles))
+    }
+
+    fn view_contains_any_in(&self, haystack: &str, needles: &[&str]) -> bool {
+        needles
+            .iter()
+            .any(|needle| contains_ascii_case_insensitive(haystack, needle))
+    }
+}
+
+#[cfg(feature = "ssdp")]
+fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+    let haystack = haystack.as_bytes();
+    let needle = needle.as_bytes();
+
+    if needle.is_empty() {
+        return true;
+    }
+
+    if needle.len() > haystack.len() {
+        return false;
+    }
+
+    haystack.windows(needle.len()).any(|window| {
+        window
+            .iter()
+            .zip(needle.iter())
+            .all(|(left, right)| left.eq_ignore_ascii_case(right))
+    })
 }
 
 /// SSDP querier for active M-SEARCH discovery
@@ -3207,6 +3665,8 @@ impl DeviceTracker {
     /// The count of unique updates applied across all detected devices.
     #[cfg(feature = "mdns")]
     pub fn update_from_mdns(&mut self, packet: &MdnsPacket) -> usize {
+        let packet = packet.view();
+
         let mut updated = 0;
         let mac = &packet.source_mac;
 
@@ -3220,16 +3680,16 @@ impl DeviceTracker {
 
         for record in packet.all_records() {
             match &record.data {
-                MdnsRecordData::A(addr) => {
+                MdnsRecordDataView::A(addr) => {
                     // Strip .local suffix for hostname
                     let hostname = record.name.trim_end_matches(".local").to_string();
                     hostname_to_ipv4.insert(hostname.clone(), addr.to_string());
                 }
-                MdnsRecordData::Aaaa(addr) => {
+                MdnsRecordDataView::Aaaa(addr) => {
                     let hostname = record.name.trim_end_matches(".local").to_string();
                     hostname_to_ipv6.insert(hostname.clone(), addr.to_string());
                 }
-                MdnsRecordData::Ptr(_target) => {
+                MdnsRecordDataView::Ptr(_target) => {
                     // PTR records indicate service advertisements
                     // record.name is the service type (e.g., "_http._tcp.local")
                     // _target is the instance name (not needed for service tracking)
@@ -3238,7 +3698,7 @@ impl DeviceTracker {
                         services.push(service_type);
                     }
                 }
-                MdnsRecordData::Srv { .. } => {
+                MdnsRecordDataView::Srv { .. } => {
                     // SRV records also indicate services
                     // Extract service type from the record name (e.g., "My Device._http._tcp.local")
                     if let Some(service_start) = record.name.find("._") {
@@ -3280,14 +3740,14 @@ impl DeviceTracker {
         let ipv6_addr = hostname_to_ipv6.values().next().cloned();
 
         // Get or create device entry
-        let device = self.devices.entry(mac.clone()).or_insert_with(|| {
+        let device = self.devices.entry(mac.to_string()).or_insert_with(|| {
             let ip = hostname_to_ipv4
                 .values()
                 .next()
                 .cloned()
                 .unwrap_or_else(|| packet.source_ip.to_string());
             updated += 1;
-            DeviceInfo::new(mac.clone(), ip, None)
+            DeviceInfo::new(mac.to_string(), ip, None)
         });
 
         // Update hostname from A/AAAA records
@@ -3611,13 +4071,14 @@ impl DeviceTracker {
     /// The count of unique updates applied to the device entry.
     #[cfg(feature = "ssdp")]
     pub fn update_from_ssdp(&mut self, packet: &SsdpPacket) -> usize {
+        let packet = packet.view();
+
         let mut updated = 0;
         let mac = &packet.source_mac;
-        let fingerprint = packet.fingerprint_text();
         let services = packet.service_terms();
 
-        let vendor = self.detect_vendor_from_ssdp(&fingerprint);
-        let device_type = self.detect_device_type_from_ssdp(&fingerprint);
+        let vendor = packet.detect_vendor_from_view();
+        let device_type = packet.detect_device_type_from_view();
 
         let source_ipv4 = match packet.source_ip {
             std::net::IpAddr::V4(ip) => Some(ip.to_string()),
@@ -3630,9 +4091,9 @@ impl DeviceTracker {
 
         let initial_ip = source_ipv4.clone().unwrap_or_else(|| "0.0.0.0".to_string());
 
-        let device = self.devices.entry(mac.clone()).or_insert_with(|| {
+        let device = self.devices.entry(mac.to_string()).or_insert_with(|| {
             updated += 1;
-            DeviceInfo::new(mac.clone(), initial_ip, None)
+            DeviceInfo::new(mac.to_string(), initial_ip, None)
         });
 
         if let Some(ipv4) = source_ipv4 {
@@ -3673,139 +4134,6 @@ impl DeviceTracker {
         }
 
         updated
-    }
-
-    /// Detect vendor from SSDP fingerprints
-    #[cfg(feature = "ssdp")]
-    fn detect_vendor_from_ssdp(&self, fingerprint: &str) -> Option<String> {
-        let fingerprint = fingerprint.to_lowercase();
-
-        if fingerprint.contains("apple")
-            || fingerprint.contains("airport")
-            || fingerprint.contains("airplay")
-        {
-            return Some("Apple".to_string());
-        }
-        if fingerprint.contains("google")
-            || fingerprint.contains("chromecast")
-            || fingerprint.contains("android tv")
-        {
-            return Some("Google".to_string());
-        }
-        if fingerprint.contains("amazon")
-            || fingerprint.contains("alexa")
-            || fingerprint.contains("fire tv")
-        {
-            return Some("Amazon".to_string());
-        }
-        if fingerprint.contains("samsung") {
-            return Some("Samsung".to_string());
-        }
-        if fingerprint.contains("lg ") || fingerprint.contains("lge") {
-            return Some("LG".to_string());
-        }
-        if fingerprint.contains("sony") {
-            return Some("Sony".to_string());
-        }
-        if fingerprint.contains("roku") {
-            return Some("Roku".to_string());
-        }
-        if fingerprint.contains("sonos") {
-            return Some("Sonos".to_string());
-        }
-        if fingerprint.contains("microsoft") || fingerprint.contains("windows") {
-            return Some("Microsoft".to_string());
-        }
-        if fingerprint.contains("philips") || fingerprint.contains("hue") {
-            return Some("Philips".to_string());
-        }
-        if fingerprint.contains("netgear") {
-            return Some("Netgear".to_string());
-        }
-        if fingerprint.contains("tp-link") || fingerprint.contains("tplink") {
-            return Some("TP-Link".to_string());
-        }
-        if fingerprint.contains("ubiquiti") || fingerprint.contains("unifi") {
-            return Some("Ubiquiti".to_string());
-        }
-        if fingerprint.contains("d-link") {
-            return Some("D-Link".to_string());
-        }
-        if fingerprint.contains("bose") {
-            return Some("Bose".to_string());
-        }
-        if fingerprint.contains("denon") {
-            return Some("Denon".to_string());
-        }
-        if fingerprint.contains("yamaha") {
-            return Some("Yamaha".to_string());
-        }
-        if fingerprint.contains("synology") {
-            return Some("Synology".to_string());
-        }
-        if fingerprint.contains("qnap") {
-            return Some("QNAP".to_string());
-        }
-
-        None
-    }
-
-    /// Detect device type from SSDP fingerprints
-    #[cfg(feature = "ssdp")]
-    fn detect_device_type_from_ssdp(&self, fingerprint: &str) -> Option<String> {
-        let fingerprint = fingerprint.to_lowercase();
-
-        if fingerprint.contains("mediarenderer") || fingerprint.contains("renderer") {
-            return Some("Media Renderer".to_string());
-        }
-        if fingerprint.contains("mediaserver") {
-            return Some("Media Server".to_string());
-        }
-        if fingerprint.contains("internetgatewaydevice")
-            || fingerprint.contains("wanconnectiondevice")
-            || fingerprint.contains("router")
-        {
-            return Some("Router".to_string());
-        }
-        if fingerprint.contains("printer") || fingerprint.contains("print") {
-            return Some("Printer".to_string());
-        }
-        if fingerprint.contains("scanner") {
-            return Some("Scanner".to_string());
-        }
-        if fingerprint.contains("television")
-            || fingerprint.contains("tvdevice")
-            || fingerprint.contains("smarttv")
-        {
-            return Some("TV".to_string());
-        }
-        if fingerprint.contains("camera") || fingerprint.contains("ipcamera") {
-            return Some("IP Camera".to_string());
-        }
-        if fingerprint.contains("speaker") || fingerprint.contains("soundbar") {
-            return Some("Speaker".to_string());
-        }
-        if fingerprint.contains("gameconsole")
-            || fingerprint.contains("xbox")
-            || fingerprint.contains("playstation")
-        {
-            return Some("Gaming Console".to_string());
-        }
-        if fingerprint.contains("set-top") || fingerprint.contains("settop") {
-            return Some("Set Top Box".to_string());
-        }
-        if fingerprint.contains("nas") || fingerprint.contains("storage") {
-            return Some("NAS".to_string());
-        }
-        if fingerprint.contains("bridge")
-            || fingerprint.contains("light")
-            || fingerprint.contains("bulb")
-            || fingerprint.contains("homekit")
-        {
-            return Some("Smart Home Device".to_string());
-        }
-
-        None
     }
 
     /// Detect device type from vendor name
