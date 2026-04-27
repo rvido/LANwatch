@@ -12,7 +12,7 @@ A Rust library and CLI tool for network device discovery and tracking via DHCP, 
 - **IEEE OUI Database**: Built-in vendor identification from MAC addresses using IEEE OUI (Organizationally Unique Identifier) prefixes
 - **Device Tracking**: Automatically track detected devices and save to CSV file
 - **CSV Export**: Export device information with timestamps, MAC addresses, IP addresses, and hostnames
-- **HTTP API** (optional): Built-in REST API server to query devices as JSON
+- **HTTP API** (optional): Opt-in REST API server to query devices as JSON. (Requires the `http-api` feature.)
 - **Library API**: Use as a library in your own Rust projects
 - **CLI Tool**: Run as a standalone command-line tool
 - **Type-Safe**: Strongly typed enums for message types, operations, and options
@@ -20,29 +20,28 @@ A Rust library and CLI tool for network device discovery and tracking via DHCP, 
 
 ## Installation
 
-Add to your `Cargo.toml`:
+Add to your `Cargo.toml`. The `http-api` feature is opt-in to keep binary size small by default, while `mdns` and `ssdp` provide additional active and passive discovery:
 
 ```toml
 [dependencies]
-lanwatch = "0.1.0"
+# Smallest binary footprint, core DHCP & MAC tracking only
+lanwatch = "0.1.1"
+
+# With HTTP API server and active discovery protocols
+lanwatch = { version = "0.1.1", features = ["http-api", "mdns", "ssdp"] }
 ```
 
-Or without the HTTP API feature (smaller binary):
-
-```toml
-[dependencies]
-lanwatch = { version = "0.1.0", default-features = false }
-```
-
-Or clone and build from source:
+Or clone and build from source. Release builds are automatically optimized for size (`opt-level = "z"`, `strip = true`, `panic = "abort"`):
 
 ```bash
 git clone <repository-url>
 cd lanwatch
+
+# Smallest possible build
 cargo build --release
 
-# Or build without HTTP API
-cargo build --release --no-default-features
+# Enable everything
+cargo build --release --all-features
 ```
 
 ## Usage
@@ -65,11 +64,11 @@ sudo cargo run -- en0 --output devices.csv
 sudo cargo run -- en0 --oui /path/to/oui.txt
 sudo cargo run -- en0 -u ieee-oui.txt
 
-# Start with HTTP API server
-sudo cargo run -- en0 --api 0.0.0.0:8080
+# Start with HTTP API server (requires the http-api feature)
+sudo cargo run --features http-api -- en0 --api 0.0.0.0:8080
 
 # Start with API on default address (127.0.0.1:8080)
-sudo cargo run -- en0 --api-default
+sudo cargo run --features http-api -- en0 --api-default
 
 # Enable mDNS sniffing for enhanced device discovery (requires mdns feature)
 sudo cargo run --features mdns -- en0 --mdns
