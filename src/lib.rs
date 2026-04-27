@@ -6,7 +6,13 @@
 
 //! # lanwatch
 //!
-//! A library for network device discovery and tracking via DHCP, mDNS, and OUI identification.
+//! A high-performance, low-allocation library for network device discovery and tracking
+//! via DHCP, mDNS, SSDP/UPnP, and OUI identification.
+//!
+//! ## Optimizations
+//! 
+//! This library is optimized for minimal memory allocations, heavily employing borrowed 
+//! packet views during protocol ingestion to reduce allocations and copies on the hot path. 
 //!
 //! ## Example
 //!
@@ -2472,8 +2478,9 @@ impl SsdpPacket {
     /// Returns the value of a specific header, if present.
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
-            .get(&name.to_lowercase())
-            .map(|value| value.as_str())
+            .iter()
+            .find(|(header, _)| header.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
     }
 
     /// Returns a reference to the complete map of SSDP headers.
@@ -3671,30 +3678,30 @@ impl DeviceTracker {
         let mac = &packet.source_mac;
 
         // Collect hostname to IPv4 mappings from A records
-        let mut hostname_to_ipv4: HashMap<String, String> = HashMap::new();
+        let mut hostname_to_ipv4: HashMap<&str, String> = HashMap::new();
         // Collect hostname to IPv6 mappings from AAAA records
-        let mut hostname_to_ipv6: HashMap<String, String> = HashMap::new();
+        let mut hostname_to_ipv6: HashMap<&str, String> = HashMap::new();
         // Collect services advertised by this device
-        let mut services: Vec<String> = Vec::new();
-        let mut seen_services: HashSet<String> = HashSet::new();
+        let mut services: Vec<&str> = Vec::new();
+        let mut seen_services: HashSet<&str> = HashSet::new();
 
         for record in packet.all_records() {
             match &record.data {
                 MdnsRecordDataView::A(addr) => {
                     // Strip .local suffix for hostname
-                    let hostname = record.name.trim_end_matches(".local").to_string();
-                    hostname_to_ipv4.insert(hostname.clone(), addr.to_string());
+                    let hostname = record.name.trim_end_matches(".local");
+                    hostname_to_ipv4.insert(hostname, addr.to_string());
                 }
                 MdnsRecordDataView::Aaaa(addr) => {
-                    let hostname = record.name.trim_end_matches(".local").to_string();
-                    hostname_to_ipv6.insert(hostname.clone(), addr.to_string());
+                    let hostname = record.name.trim_end_matches(".local");
+                    hostname_to_ipv6.insert(hostname, addr.to_string());
                 }
                 MdnsRecordDataView::Ptr(_target) => {
                     // PTR records indicate service advertisements
                     // record.name is the service type (e.g., "_http._tcp.local")
                     // _target is the instance name (not needed for service tracking)
-                    let service_type = record.name.trim_end_matches(".local").to_string();
-                    if service_type.starts_with('_') && seen_services.insert(service_type.clone()) {
+                    let service_type = record.name.trim_end_matches(".local");
+                    if service_type.starts_with('_') && seen_services.insert(service_type) {
                         services.push(service_type);
                     }
                 }
@@ -3702,10 +3709,8 @@ impl DeviceTracker {
                     // SRV records also indicate services
                     // Extract service type from the record name (e.g., "My Device._http._tcp.local")
                     if let Some(service_start) = record.name.find("._") {
-                        let service_type = record.name[service_start + 1..]
-                            .trim_end_matches(".local")
-                            .to_string();
-                        if seen_services.insert(service_type.clone()) {
+                        let service_type = record.name[service_start + 1..].trim_end_matches(".local");
+                        if seen_services.insert(service_type) {
                             services.push(service_type);
                         }
                     }
@@ -3716,8 +3721,8 @@ impl DeviceTracker {
 
         // Also check questions for service browsing (queries indicate device capabilities)
         for question in &packet.questions {
-            let service_type = question.name.trim_end_matches(".local").to_string();
-            if service_type.starts_with('_') && seen_services.insert(service_type.clone()) {
+            let service_type = question.name.trim_end_matches(".local");
+            if service_type.starts_with('_') && seen_services.insert(service_type) {
                 services.push(service_type);
             }
         }
@@ -3753,7 +3758,7 @@ impl DeviceTracker {
         // Update hostname from A/AAAA records
         for hostname in hostname_to_ipv4.keys().chain(hostname_to_ipv6.keys()) {
             if device.hostname.is_none() {
-                device.hostname = Some(hostname.clone());
+                device.hostname = Some((*hostname).to_string());
                 updated += 1;
                 break;
             }
@@ -3907,7 +3912,7 @@ impl DeviceTracker {
 
     /// Detect vendor from a list of services
     #[cfg(feature = "mdns")]
-    fn detect_vendor_from_services(&self, services: &[String]) -> Option<String> {
+    fn detect_vendor_from_services(&self, services: &[&str]) -> Option<String> {
         // Check for specific device-type services first to avoid misidentification
         // (e.g., a printer that supports AirPrint shouldn't be labeled as Apple)
         let mut has_printer_services = false;
@@ -3989,7 +3994,7 @@ impl DeviceTracker {
 
     /// Detect device type from a list of services
     #[cfg(feature = "mdns")]
-    fn detect_device_type_from_services(&self, services: &[String]) -> Option<String> {
+    fn detect_device_type_from_services(&self, services: &[&str]) -> Option<String> {
         // Priority-based detection: check for specific device types first
         // before falling back to registry lookup (which may give generic results)
 
@@ -4081,15 +4086,15 @@ impl DeviceTracker {
         let device_type = packet.detect_device_type_from_view();
 
         let source_ipv4 = match packet.source_ip {
-            std::net::IpAddr::V4(ip) => Some(ip.to_string()),
+            std::net::IpAddr::V4(ip) => Some(ip),
             _ => None,
         };
         let source_ipv6 = match packet.source_ip {
-            std::net::IpAddr::V6(ip) => Some(ip.to_string()),
+            std::net::IpAddr::V6(ip) => Some(ip),
             _ => None,
         };
 
-        let initial_ip = source_ipv4.clone().unwrap_or_else(|| "0.0.0.0".to_string());
+        let initial_ip = source_ipv4.map(|ip| ip.to_string()).unwrap_or_else(|| "0.0.0.0".to_string());
 
         let device = self.devices.entry(mac.to_string()).or_insert_with(|| {
             updated += 1;
@@ -4098,13 +4103,13 @@ impl DeviceTracker {
 
         if let Some(ipv4) = source_ipv4 {
             if device.ip_address == "0.0.0.0" || device.ip_address.is_empty() {
-                device.ip_address = ipv4;
+                device.ip_address = ipv4.to_string();
                 updated += 1;
             }
         }
 
         if let Some(ipv6) = source_ipv6 {
-            if device.set_ipv6_address(&ipv6) {
+            if device.set_ipv6_address(&ipv6.to_string()) {
                 updated += 1;
             }
         }
