@@ -422,11 +422,9 @@ pub fn parse_dhcpv4_payload(
         let value = &payload[index + 2..index + 2 + len];
 
         match code {
-            53 => {
+            53 if !value.is_empty() => {
                 // DHCP Message Type
-                if !value.is_empty() {
-                    message_type = Some(Dhcpv4MessageType::from(value[0]));
-                }
+                message_type = Some(Dhcpv4MessageType::from(value[0]));
             }
             12 => {
                 // Hostname
@@ -434,11 +432,9 @@ pub fn parse_dhcpv4_payload(
                     hostname = sanitize_hostname(h);
                 }
             }
-            50 => {
+            50 if value.len() == 4 => {
                 // Requested IP Address
-                if value.len() == 4 {
-                    requested_ip = Some(Ipv4Addr::new(value[0], value[1], value[2], value[3]));
-                }
+                requested_ip = Some(Ipv4Addr::new(value[0], value[1], value[2], value[3]));
             }
             _ => {}
         }
@@ -2097,7 +2093,7 @@ fn parse_dns_name(payload: &[u8], start: usize) -> Option<(String, usize)> {
             if offset + 1 >= payload.len() {
                 return None;
             }
-            let pointer = (((len & 0x3F) as usize) << 8) | (payload[offset + 1] as usize);
+                let pointer = ((len & 0x3F) << 8) | (payload[offset + 1] as usize);
             if !jumped {
                 return_offset = offset + 2;
                 jumped = true;
@@ -3446,8 +3442,8 @@ fn parse_timestamp(value: &str) -> Option<SystemTime> {
         [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
     };
 
-    for m in 0..(month - 1) as usize {
-        days += month_days[m] as u64;
+    for days_in_month in month_days.iter().take((month - 1) as usize) {
+        days += *days_in_month as u64;
     }
 
     days += (day - 1) as u64;
@@ -3705,16 +3701,12 @@ impl DeviceTracker {
                 }
             };
 
-            if apply_journal {
-                if let Ok(jfile) = File::open(jpath) {
-                    let jreader = BufReader::new(jfile);
-                    for line in jreader.lines() {
-                        if let Ok(l) = line {
-                            if let Some(device) = DeviceInfo::from_csv_line(&l) {
-                                // Journal entries are newer; overwrite existing map entries
-                                self.devices.insert(device.mac_address.clone(), device);
-                            }
-                        }
+            if apply_journal && let Ok(jfile) = File::open(jpath) {
+                let jreader = BufReader::new(jfile);
+                for l in jreader.lines().map_while(Result::ok) {
+                    if let Some(device) = DeviceInfo::from_csv_line(&l) {
+                        // Journal entries are newer; overwrite existing map entries
+                        self.devices.insert(device.mac_address.clone(), device);
                     }
                 }
             }
@@ -3738,7 +3730,7 @@ impl DeviceTracker {
 
         // Write devices sorted by last_seen
         let mut devices: Vec<_> = self.devices.values().collect();
-        devices.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
+        devices.sort_by_key(|device| std::cmp::Reverse(device.last_seen));
 
         for device in devices {
             writeln!(file, "{}", device.to_csv_line())?;
@@ -3962,26 +3954,22 @@ impl DeviceTracker {
             });
 
             // Update hostname from the first seen A/AAAA
-            if device.hostname.is_none() {
-                if let Some(h) = first_hostname {
-                    device.hostname = Some(h.to_string());
-                    updated += 1;
-                }
+            if device.hostname.is_none() && let Some(h) = first_hostname {
+                device.hostname = Some(h.to_string());
+                updated += 1;
             }
 
             // Update IPv4 if we have a better one
-            if let Some(ipv4) = first_ipv4 {
-                if matches!(device.ip_address, IpAddr::V4(addr) if addr.is_unspecified()) {
-                    device.ip_address = IpAddr::V4(ipv4);
-                    updated += 1;
-                }
+            if let Some(ipv4) = first_ipv4
+                && matches!(device.ip_address, IpAddr::V4(addr) if addr.is_unspecified())
+            {
+                device.ip_address = IpAddr::V4(ipv4);
+                updated += 1;
             }
 
             // Set IPv6 address if available
-            if let Some(ipv6) = ipv6_addr {
-                if device.set_ipv6_address(ipv6) {
-                    updated += 1;
-                }
+            if let Some(ipv6) = ipv6_addr && device.set_ipv6_address(ipv6) {
+                updated += 1;
             }
 
             // Add services
@@ -3992,17 +3980,13 @@ impl DeviceTracker {
             }
 
             // Set vendor if detected
-            if let Some(v) = vendor {
-                if device.set_vendor(&v) {
-                    updated += 1;
-                }
+            if let Some(v) = vendor && device.set_vendor(&v) {
+                updated += 1;
             }
 
             // Set device type if detected
-            if let Some(t) = device_type {
-                if device.set_device_type(&t) {
-                    updated += 1;
-                }
+            if let Some(t) = device_type && device.set_device_type(&t) {
+                updated += 1;
             }
 
             // Update timestamp
@@ -4315,17 +4299,15 @@ impl DeviceTracker {
                 DeviceInfo::new(mac.to_string(), initial_ip, None)
             });
 
-            if let Some(ipv4) = source_ipv4 {
-                if matches!(device.ip_address, IpAddr::V4(addr) if addr.is_unspecified()) {
-                    device.ip_address = IpAddr::V4(ipv4);
-                    updated += 1;
-                }
+            if let Some(ipv4) = source_ipv4
+                && matches!(device.ip_address, IpAddr::V4(addr) if addr.is_unspecified())
+            {
+                device.ip_address = IpAddr::V4(ipv4);
+                updated += 1;
             }
 
-            if let Some(ipv6) = source_ipv6 {
-                if device.set_ipv6_address(ipv6) {
-                    updated += 1;
-                }
+            if let Some(ipv6) = source_ipv6 && device.set_ipv6_address(ipv6) {
+                updated += 1;
             }
 
             for service in &services {
@@ -4334,16 +4316,12 @@ impl DeviceTracker {
                 }
             }
 
-            if let Some(v) = vendor {
-                if device.set_vendor(&v) {
-                    updated += 1;
-                }
+            if let Some(v) = vendor && device.set_vendor(&v) {
+                updated += 1;
             }
 
-            if let Some(t) = device_type {
-                if device.set_device_type(&t) {
-                    updated += 1;
-                }
+            if let Some(t) = device_type && device.set_device_type(&t) {
+                updated += 1;
             }
 
             device.last_seen = SystemTime::now();
@@ -4508,10 +4486,8 @@ impl DeviceTracker {
             true
         };
 
-        if append_needed {
-            if let Some(d) = self.devices.get(&mac_key) {
-                let _ = self.append_device_journal(d);
-            }
+        if append_needed && let Some(d) = self.devices.get(&mac_key) {
+            let _ = self.append_device_journal(d);
         }
 
         result
@@ -4554,7 +4530,7 @@ impl DeviceTracker {
     #[cfg(feature = "http-api")]
     pub fn to_json_sorted(&self) -> Result<String, serde_json::Error> {
         let mut devices: Vec<&DeviceInfo> = self.devices.values().collect();
-        devices.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
+        devices.sort_by_key(|device| std::cmp::Reverse(device.last_seen));
         serde_json::to_string_pretty(&devices)
     }
 }
@@ -4602,8 +4578,7 @@ impl ApiServer {
     /// * `addr` - The socket address to listen on (e.g., "127.0.0.1:8080").
     /// * `tracker` - An `Arc<RwLock<DeviceTracker>>` for safe sharing of device data.
     pub fn new(addr: &str, tracker: Arc<RwLock<DeviceTracker>>) -> std::io::Result<Self> {
-        let server = Server::http(addr)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        let server = Server::http(addr).map_err(|e| std::io::Error::other(e.to_string()))?;
         Ok(Self { server, tracker })
     }
 
@@ -4647,7 +4622,7 @@ impl ApiServer {
         match self.tracker.read() {
             Ok(tracker) => {
                 let mut devices: Vec<&DeviceInfo> = tracker.devices().values().collect();
-                devices.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
+                devices.sort_by_key(|device| std::cmp::Reverse(device.last_seen));
 
                 let response = ApiResponse {
                     success: true,
@@ -6064,7 +6039,7 @@ mod tests {
     fn test_oui_registry_new() {
         let registry = OuiRegistry::new();
         // The oui-data crate should have entries
-        assert!(registry.len() > 0);
+        assert!(!registry.is_empty());
         assert!(!registry.is_empty());
         assert_eq!(registry.custom_count(), 0);
         // Built-in IEEE database should have ~40,000+ entries
@@ -6075,7 +6050,7 @@ mod tests {
     fn test_oui_registry_with_defaults() {
         let registry = OuiRegistry::with_defaults();
         // Should be identical to new()
-        assert!(registry.len() > 0);
+        assert!(!registry.is_empty());
         assert!(!registry.is_empty());
     }
 
@@ -6181,7 +6156,7 @@ mod tests {
         {
             let mut file = File::create(&temp_file).unwrap();
             writeln!(file, "# Comment line").unwrap();
-            writeln!(file, "").unwrap(); // Empty line
+            writeln!(file).unwrap(); // Empty line
             writeln!(file, "AA:BB:CC\tTest Vendor 1").unwrap();
             writeln!(file, "DD:EE:FF  Test Vendor 2").unwrap();
             writeln!(file, "11-22-33  Test Vendor 3").unwrap();
@@ -6228,11 +6203,11 @@ mod tests {
             // IEEE format: "XX-XX-XX   (hex)\t\tVendor Name"
             writeln!(file, "OUI/MA-L			Organization").unwrap();
             writeln!(file, "company_id			Organization Address").unwrap();
-            writeln!(file, "").unwrap();
+            writeln!(file).unwrap();
             writeln!(file, "00-00-00   (hex)\t\tXerox Corporation").unwrap();
             writeln!(file, "000000     (base 16)\t\tXerox Corporation").unwrap();
             writeln!(file, "\t\t\t\t26600 SW Parkway").unwrap();
-            writeln!(file, "").unwrap();
+            writeln!(file).unwrap();
             writeln!(file, "00-00-01   (hex)\t\tXerox Corporation").unwrap();
             writeln!(file, "00-00-0C   (hex)\t\tCisco Systems, Inc").unwrap();
             writeln!(file, "00-17-F2   (hex)\t\tApple, Inc.").unwrap();
