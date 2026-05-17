@@ -30,12 +30,12 @@
 
 use pnet_datalink as datalink;
 use pnet_datalink::{Channel::Ethernet, DataLinkReceiver, NetworkInterface};
+use pnet_packet::Packet;
 use pnet_packet::ethernet::{EtherTypes, EthernetPacket};
 use pnet_packet::ip::IpNextHeaderProtocols;
 use pnet_packet::ipv4::Ipv4Packet;
 use pnet_packet::ipv6::Ipv6Packet;
 use pnet_packet::udp::UdpPacket;
-use pnet_packet::Packet;
 use std::collections::HashMap;
 #[cfg(any(feature = "mdns", feature = "ssdp"))]
 use std::collections::HashSet;
@@ -2093,7 +2093,7 @@ fn parse_dns_name(payload: &[u8], start: usize) -> Option<(String, usize)> {
             if offset + 1 >= payload.len() {
                 return None;
             }
-                let pointer = ((len & 0x3F) << 8) | (payload[offset + 1] as usize);
+            let pointer = ((len & 0x3F) << 8) | (payload[offset + 1] as usize);
             if !jumped {
                 return_offset = offset + 2;
                 jumped = true;
@@ -3169,10 +3169,22 @@ pub struct DeviceInfo {
     /// MAC address of the device
     pub mac_address: String,
     /// IPv4 address
-    #[cfg_attr(feature = "http-api", serde(serialize_with = "serialize_ip_addr", deserialize_with = "deserialize_ip_addr"))]
+    #[cfg_attr(
+        feature = "http-api",
+        serde(
+            serialize_with = "serialize_ip_addr",
+            deserialize_with = "deserialize_ip_addr"
+        )
+    )]
     pub ip_address: IpAddr,
     /// IPv6 address if available
-    #[cfg_attr(feature = "http-api", serde(serialize_with = "serialize_opt_ip_addr", deserialize_with = "deserialize_opt_ip_addr"))]
+    #[cfg_attr(
+        feature = "http-api",
+        serde(
+            serialize_with = "serialize_opt_ip_addr",
+            deserialize_with = "deserialize_opt_ip_addr"
+        )
+    )]
     pub ipv6_address: Option<IpAddr>,
     /// Hostname if available
     pub hostname: Option<String>,
@@ -3183,10 +3195,22 @@ pub struct DeviceInfo {
     /// Device type based on mDNS services (e.g., "Chromecast", "Apple TV", "Printer")
     pub device_type: Option<String>,
     /// First seen timestamp (ISO 8601 format)
-    #[cfg_attr(feature = "http-api", serde(serialize_with = "serialize_system_time", deserialize_with = "deserialize_system_time"))]
+    #[cfg_attr(
+        feature = "http-api",
+        serde(
+            serialize_with = "serialize_system_time",
+            deserialize_with = "deserialize_system_time"
+        )
+    )]
     pub first_seen: SystemTime,
     /// Last seen timestamp (ISO 8601 format)
-    #[cfg_attr(feature = "http-api", serde(serialize_with = "serialize_system_time", deserialize_with = "deserialize_system_time"))]
+    #[cfg_attr(
+        feature = "http-api",
+        serde(
+            serialize_with = "serialize_system_time",
+            deserialize_with = "deserialize_system_time"
+        )
+    )]
     pub last_seen: SystemTime,
 }
 
@@ -3300,7 +3324,9 @@ impl DeviceInfo {
             format_timestamp(self.last_seen),
             self.mac_address,
             self.ip_address,
-            self.ipv6_address.map(|ip| ip.to_string()).unwrap_or_default(),
+            self.ipv6_address
+                .map(|ip| ip.to_string())
+                .unwrap_or_default(),
             self.hostname.as_deref().unwrap_or(""),
             self.device_type.as_deref().unwrap_or(""),
             self.vendor.as_deref().unwrap_or(""),
@@ -3425,14 +3451,23 @@ fn parse_timestamp(value: &str) -> Option<SystemTime> {
         return None;
     }
 
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || minute > 59 || second > 59 {
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
         return None;
     }
 
     let mut days = 0u64;
     let mut current_year = 1970;
     while current_year < year {
-        days += if is_leap_year(current_year) { 366u64 } else { 365u64 };
+        days += if is_leap_year(current_year) {
+            366u64
+        } else {
+            365u64
+        };
         current_year += 1;
     }
 
@@ -3954,7 +3989,9 @@ impl DeviceTracker {
             });
 
             // Update hostname from the first seen A/AAAA
-            if device.hostname.is_none() && let Some(h) = first_hostname {
+            if device.hostname.is_none()
+                && let Some(h) = first_hostname
+            {
                 device.hostname = Some(h.to_string());
                 updated += 1;
             }
@@ -3968,7 +4005,9 @@ impl DeviceTracker {
             }
 
             // Set IPv6 address if available
-            if let Some(ipv6) = ipv6_addr && device.set_ipv6_address(ipv6) {
+            if let Some(ipv6) = ipv6_addr
+                && device.set_ipv6_address(ipv6)
+            {
                 updated += 1;
             }
 
@@ -3980,12 +4019,16 @@ impl DeviceTracker {
             }
 
             // Set vendor if detected
-            if let Some(v) = vendor && device.set_vendor(&v) {
+            if let Some(v) = vendor
+                && device.set_vendor(&v)
+            {
                 updated += 1;
             }
 
             // Set device type if detected
-            if let Some(t) = device_type && device.set_device_type(&t) {
+            if let Some(t) = device_type
+                && device.set_device_type(&t)
+            {
                 updated += 1;
             }
 
@@ -4293,9 +4336,11 @@ impl DeviceTracker {
         let csv_line = {
             let device = self.devices.entry(mac.to_string()).or_insert_with(|| {
                 updated += 1;
-                let initial_ip = source_ipv4
-                    .map(IpAddr::V4)
-                    .unwrap_or_else(|| source_ipv6.map(IpAddr::V6).unwrap_or(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0))));
+                let initial_ip = source_ipv4.map(IpAddr::V4).unwrap_or_else(|| {
+                    source_ipv6
+                        .map(IpAddr::V6)
+                        .unwrap_or(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)))
+                });
                 DeviceInfo::new(mac.to_string(), initial_ip, None)
             });
 
@@ -4306,7 +4351,9 @@ impl DeviceTracker {
                 updated += 1;
             }
 
-            if let Some(ipv6) = source_ipv6 && device.set_ipv6_address(ipv6) {
+            if let Some(ipv6) = source_ipv6
+                && device.set_ipv6_address(ipv6)
+            {
                 updated += 1;
             }
 
@@ -4316,11 +4363,15 @@ impl DeviceTracker {
                 }
             }
 
-            if let Some(v) = vendor && device.set_vendor(&v) {
+            if let Some(v) = vendor
+                && device.set_vendor(&v)
+            {
                 updated += 1;
             }
 
-            if let Some(t) = device_type && device.set_device_type(&t) {
+            if let Some(t) = device_type
+                && device.set_device_type(&t)
+            {
                 updated += 1;
             }
 
