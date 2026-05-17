@@ -10,9 +10,9 @@
 //! via DHCP, mDNS, SSDP/UPnP, and OUI identification.
 //!
 //! ## Optimizations
-//! 
-//! This library is optimized for minimal memory allocations, heavily employing borrowed 
-//! packet views during protocol ingestion to reduce allocations and copies on the hot path. 
+//!
+//! This library is optimized for minimal memory allocations, heavily employing borrowed
+//! packet views during protocol ingestion to reduce allocations and copies on the hot path.
 //!
 //! ## Example
 //!
@@ -2657,10 +2657,10 @@ impl<'a> SsdpPacketView<'a> {
 
     fn view_contains_any(&self, needles: &[&str]) -> bool {
         self.view_contains_any_in(self.start_line, needles)
-            || self
-                .headers
-                .iter()
-                .any(|(name, value)| self.view_contains_any_in(name, needles) || self.view_contains_any_in(value, needles))
+            || self.headers.iter().any(|(name, value)| {
+                self.view_contains_any_in(name, needles)
+                    || self.view_contains_any_in(value, needles)
+            })
     }
 
     fn view_contains_any_in(&self, haystack: &str, needles: &[&str]) -> bool {
@@ -3603,7 +3603,7 @@ impl DeviceTracker {
     /// Updates the tracker state with information extracted from a DHCPv4 packet.
     ///
     /// # Returns
-    /// `true` if a new device was detected or an existing device was significantly updated 
+    /// `true` if a new device was detected or an existing device was significantly updated
     /// (IP change, hostname change, etc.).
     pub fn update_from_dhcpv4(&mut self, packet: &Dhcpv4Packet) -> bool {
         let mac = packet.client_mac_string();
@@ -3709,7 +3709,8 @@ impl DeviceTracker {
                     // SRV records also indicate services
                     // Extract service type from the record name (e.g., "My Device._http._tcp.local")
                     if let Some(service_start) = record.name.find("._") {
-                        let service_type = record.name[service_start + 1..].trim_end_matches(".local");
+                        let service_type =
+                            record.name[service_start + 1..].trim_end_matches(".local");
                         if seen_services.insert(service_type) {
                             services.push(service_type);
                         }
@@ -4094,7 +4095,9 @@ impl DeviceTracker {
             _ => None,
         };
 
-        let initial_ip = source_ipv4.map(|ip| ip.to_string()).unwrap_or_else(|| "0.0.0.0".to_string());
+        let initial_ip = source_ipv4
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|| "0.0.0.0".to_string());
 
         let device = self.devices.entry(mac.to_string()).or_insert_with(|| {
             updated += 1;
