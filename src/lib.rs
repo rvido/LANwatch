@@ -28,13 +28,14 @@
 //! });
 //! ```
 
-use pnet::datalink::{self, Channel::Ethernet, DataLinkReceiver, NetworkInterface};
-use pnet::packet::Packet;
-use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
-use pnet::packet::ip::IpNextHeaderProtocols;
-use pnet::packet::ipv4::Ipv4Packet;
-use pnet::packet::ipv6::Ipv6Packet;
-use pnet::packet::udp::UdpPacket;
+use pnet_datalink as datalink;
+use pnet_datalink::{Channel::Ethernet, DataLinkReceiver, NetworkInterface};
+use pnet_packet::ethernet::{EtherTypes, EthernetPacket};
+use pnet_packet::ip::IpNextHeaderProtocols;
+use pnet_packet::ipv4::Ipv4Packet;
+use pnet_packet::ipv6::Ipv6Packet;
+use pnet_packet::udp::UdpPacket;
+use pnet_packet::Packet;
 use std::collections::HashMap;
 #[cfg(any(feature = "mdns", feature = "ssdp"))]
 use std::collections::HashSet;
