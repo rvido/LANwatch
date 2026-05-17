@@ -148,15 +148,7 @@ fn create_sample_dhcpv4_discover() -> Vec<u8> {
 
 /// Create a sample DHCPv6 SOLICIT packet payload
 fn create_sample_dhcpv6_solicit() -> Vec<u8> {
-    let mut payload = Vec::new();
-
-    // Message Type: 1 = SOLICIT
-    payload.push(1);
-
-    // Transaction ID (3 bytes)
-    payload.push(0x12);
-    payload.push(0x34);
-    payload.push(0x56);
+    let mut payload = vec![1, 0x12, 0x34, 0x56];
 
     // Option 1: Client Identifier (DUID)
     payload.push(0x00);
