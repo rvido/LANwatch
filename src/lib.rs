@@ -40,9 +40,9 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// DHCPv4 server port
 pub const DHCPV4_SERVER_PORT: u16 = 67;
@@ -3172,9 +3172,11 @@ pub struct DeviceInfo {
     /// MAC address of the device
     pub mac_address: String,
     /// IPv4 address
-    pub ip_address: String,
+    #[cfg_attr(feature = "http-api", serde(serialize_with = "serialize_ip_addr", deserialize_with = "deserialize_ip_addr"))]
+    pub ip_address: IpAddr,
     /// IPv6 address if available
-    pub ipv6_address: Option<String>,
+    #[cfg_attr(feature = "http-api", serde(serialize_with = "serialize_opt_ip_addr", deserialize_with = "deserialize_opt_ip_addr"))]
+    pub ipv6_address: Option<IpAddr>,
     /// Hostname if available
     pub hostname: Option<String>,
     /// Detected mDNS services (e.g., "_http._tcp", "_airplay._tcp")
@@ -3184,15 +3186,17 @@ pub struct DeviceInfo {
     /// Device type based on mDNS services (e.g., "Chromecast", "Apple TV", "Printer")
     pub device_type: Option<String>,
     /// First seen timestamp (ISO 8601 format)
-    pub first_seen: String,
+    #[cfg_attr(feature = "http-api", serde(serialize_with = "serialize_system_time", deserialize_with = "deserialize_system_time"))]
+    pub first_seen: SystemTime,
     /// Last seen timestamp (ISO 8601 format)
-    pub last_seen: String,
+    #[cfg_attr(feature = "http-api", serde(serialize_with = "serialize_system_time", deserialize_with = "deserialize_system_time"))]
+    pub last_seen: SystemTime,
 }
 
 impl DeviceInfo {
     /// Creates a new `DeviceInfo` instance with timestamps initialized to now.
-    pub fn new(mac_address: String, ip_address: String, hostname: Option<String>) -> Self {
-        let timestamp = format_timestamp(SystemTime::now());
+    pub fn new(mac_address: String, ip_address: IpAddr, hostname: Option<String>) -> Self {
+        let timestamp = SystemTime::now();
         Self {
             mac_address,
             ip_address,
@@ -3201,7 +3205,7 @@ impl DeviceInfo {
             services: Vec::new(),
             vendor: None,
             device_type: None,
-            first_seen: timestamp.clone(),
+            first_seen: timestamp,
             last_seen: timestamp,
         }
     }
@@ -3210,12 +3214,12 @@ impl DeviceInfo {
     ///
     /// # Returns
     /// `true` if any fields were updated, `false` otherwise.
-    pub fn update(&mut self, ip_address: &str, hostname: Option<&str>) -> bool {
+    pub fn update(&mut self, ip_address: IpAddr, hostname: Option<&str>) -> bool {
         let mut changed = false;
-        let timestamp = format_timestamp(SystemTime::now());
+        let timestamp = SystemTime::now();
 
         if self.ip_address != ip_address {
-            self.ip_address = ip_address.to_string();
+            self.ip_address = ip_address;
             changed = true;
         }
 
@@ -3277,8 +3281,8 @@ impl DeviceInfo {
     ///
     /// # Returns
     /// `true` if the address was changed or set, `false` if it was already identical.
-    pub fn set_ipv6_address(&mut self, ipv6: &str) -> bool {
-        let new_ipv6 = Some(ipv6.to_string());
+    pub fn set_ipv6_address(&mut self, ipv6: Ipv6Addr) -> bool {
+        let new_ipv6 = Some(IpAddr::V6(ipv6));
         if self.ipv6_address != new_ipv6 {
             self.ipv6_address = new_ipv6;
             true
@@ -3295,11 +3299,11 @@ impl DeviceInfo {
         let services_str = self.services.join(";");
         format!(
             "{},{},{},{},\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"",
-            self.first_seen,
-            self.last_seen,
+            format_timestamp(self.first_seen),
+            format_timestamp(self.last_seen),
             self.mac_address,
             self.ip_address,
-            self.ipv6_address.as_deref().unwrap_or(""),
+            self.ipv6_address.map(|ip| ip.to_string()).unwrap_or_default(),
             self.hostname.as_deref().unwrap_or(""),
             self.device_type.as_deref().unwrap_or(""),
             self.vendor.as_deref().unwrap_or(""),
@@ -3321,18 +3325,22 @@ impl DeviceInfo {
             return None;
         }
 
-        let first_seen = parts[0].to_string();
+        let first_seen = parse_timestamp(&parts[0])?;
         let last_seen = if parts.len() > 1 {
-            parts[1].to_string()
+            parse_timestamp(&parts[1])?
         } else {
-            first_seen.clone()
+            first_seen
         };
         // Normalize MAC address and migrate legacy DHCPv6 DUID-like identifiers.
         let mac_address = normalize_device_identifier(&parts[2]);
-        let ip_address = parts[3].to_string();
+        let ip_address = parts[3].parse().ok()?;
         let ipv6_address = if parts.len() > 4 {
-            let v6 = parts[4].trim_matches('"').to_string();
-            if v6.is_empty() { None } else { Some(v6) }
+            let v6 = parts[4].trim_matches('"');
+            if v6.is_empty() {
+                None
+            } else {
+                Some(v6.parse().ok()?)
+            }
         } else {
             None
         };
@@ -3396,6 +3404,111 @@ fn parse_csv_line(line: &str) -> Vec<String> {
     }
     fields.push(current);
     fields
+}
+
+fn parse_timestamp(value: &str) -> Option<SystemTime> {
+    let value = value.trim();
+    if value.len() != 20 || !value.ends_with('Z') {
+        return None;
+    }
+
+    let year: i32 = value.get(0..4)?.parse().ok()?;
+    let month: i32 = value.get(5..7)?.parse().ok()?;
+    let day: i32 = value.get(8..10)?.parse().ok()?;
+    let hour: u64 = value.get(11..13)?.parse().ok()?;
+    let minute: u64 = value.get(14..16)?.parse().ok()?;
+    let second: u64 = value.get(17..19)?.parse().ok()?;
+
+    if value.as_bytes().get(4) != Some(&b'-')
+        || value.as_bytes().get(7) != Some(&b'-')
+        || value.as_bytes().get(10) != Some(&b'T')
+        || value.as_bytes().get(13) != Some(&b':')
+        || value.as_bytes().get(16) != Some(&b':')
+    {
+        return None;
+    }
+
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+
+    let mut days = 0u64;
+    let mut current_year = 1970;
+    while current_year < year {
+        days += if is_leap_year(current_year) { 366u64 } else { 365u64 };
+        current_year += 1;
+    }
+
+    let month_days = if is_leap_year(year) {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+
+    for m in 0..(month - 1) as usize {
+        days += month_days[m] as u64;
+    }
+
+    days += (day - 1) as u64;
+
+    let seconds = days * 86_400 + hour * 3_600 + minute * 60 + second;
+    Some(UNIX_EPOCH + Duration::from_secs(seconds))
+}
+
+#[cfg(feature = "http-api")]
+fn serialize_system_time<S>(value: &SystemTime, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&format_timestamp(*value))
+}
+
+#[cfg(feature = "http-api")]
+fn deserialize_system_time<'de, D>(deserializer: D) -> Result<SystemTime, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+    parse_timestamp(&value).ok_or_else(|| serde::de::Error::custom("invalid timestamp"))
+}
+
+#[cfg(feature = "http-api")]
+fn serialize_ip_addr<S>(value: &IpAddr, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&value.to_string())
+}
+
+#[cfg(feature = "http-api")]
+fn deserialize_ip_addr<'de, D>(deserializer: D) -> Result<IpAddr, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+    value.parse().map_err(serde::de::Error::custom)
+}
+
+#[cfg(feature = "http-api")]
+fn serialize_opt_ip_addr<S>(value: &Option<IpAddr>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match value {
+        Some(ip) => serializer.serialize_some(&ip.to_string()),
+        None => serializer.serialize_none(),
+    }
+}
+
+#[cfg(feature = "http-api")]
+fn deserialize_opt_ip_addr<'de, D>(deserializer: D) -> Result<Option<IpAddr>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = <Option<String> as serde::Deserialize>::deserialize(deserializer)?;
+    value
+        .map(|ip| ip.parse().map_err(serde::de::Error::custom))
+        .transpose()
 }
 
 /// Format a SystemTime as ISO 8601 timestamp
@@ -3707,25 +3820,22 @@ impl DeviceTracker {
         // Determine client IP address.
         // Prefer DHCP client/assigned fields parsed into requested_ip; avoid treating
         // server source IP (port 67) as client identity.
-        let ip = packet
-            .requested_ip
-            .map(|ip| ip.to_string())
-            .unwrap_or_else(|| {
-                if packet.source_port == DHCPV4_CLIENT_PORT
-                    && packet.source_ip != Ipv4Addr::new(0, 0, 0, 0)
-                {
-                    packet.source_ip.to_string()
-                } else if packet.dest_port == DHCPV4_CLIENT_PORT
-                    && packet.dest_ip != Ipv4Addr::new(0, 0, 0, 0)
-                    && packet.dest_ip != Ipv4Addr::new(255, 255, 255, 255)
-                {
-                    packet.dest_ip.to_string()
-                } else {
-                    "0.0.0.0".to_string()
-                }
-            });
+        let ip = packet.requested_ip.map(IpAddr::V4).unwrap_or_else(|| {
+            if packet.source_port == DHCPV4_CLIENT_PORT
+                && packet.source_ip != Ipv4Addr::new(0, 0, 0, 0)
+            {
+                IpAddr::V4(packet.source_ip)
+            } else if packet.dest_port == DHCPV4_CLIENT_PORT
+                && packet.dest_ip != Ipv4Addr::new(0, 0, 0, 0)
+                && packet.dest_ip != Ipv4Addr::new(255, 255, 255, 255)
+            {
+                IpAddr::V4(packet.dest_ip)
+            } else {
+                IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0))
+            }
+        });
 
-        self.update_device(&mac, &ip, packet.hostname.as_deref())
+        self.update_device(&mac, ip, packet.hostname.as_deref())
     }
 
     /// Updates the tracker state with information extracted from a DHCPv6 packet.
@@ -3758,8 +3868,8 @@ impl DeviceTracker {
             None => return false,
         };
 
-        let ip = packet.source_ip.to_string();
-        self.update_device(&mac, &ip, fqdn)
+        let ip = IpAddr::V6(packet.source_ip);
+        self.update_device(&mac, ip, fqdn)
     }
 
     /// Updates the tracker state with hostnames, IP addresses, and services from an mDNS packet.
@@ -3840,15 +3950,12 @@ impl DeviceTracker {
         let device_type = Self::detect_device_type_from_hostname(first_hostname)
             .or_else(|| self.detect_device_type_from_services(&services));
 
-        // Get first IPv6 address string if available (defer to_string)
-        let ipv6_addr = first_ipv6.map(|ip| ip.to_string());
+        let ipv6_addr = first_ipv6;
 
         // Get or create device entry and perform updates within a short scope
         let csv_line = {
             let device = self.devices.entry(mac.to_string()).or_insert_with(|| {
-                let ip = first_ipv4
-                    .map(|ip| ip.to_string())
-                    .unwrap_or_else(|| packet.source_ip.to_string());
+                let ip = first_ipv4.map(IpAddr::V4).unwrap_or(packet.source_ip);
                 updated += 1;
                 DeviceInfo::new(mac.to_string(), ip, None)
             });
@@ -3863,15 +3970,15 @@ impl DeviceTracker {
 
             // Update IPv4 if we have a better one
             if let Some(ipv4) = first_ipv4 {
-                if device.ip_address == "0.0.0.0" || device.ip_address.is_empty() {
-                    device.ip_address = ipv4.to_string();
+                if matches!(device.ip_address, IpAddr::V4(addr) if addr.is_unspecified()) {
+                    device.ip_address = IpAddr::V4(ipv4);
                     updated += 1;
                 }
             }
 
             // Set IPv6 address if available
             if let Some(ipv6) = ipv6_addr {
-                if device.set_ipv6_address(&ipv6) {
+                if device.set_ipv6_address(ipv6) {
                     updated += 1;
                 }
             }
@@ -3898,7 +4005,7 @@ impl DeviceTracker {
             }
 
             // Update timestamp
-            device.last_seen = format_timestamp(SystemTime::now());
+            device.last_seen = SystemTime::now();
 
             if updated > 0 && self.auto_save {
                 Some(device.to_csv_line())
@@ -4202,20 +4309,20 @@ impl DeviceTracker {
             let device = self.devices.entry(mac.to_string()).or_insert_with(|| {
                 updated += 1;
                 let initial_ip = source_ipv4
-                    .map(|ip| ip.to_string())
-                    .unwrap_or_else(|| "0.0.0.0".to_string());
+                    .map(IpAddr::V4)
+                    .unwrap_or_else(|| source_ipv6.map(IpAddr::V6).unwrap_or(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0))));
                 DeviceInfo::new(mac.to_string(), initial_ip, None)
             });
 
             if let Some(ipv4) = source_ipv4 {
-                if device.ip_address == "0.0.0.0" || device.ip_address.is_empty() {
-                    device.ip_address = ipv4.to_string();
+                if matches!(device.ip_address, IpAddr::V4(addr) if addr.is_unspecified()) {
+                    device.ip_address = IpAddr::V4(ipv4);
                     updated += 1;
                 }
             }
 
             if let Some(ipv6) = source_ipv6 {
-                if device.set_ipv6_address(&ipv6.to_string()) {
+                if device.set_ipv6_address(ipv6) {
                     updated += 1;
                 }
             }
@@ -4238,7 +4345,7 @@ impl DeviceTracker {
                 }
             }
 
-            device.last_seen = format_timestamp(SystemTime::now());
+            device.last_seen = SystemTime::now();
 
             if updated > 0 && self.auto_save {
                 Some(device.to_csv_line())
@@ -4344,7 +4451,7 @@ impl DeviceTracker {
     }
 
     /// Update or add a device
-    fn update_device(&mut self, mac: &str, ip: &str, hostname: Option<&str>) -> bool {
+    fn update_device(&mut self, mac: &str, ip: IpAddr, hostname: Option<&str>) -> bool {
         // Normalize MAC address to lowercase once to avoid repeated allocations
         let mac_key = mac.to_lowercase();
         let hostname = hostname.and_then(sanitize_hostname);
@@ -4373,7 +4480,7 @@ impl DeviceTracker {
             changed
         } else {
             // New device
-            let mut device = DeviceInfo::new(mac_key.clone(), ip.to_string(), hostname);
+            let mut device = DeviceInfo::new(mac_key.clone(), ip, hostname);
             // Set vendor if we found one
             if let Some(v) = vendor {
                 device.set_vendor(v);
@@ -4957,14 +5064,13 @@ mod tests {
     fn test_device_info_creation() {
         let device = DeviceInfo::new(
             "aa:bb:cc:dd:ee:ff".to_string(),
-            "192.168.1.100".to_string(),
+            Ipv4Addr::new(192, 168, 1, 100).into(),
             Some("testhost".to_string()),
         );
 
         assert_eq!(device.mac_address, "aa:bb:cc:dd:ee:ff");
-        assert_eq!(device.ip_address, "192.168.1.100");
+        assert_eq!(device.ip_address.to_string(), "192.168.1.100");
         assert_eq!(device.hostname, Some("testhost".to_string()));
-        assert!(!device.first_seen.is_empty());
         assert_eq!(device.first_seen, device.last_seen);
     }
 
@@ -4972,14 +5078,14 @@ mod tests {
     fn test_device_info_csv_roundtrip() {
         let device = DeviceInfo {
             mac_address: "aa:bb:cc:dd:ee:ff".to_string(),
-            ip_address: "192.168.1.100".to_string(),
-            ipv6_address: Some("fe80::1".to_string()),
+            ip_address: Ipv4Addr::new(192, 168, 1, 100).into(),
+            ipv6_address: Some("fe80::1".parse().unwrap()),
             hostname: Some("testhost".to_string()),
             services: vec!["_http._tcp".to_string(), "_ssh._tcp".to_string()],
             vendor: Some("TestVendor".to_string()),
             device_type: Some("Server".to_string()),
-            first_seen: "2026-01-15T10:00:00Z".to_string(),
-            last_seen: "2026-01-15T12:00:00Z".to_string(),
+            first_seen: parse_timestamp("2026-01-15T10:00:00Z").unwrap(),
+            last_seen: parse_timestamp("2026-01-15T12:00:00Z").unwrap(),
         };
 
         let csv_line = device.to_csv_line();
@@ -5009,14 +5115,14 @@ mod tests {
     fn test_device_info_csv_no_hostname() {
         let device = DeviceInfo {
             mac_address: "aa:bb:cc:dd:ee:ff".to_string(),
-            ip_address: "192.168.1.100".to_string(),
+            ip_address: Ipv4Addr::new(192, 168, 1, 100).into(),
             ipv6_address: None,
             hostname: None,
             services: Vec::new(),
             vendor: None,
             device_type: None,
-            first_seen: "2026-01-15T10:00:00Z".to_string(),
-            last_seen: "2026-01-15T12:00:00Z".to_string(),
+            first_seen: parse_timestamp("2026-01-15T10:00:00Z").unwrap(),
+            last_seen: parse_timestamp("2026-01-15T12:00:00Z").unwrap(),
         };
 
         let csv_line = device.to_csv_line();
@@ -5029,27 +5135,27 @@ mod tests {
     fn test_device_info_update() {
         let mut device = DeviceInfo {
             mac_address: "aa:bb:cc:dd:ee:ff".to_string(),
-            ip_address: "192.168.1.100".to_string(),
+            ip_address: Ipv4Addr::new(192, 168, 1, 100).into(),
             ipv6_address: None,
             hostname: None,
             services: Vec::new(),
             vendor: None,
             device_type: None,
-            first_seen: "2026-01-15T10:00:00Z".to_string(),
-            last_seen: "2026-01-15T10:00:00Z".to_string(),
+            first_seen: parse_timestamp("2026-01-15T10:00:00Z").unwrap(),
+            last_seen: parse_timestamp("2026-01-15T10:00:00Z").unwrap(),
         };
 
         // Update with new IP - should return true
-        let changed = device.update("192.168.1.200", None);
+        let changed = device.update(Ipv4Addr::new(192, 168, 1, 200).into(), None);
         assert!(changed);
-        assert_eq!(device.ip_address, "192.168.1.200");
+        assert_eq!(device.ip_address.to_string(), "192.168.1.200");
 
         // Update with same IP - should return false
-        let changed = device.update("192.168.1.200", None);
+        let changed = device.update(Ipv4Addr::new(192, 168, 1, 200).into(), None);
         assert!(!changed);
 
         // Update with hostname - should return true
-        let changed = device.update("192.168.1.200", Some("newhost"));
+        let changed = device.update(Ipv4Addr::new(192, 168, 1, 200).into(), Some("newhost"));
         assert!(changed);
         assert_eq!(device.hostname, Some("newhost".to_string()));
     }
@@ -5126,7 +5232,7 @@ mod tests {
 
         tracker.update_from_dhcpv4(&packet);
         let device = tracker.devices().get("10:20:30:40:50:60").unwrap();
-        assert_eq!(device.ip_address, "0.0.0.0");
+        assert_eq!(device.ip_address.to_string(), "0.0.0.0");
 
         let _ = std::fs::remove_file(temp_path);
     }
@@ -5248,7 +5354,7 @@ mod tests {
 
             let devices = tracker.devices();
             let device = devices.get("11:22:33:44:55:66").unwrap();
-            assert_eq!(device.ip_address, "192.168.1.100");
+            assert_eq!(device.ip_address.to_string(), "192.168.1.100");
             assert_eq!(device.hostname, Some("persistent-host".to_string()));
         }
 
@@ -5260,14 +5366,14 @@ mod tests {
     fn test_device_info_json_serialization() {
         let device = DeviceInfo {
             mac_address: "AA:BB:CC:DD:EE:FF".to_string(),
-            ip_address: "192.168.1.100".to_string(),
-            ipv6_address: Some("fe80::abcd:1234".to_string()),
+            ip_address: Ipv4Addr::new(192, 168, 1, 100).into(),
+            ipv6_address: Some("fe80::abcd:1234".parse().unwrap()),
             hostname: Some("jsonhost".to_string()),
             services: vec!["_airplay._tcp".to_string()],
             vendor: Some("Apple".to_string()),
             device_type: Some("AirPlay Device".to_string()),
-            first_seen: "2026-01-15T10:00:00Z".to_string(),
-            last_seen: "2026-01-15T12:00:00Z".to_string(),
+            first_seen: parse_timestamp("2026-01-15T10:00:00Z").unwrap(),
+            last_seen: parse_timestamp("2026-01-15T12:00:00Z").unwrap(),
         };
 
         // Serialize to JSON
@@ -5569,7 +5675,7 @@ mod tests {
 
         // Verify IP was updated (MAC is lowercase)
         let device = tracker.devices().get("aa:bb:cc:dd:ee:ff").unwrap();
-        assert_eq!(device.ip_address, "192.168.1.200");
+        assert_eq!(device.ip_address.to_string(), "192.168.1.200");
         assert_eq!(device.hostname, Some("newname".to_string()));
 
         let _ = std::fs::remove_file(temp_path);
@@ -5874,7 +5980,7 @@ mod tests {
     fn test_device_info_add_service() {
         let mut device = DeviceInfo::new(
             "AA:BB:CC:DD:EE:FF".to_string(),
-            "192.168.1.100".to_string(),
+            Ipv4Addr::new(192, 168, 1, 100).into(),
             None,
         );
 
@@ -5897,7 +6003,7 @@ mod tests {
     fn test_device_info_set_vendor() {
         let mut device = DeviceInfo::new(
             "AA:BB:CC:DD:EE:FF".to_string(),
-            "192.168.1.100".to_string(),
+            Ipv4Addr::new(192, 168, 1, 100).into(),
             None,
         );
 
@@ -5914,7 +6020,7 @@ mod tests {
     fn test_device_info_set_device_type() {
         let mut device = DeviceInfo::new(
             "AA:BB:CC:DD:EE:FF".to_string(),
-            "192.168.1.100".to_string(),
+            Ipv4Addr::new(192, 168, 1, 100).into(),
             None,
         );
 
@@ -5931,7 +6037,7 @@ mod tests {
     fn test_device_info_csv_roundtrip_with_device_type() {
         let mut device = DeviceInfo::new(
             "aa:bb:cc:dd:ee:ff".to_string(),
-            "192.168.1.100".to_string(),
+            Ipv4Addr::new(192, 168, 1, 100).into(),
             Some("mydevice".to_string()),
         );
         device.add_service("_googlecast._tcp");
