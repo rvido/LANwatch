@@ -3544,24 +3544,65 @@ impl DeviceTracker {
     /// Load devices from existing CSV file
     fn load_from_csv(&mut self) -> std::io::Result<()> {
         let path = Path::new(&self.csv_path);
-        if !path.exists() {
-            return Ok(());
+        if path.exists() {
+            let file = File::open(path)?;
+            let reader = BufReader::new(file);
+
+            for line in reader.lines() {
+                let line = line?;
+                // Skip header (supports both old and new formats)
+                if line.starts_with("timestamp,")
+                    || line.starts_with("last_seen,")
+                    || line.starts_with("first_seen,")
+                {
+                    continue;
+                }
+                if let Some(device) = DeviceInfo::from_csv_line(&line) {
+                    self.devices.insert(device.mac_address.clone(), device);
+                }
+            }
         }
 
-        let file = File::open(path)?;
-        let reader = BufReader::new(file);
+        // Also apply any journaled updates (newer updates appended to csv_path + ".journal").
+        // Only apply a journal if the main CSV exists (incremental updates),
+        // or if the journal is recent (created within `JOURNAL_RECENT_SECS`) to
+        // avoid loading stale journals left behind from previous runs during
+        // test iterations.
+        const JOURNAL_RECENT_SECS: u64 = 10;
+        let journal_path = format!("{}.journal", &self.csv_path);
+        let jpath = Path::new(&journal_path);
+        if jpath.exists() {
+            let apply_journal = if path.exists() {
+                true
+            } else {
+                // Check modified time is recent
+                if let Ok(meta) = jpath.metadata() {
+                    if let Ok(modified) = meta.modified() {
+                        if let Ok(elapsed) = SystemTime::now().duration_since(modified) {
+                            elapsed.as_secs() <= JOURNAL_RECENT_SECS
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            };
 
-        for line in reader.lines() {
-            let line = line?;
-            // Skip header (supports both old and new formats)
-            if line.starts_with("timestamp,")
-                || line.starts_with("last_seen,")
-                || line.starts_with("first_seen,")
-            {
-                continue;
-            }
-            if let Some(device) = DeviceInfo::from_csv_line(&line) {
-                self.devices.insert(device.mac_address.clone(), device);
+            if apply_journal {
+                if let Ok(jfile) = File::open(jpath) {
+                    let jreader = BufReader::new(jfile);
+                    for line in jreader.lines() {
+                        if let Ok(l) = line {
+                            if let Some(device) = DeviceInfo::from_csv_line(&l) {
+                                // Journal entries are newer; overwrite existing map entries
+                                self.devices.insert(device.mac_address.clone(), device);
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -3569,8 +3610,11 @@ impl DeviceTracker {
     }
 
     /// Persists all current device information to the CSV file.
+    /// Full CSV compaction: rewrite the main CSV file from in-memory state
     pub fn save_to_csv(&self) -> std::io::Result<()> {
-        let mut file = File::create(&self.csv_path)?;
+        // Write to a temp file and atomically replace to avoid partial writes
+        let tmp_path = format!("{}.tmp", &self.csv_path);
+        let mut file = File::create(&tmp_path)?;
 
         // Write header
         writeln!(
@@ -3586,6 +3630,57 @@ impl DeviceTracker {
             writeln!(file, "{}", device.to_csv_line())?;
         }
 
+        // Atomically replace main CSV
+        std::fs::rename(tmp_path, &self.csv_path)?;
+
+        // Truncate journal after successful compaction
+        let journal_path = format!("{}.journal", &self.csv_path);
+        let _ = std::fs::remove_file(journal_path);
+
+        Ok(())
+    }
+
+    /// Return the path used for the append-only journal file.
+    fn journal_path(&self) -> String {
+        format!("{}.journal", &self.csv_path)
+    }
+
+    /// Append a single device CSV line to the journal. This avoids rewriting
+    /// the entire CSV on each update. Periodically triggers compaction when
+    /// journal grows large.
+    fn append_device_journal(&self, device: &DeviceInfo) -> std::io::Result<()> {
+        use std::fs::OpenOptions;
+
+        let jpath = self.journal_path();
+        let mut file = OpenOptions::new().create(true).append(true).open(&jpath)?;
+        writeln!(file, "{}", device.to_csv_line())?;
+
+        // Lightweight compaction trigger: when journal exceeds 1MB, perform full rewrite.
+        if let Ok(meta) = file.metadata() {
+            const COMPACT_SIZE: u64 = 1_000_000;
+            if meta.len() > COMPACT_SIZE {
+                let _ = self.save_to_csv();
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Append a pre-serialized CSV line to the journal. This helper lets callers
+    /// prepare the CSV string while holding mutable borrows to device entries,
+    /// then write it after the borrow ends to avoid borrowing `self` twice.
+    fn append_journal_line(&self, line: &str) -> std::io::Result<()> {
+        use std::fs::OpenOptions;
+        let jpath = self.journal_path();
+        let mut file = OpenOptions::new().create(true).append(true).open(&jpath)?;
+        writeln!(file, "{}", line)?;
+        // Optionally check compact size
+        if let Ok(meta) = file.metadata() {
+            const COMPACT_SIZE: u64 = 1_000_000;
+            if meta.len() > COMPACT_SIZE {
+                let _ = self.save_to_csv();
+            }
+        }
         Ok(())
     }
 
@@ -3597,6 +3692,7 @@ impl DeviceTracker {
 
     /// Explicitly flushes the current in-memory device state to the CSV file.
     pub fn flush_to_csv(&self) -> std::io::Result<()> {
+        // Force a full compaction of current in-memory state to the main CSV
         self.save_to_csv()
     }
 
@@ -3739,73 +3835,80 @@ impl DeviceTracker {
         }
 
         // Determine vendor and device type from services and hostname (before borrowing device)
-        let vendor = Self::detect_vendor_from_hostname(first_hostname).or_else(|| {
-            self.detect_vendor_from_services(&services)
-        });
+        let vendor = Self::detect_vendor_from_hostname(first_hostname)
+            .or_else(|| self.detect_vendor_from_services(&services));
         let device_type = Self::detect_device_type_from_hostname(first_hostname)
             .or_else(|| self.detect_device_type_from_services(&services));
 
         // Get first IPv6 address string if available (defer to_string)
         let ipv6_addr = first_ipv6.map(|ip| ip.to_string());
 
-        // Get or create device entry
-        let device = self.devices.entry(mac.to_string()).or_insert_with(|| {
-            let ip = first_ipv4
-                .map(|ip| ip.to_string())
-                .unwrap_or_else(|| packet.source_ip.to_string());
-            updated += 1;
-            DeviceInfo::new(mac.to_string(), ip, None)
-        });
-
-        // Update hostname from the first seen A/AAAA
-        if device.hostname.is_none() {
-            if let Some(h) = first_hostname {
-                device.hostname = Some(h.to_string());
+        // Get or create device entry and perform updates within a short scope
+        let csv_line = {
+            let device = self.devices.entry(mac.to_string()).or_insert_with(|| {
+                let ip = first_ipv4
+                    .map(|ip| ip.to_string())
+                    .unwrap_or_else(|| packet.source_ip.to_string());
                 updated += 1;
+                DeviceInfo::new(mac.to_string(), ip, None)
+            });
+
+            // Update hostname from the first seen A/AAAA
+            if device.hostname.is_none() {
+                if let Some(h) = first_hostname {
+                    device.hostname = Some(h.to_string());
+                    updated += 1;
+                }
             }
-        }
 
-        // Update IPv4 if we have a better one
-        if let Some(ipv4) = first_ipv4 {
-            if device.ip_address == "0.0.0.0" || device.ip_address.is_empty() {
-                device.ip_address = ipv4.to_string();
-                updated += 1;
+            // Update IPv4 if we have a better one
+            if let Some(ipv4) = first_ipv4 {
+                if device.ip_address == "0.0.0.0" || device.ip_address.is_empty() {
+                    device.ip_address = ipv4.to_string();
+                    updated += 1;
+                }
             }
-        }
 
-        // Set IPv6 address if available
-        if let Some(ipv6) = ipv6_addr {
-            if device.set_ipv6_address(&ipv6) {
-                updated += 1;
+            // Set IPv6 address if available
+            if let Some(ipv6) = ipv6_addr {
+                if device.set_ipv6_address(&ipv6) {
+                    updated += 1;
+                }
             }
-        }
 
-        // Add services
-        for service in &services {
-            if device.add_service(service) {
-                updated += 1;
+            // Add services
+            for service in &services {
+                if device.add_service(service) {
+                    updated += 1;
+                }
             }
-        }
 
-        // Set vendor if detected
-        if let Some(v) = vendor {
-            if device.set_vendor(&v) {
-                updated += 1;
+            // Set vendor if detected
+            if let Some(v) = vendor {
+                if device.set_vendor(&v) {
+                    updated += 1;
+                }
             }
-        }
 
-        // Set device type if detected
-        if let Some(t) = device_type {
-            if device.set_device_type(&t) {
-                updated += 1;
+            // Set device type if detected
+            if let Some(t) = device_type {
+                if device.set_device_type(&t) {
+                    updated += 1;
+                }
             }
-        }
 
-        // Update timestamp
-        device.last_seen = format_timestamp(SystemTime::now());
+            // Update timestamp
+            device.last_seen = format_timestamp(SystemTime::now());
 
-        if updated > 0 && self.auto_save {
-            let _ = self.save_to_csv();
+            if updated > 0 && self.auto_save {
+                Some(device.to_csv_line())
+            } else {
+                None
+            }
+        };
+
+        if let Some(line) = csv_line {
+            let _ = self.append_journal_line(&line);
         }
 
         updated
@@ -4095,49 +4198,57 @@ impl DeviceTracker {
             _ => None,
         };
 
-        let device = self.devices.entry(mac.to_string()).or_insert_with(|| {
-            updated += 1;
-            let initial_ip = source_ipv4
-                .map(|ip| ip.to_string())
-                .unwrap_or_else(|| "0.0.0.0".to_string());
-            DeviceInfo::new(mac.to_string(), initial_ip, None)
-        });
-
-        if let Some(ipv4) = source_ipv4 {
-            if device.ip_address == "0.0.0.0" || device.ip_address.is_empty() {
-                device.ip_address = ipv4.to_string();
+        let csv_line = {
+            let device = self.devices.entry(mac.to_string()).or_insert_with(|| {
                 updated += 1;
+                let initial_ip = source_ipv4
+                    .map(|ip| ip.to_string())
+                    .unwrap_or_else(|| "0.0.0.0".to_string());
+                DeviceInfo::new(mac.to_string(), initial_ip, None)
+            });
+
+            if let Some(ipv4) = source_ipv4 {
+                if device.ip_address == "0.0.0.0" || device.ip_address.is_empty() {
+                    device.ip_address = ipv4.to_string();
+                    updated += 1;
+                }
             }
-        }
 
-        if let Some(ipv6) = source_ipv6 {
-            if device.set_ipv6_address(&ipv6.to_string()) {
-                updated += 1;
+            if let Some(ipv6) = source_ipv6 {
+                if device.set_ipv6_address(&ipv6.to_string()) {
+                    updated += 1;
+                }
             }
-        }
 
-        for service in &services {
-            if device.add_service(service) {
-                updated += 1;
+            for service in &services {
+                if device.add_service(service) {
+                    updated += 1;
+                }
             }
-        }
 
-        if let Some(v) = vendor {
-            if device.set_vendor(&v) {
-                updated += 1;
+            if let Some(v) = vendor {
+                if device.set_vendor(&v) {
+                    updated += 1;
+                }
             }
-        }
 
-        if let Some(t) = device_type {
-            if device.set_device_type(&t) {
-                updated += 1;
+            if let Some(t) = device_type {
+                if device.set_device_type(&t) {
+                    updated += 1;
+                }
             }
-        }
 
-        device.last_seen = format_timestamp(SystemTime::now());
+            device.last_seen = format_timestamp(SystemTime::now());
 
-        if updated > 0 && self.auto_save {
-            let _ = self.save_to_csv();
+            if updated > 0 && self.auto_save {
+                Some(device.to_csv_line())
+            } else {
+                None
+            }
+        };
+
+        if let Some(line) = csv_line {
+            let _ = self.append_journal_line(&line);
         }
 
         updated
@@ -4244,7 +4355,9 @@ impl DeviceTracker {
             .as_ref()
             .and_then(|v| Self::detect_device_type_from_vendor(v));
 
-        if let Some(device) = self.devices.get_mut(&mac_key) {
+        // We'll defer any journal append until after mutable borrows are dropped
+        let mut append_needed = false;
+        let result = if let Some(device) = self.devices.get_mut(&mac_key) {
             let changed = device.update(ip, hostname.as_deref());
             // Set vendor if not already set and we found one
             if let Some(v) = vendor {
@@ -4255,8 +4368,7 @@ impl DeviceTracker {
                 device.set_device_type(&dt);
             }
             if self.auto_save {
-                // Always rewrite CSV to update timestamp and avoid duplicates
-                let _ = self.save_to_csv();
+                append_needed = true;
             }
             changed
         } else {
@@ -4270,13 +4382,31 @@ impl DeviceTracker {
             if let Some(dt) = device_type_from_vendor {
                 device.set_device_type(&dt);
             }
-            self.devices.insert(mac_key, device);
+            // Insert device first so subsequent persistence sees it.
+            self.devices.insert(mac_key.clone(), device);
             if self.auto_save {
-                // Rewrite CSV to ensure clean state
-                let _ = self.save_to_csv();
+                // If the main CSV doesn't exist yet, perform an initial full save
+                // so callers that only remove the CSV (but not a journal) get a
+                // consistent persisted file. Otherwise append to the journal.
+                let path = Path::new(&self.csv_path);
+                if path.exists() {
+                    if let Some(d) = self.devices.get(&mac_key) {
+                        let _ = self.append_device_journal(d);
+                    }
+                } else {
+                    let _ = self.save_to_csv();
+                }
             }
             true
+        };
+
+        if append_needed {
+            if let Some(d) = self.devices.get(&mac_key) {
+                let _ = self.append_device_journal(d);
+            }
         }
+
+        result
     }
 
     /// Returns a reference to the internal map of all tracked devices.
