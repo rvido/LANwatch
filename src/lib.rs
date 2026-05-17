@@ -4430,12 +4430,12 @@ impl DeviceTracker {
     }
 
     /// Update or add a device
+    /// # Note
+    /// This method assumes `mac` is already normalized to lowercase (which all ingestion paths ensure).
     fn update_device(&mut self, mac: &str, ip: IpAddr, hostname: Option<&str>) -> bool {
-        // Normalize MAC address to lowercase once to avoid repeated allocations
-        let mac_key = mac.to_lowercase();
         let hostname = hostname.and_then(sanitize_hostname);
         // Look up vendor from OUI registry if available
-        let vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(&mac_key));
+        let vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(mac));
         // Infer device type from vendor name
         let device_type_from_vendor = vendor
             .as_ref()
@@ -4443,7 +4443,7 @@ impl DeviceTracker {
 
         // We'll defer any journal append until after mutable borrows are dropped
         let mut append_needed = false;
-        let result = if let Some(device) = self.devices.get_mut(&mac_key) {
+        let result = if let Some(device) = self.devices.get_mut(mac) {
             let changed = device.update(ip, hostname.as_deref());
             // Set vendor if not already set and we found one
             if let Some(v) = vendor {
@@ -4459,7 +4459,7 @@ impl DeviceTracker {
             changed
         } else {
             // New device
-            let mut device = DeviceInfo::new(mac_key.clone(), ip, hostname);
+            let mut device = DeviceInfo::new(mac.to_string(), ip, hostname);
             // Set vendor if we found one
             if let Some(v) = vendor {
                 device.set_vendor(v);
@@ -4469,14 +4469,14 @@ impl DeviceTracker {
                 device.set_device_type(&dt);
             }
             // Insert device first so subsequent persistence sees it.
-            self.devices.insert(mac_key.clone(), device);
+            self.devices.insert(mac.to_string(), device);
             if self.auto_save {
                 // If the main CSV doesn't exist yet, perform an initial full save
                 // so callers that only remove the CSV (but not a journal) get a
                 // consistent persisted file. Otherwise append to the journal.
                 let path = Path::new(&self.csv_path);
                 if path.exists() {
-                    if let Some(d) = self.devices.get(&mac_key) {
+                    if let Some(d) = self.devices.get(mac) {
                         let _ = self.append_device_journal(d);
                     }
                 } else {
@@ -4486,7 +4486,7 @@ impl DeviceTracker {
             true
         };
 
-        if append_needed && let Some(d) = self.devices.get(&mac_key) {
+        if append_needed && let Some(d) = self.devices.get(mac) {
             let _ = self.append_device_journal(d);
         }
 
