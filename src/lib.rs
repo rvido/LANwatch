@@ -3677,10 +3677,10 @@ impl DeviceTracker {
         let mut updated = 0;
         let mac = &packet.source_mac;
 
-        // Collect hostname to IPv4 mappings from A records
-        let mut hostname_to_ipv4: HashMap<&str, String> = HashMap::new();
-        // Collect hostname to IPv6 mappings from AAAA records
-        let mut hostname_to_ipv6: HashMap<&str, String> = HashMap::new();
+        // Track the first hostname and addresses seen (defer String allocation)
+        let mut first_hostname: Option<&str> = None;
+        let mut first_ipv4: Option<std::net::Ipv4Addr> = None;
+        let mut first_ipv6: Option<std::net::Ipv6Addr> = None;
         // Collect services advertised by this device
         let mut services: Vec<&str> = Vec::new();
         let mut seen_services: HashSet<&str> = HashSet::new();
@@ -3688,13 +3688,23 @@ impl DeviceTracker {
         for record in packet.all_records() {
             match &record.data {
                 MdnsRecordDataView::A(addr) => {
-                    // Strip .local suffix for hostname
+                    // Strip .local suffix for hostname and record first IPv4
                     let hostname = record.name.trim_end_matches(".local");
-                    hostname_to_ipv4.insert(hostname, addr.to_string());
+                    if first_hostname.is_none() {
+                        first_hostname = Some(hostname);
+                    }
+                    if first_ipv4.is_none() {
+                        first_ipv4 = Some(*addr);
+                    }
                 }
                 MdnsRecordDataView::Aaaa(addr) => {
                     let hostname = record.name.trim_end_matches(".local");
-                    hostname_to_ipv6.insert(hostname, addr.to_string());
+                    if first_hostname.is_none() {
+                        first_hostname = Some(hostname);
+                    }
+                    if first_ipv6.is_none() {
+                        first_ipv6 = Some(*addr);
+                    }
                 }
                 MdnsRecordDataView::Ptr(_target) => {
                     // PTR records indicate service advertisements
@@ -3728,47 +3738,37 @@ impl DeviceTracker {
             }
         }
 
-        // Get the first hostname for detection purposes
-        let first_hostname = hostname_to_ipv4
-            .keys()
-            .chain(hostname_to_ipv6.keys())
-            .next()
-            .cloned();
-
         // Determine vendor and device type from services and hostname (before borrowing device)
-        // Hostname-based detection takes priority for certain patterns
-        let vendor = Self::detect_vendor_from_hostname(first_hostname.as_deref())
-            .or_else(|| self.detect_vendor_from_services(&services));
-        let device_type = Self::detect_device_type_from_hostname(first_hostname.as_deref())
+        let vendor = Self::detect_vendor_from_hostname(first_hostname).or_else(|| {
+            self.detect_vendor_from_services(&services)
+        });
+        let device_type = Self::detect_device_type_from_hostname(first_hostname)
             .or_else(|| self.detect_device_type_from_services(&services));
 
-        // Get the first IPv6 address if available
-        let ipv6_addr = hostname_to_ipv6.values().next().cloned();
+        // Get first IPv6 address string if available (defer to_string)
+        let ipv6_addr = first_ipv6.map(|ip| ip.to_string());
 
         // Get or create device entry
         let device = self.devices.entry(mac.to_string()).or_insert_with(|| {
-            let ip = hostname_to_ipv4
-                .values()
-                .next()
-                .cloned()
+            let ip = first_ipv4
+                .map(|ip| ip.to_string())
                 .unwrap_or_else(|| packet.source_ip.to_string());
             updated += 1;
             DeviceInfo::new(mac.to_string(), ip, None)
         });
 
-        // Update hostname from A/AAAA records
-        for hostname in hostname_to_ipv4.keys().chain(hostname_to_ipv6.keys()) {
-            if device.hostname.is_none() {
-                device.hostname = Some((*hostname).to_string());
+        // Update hostname from the first seen A/AAAA
+        if device.hostname.is_none() {
+            if let Some(h) = first_hostname {
+                device.hostname = Some(h.to_string());
                 updated += 1;
-                break;
             }
         }
 
         // Update IPv4 if we have a better one
-        if let Some(ipv4) = hostname_to_ipv4.values().next() {
+        if let Some(ipv4) = first_ipv4 {
             if device.ip_address == "0.0.0.0" || device.ip_address.is_empty() {
-                device.ip_address = ipv4.clone();
+                device.ip_address = ipv4.to_string();
                 updated += 1;
             }
         }
@@ -4095,12 +4095,11 @@ impl DeviceTracker {
             _ => None,
         };
 
-        let initial_ip = source_ipv4
-            .map(|ip| ip.to_string())
-            .unwrap_or_else(|| "0.0.0.0".to_string());
-
         let device = self.devices.entry(mac.to_string()).or_insert_with(|| {
             updated += 1;
+            let initial_ip = source_ipv4
+                .map(|ip| ip.to_string())
+                .unwrap_or_else(|| "0.0.0.0".to_string());
             DeviceInfo::new(mac.to_string(), initial_ip, None)
         });
 
@@ -4235,17 +4234,17 @@ impl DeviceTracker {
 
     /// Update or add a device
     fn update_device(&mut self, mac: &str, ip: &str, hostname: Option<&str>) -> bool {
-        // Normalize MAC address to lowercase to avoid duplicates
-        let mac = mac.to_lowercase();
+        // Normalize MAC address to lowercase once to avoid repeated allocations
+        let mac_key = mac.to_lowercase();
         let hostname = hostname.and_then(sanitize_hostname);
         // Look up vendor from OUI registry if available
-        let vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(&mac));
+        let vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(&mac_key));
         // Infer device type from vendor name
         let device_type_from_vendor = vendor
             .as_ref()
             .and_then(|v| Self::detect_device_type_from_vendor(v));
 
-        if let Some(device) = self.devices.get_mut(&mac) {
+        if let Some(device) = self.devices.get_mut(&mac_key) {
             let changed = device.update(ip, hostname.as_deref());
             // Set vendor if not already set and we found one
             if let Some(v) = vendor {
@@ -4262,7 +4261,7 @@ impl DeviceTracker {
             changed
         } else {
             // New device
-            let mut device = DeviceInfo::new(mac.clone(), ip.to_string(), hostname);
+            let mut device = DeviceInfo::new(mac_key.clone(), ip.to_string(), hostname);
             // Set vendor if we found one
             if let Some(v) = vendor {
                 device.set_vendor(v);
@@ -4271,7 +4270,7 @@ impl DeviceTracker {
             if let Some(dt) = device_type_from_vendor {
                 device.set_device_type(&dt);
             }
-            self.devices.insert(mac, device);
+            self.devices.insert(mac_key, device);
             if self.auto_save {
                 // Rewrite CSV to ensure clean state
                 let _ = self.save_to_csv();
