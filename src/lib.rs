@@ -2075,6 +2075,7 @@ fn parse_dns_name(payload: &[u8], start: usize) -> Option<(String, usize)> {
     let mut offset = start;
     let mut jumped = false;
     let mut return_offset = 0;
+    let mut visited_offsets: Vec<usize> = Vec::new();
 
     loop {
         if offset >= payload.len() {
@@ -2094,6 +2095,10 @@ fn parse_dns_name(payload: &[u8], start: usize) -> Option<(String, usize)> {
                 return None;
             }
             let pointer = ((len & 0x3F) << 8) | (payload[offset + 1] as usize);
+            if pointer >= payload.len() || pointer == offset || visited_offsets.contains(&pointer) {
+                return None;
+            }
+            visited_offsets.push(pointer);
             if !jumped {
                 return_offset = offset + 2;
                 jumped = true;
@@ -5826,6 +5831,14 @@ mod tests {
         assert_eq!(packet.questions.len(), 1);
         assert_eq!(packet.questions[0].name, "_http._tcp.local");
         assert_eq!(packet.questions[0].record_type, MdnsRecordType::Ptr);
+    }
+
+    #[test]
+    #[cfg(feature = "mdns")]
+    fn test_parse_dns_name_rejects_pointer_cycle() {
+        let payload = vec![0xC0, 0x02, 0xC0, 0x00];
+
+        assert!(parse_dns_name(&payload, 0).is_none());
     }
 
     #[test]
