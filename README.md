@@ -25,10 +25,10 @@ Add to your `Cargo.toml`. The `http-api` feature is opt-in to keep binary size s
 ```toml
 [dependencies]
 # Smallest binary footprint, core DHCP & MAC tracking only
-lanwatch = "0.1.1"
+lanwatch = "0.1"
 
 # With HTTP API server and active discovery protocols
-lanwatch = { version = "0.1.1", features = ["http-api", "mdns", "ssdp"] }
+lanwatch = { version = "0.1", features = ["http-api", "mdns", "ssdp"] }
 ```
 
 Or clone and build from source. Release builds are automatically optimized for size (`opt-level = "z"`, `strip = true`, `panic = "abort"`):
@@ -117,6 +117,8 @@ The CSV file is flushed in short batches for performance as devices are detected
 
 When mDNS sniffing is enabled, the tool can identify devices based on the services they advertise.
 You can provide a custom services file to enhance identification:
+
+The mDNS parser is defensive against malformed packets, including cyclic compression pointers and oversized DNS header counts.
 
 ```bash
 # Use a custom services file
