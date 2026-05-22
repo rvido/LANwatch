@@ -2027,7 +2027,7 @@ pub fn parse_mdns_payload(
     let mut offset = 12;
 
     // Parse questions
-    let mut questions = Vec::with_capacity(qd_count);
+    let mut questions = Vec::new();
     for _ in 0..qd_count {
         let (name, new_offset) = parse_dns_name(payload, offset)?;
         offset = new_offset;
@@ -2128,7 +2128,7 @@ fn parse_dns_records(
     start: usize,
     count: usize,
 ) -> Option<(Vec<MdnsRecord>, usize)> {
-    let mut records = Vec::with_capacity(count);
+    let mut records = Vec::new();
     let mut offset = start;
 
     for _ in 0..count {
@@ -5839,6 +5839,22 @@ mod tests {
         let payload = vec![0xC0, 0x02, 0xC0, 0x00];
 
         assert!(parse_dns_name(&payload, 0).is_none());
+    }
+
+    #[test]
+    #[cfg(feature = "mdns")]
+    fn test_parse_mdns_payload_rejects_large_header_counts() {
+        let mut payload = vec![0u8; 12];
+        payload[4..6].copy_from_slice(&u16::MAX.to_be_bytes());
+
+        let result = parse_mdns_payload(
+            &payload,
+            "aa:bb:cc:dd:ee:ff".to_string(),
+            std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
+            std::net::IpAddr::V4(MDNS_IPV4_MULTICAST),
+        );
+
+        assert!(result.is_none());
     }
 
     #[test]
