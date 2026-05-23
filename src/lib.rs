@@ -2557,6 +2557,9 @@ impl<'a> SsdpPacketView<'a> {
         if self.view_contains_any(&["apple", "airport", "airplay"]) {
             return Some("Apple".to_string());
         }
+        if self.view_contains_any(&["lenovo", "legion", "thinkpad", "ideapad", "yoga"]) {
+            return Some("Lenovo".to_string());
+        }
         if self.view_contains_any(&["google", "chromecast", "android tv"]) {
             return Some("Google".to_string());
         }
@@ -2619,6 +2622,14 @@ impl<'a> SsdpPacketView<'a> {
     pub fn detect_device_type_from_view(&self) -> Option<String> {
         if self.view_contains_any(&["mediarenderer", "renderer"]) {
             return Some("Media Renderer".to_string());
+        }
+        if self.view_contains_any(&["lenovo", "legion", "thinkpad", "ideapad", "yoga"]) {
+            return Some("Laptop".to_string());
+        }
+        if self.view_contains_any(&["googlecast", "dial-multiscreen-org", "internetgatewaydevice"])
+            && self.view_contains_any(&["windows", "rvd_", "pc", "lenovo", "legion"])
+        {
+            return Some("Laptop".to_string());
         }
         if self.view_contains_any(&["mediaserver"]) {
             return Some("Media Server".to_string());
@@ -3915,6 +3926,11 @@ impl DeviceTracker {
 
         let mut updated = 0;
         let mac = &packet.source_mac;
+        let oui_vendor = self
+            .oui_registry
+            .as_ref()
+            .and_then(|registry| registry.lookup(mac))
+            .map(str::to_string);
 
         // Track the first hostname and addresses seen (defer String allocation)
         let mut first_hostname: Option<&str> = None;
@@ -4025,15 +4041,21 @@ impl DeviceTracker {
 
             // Set vendor if detected
             if let Some(v) = vendor
-                && device.set_vendor(&v)
+                && Self::should_replace_vendor(device.vendor.as_deref(), &v, oui_vendor.as_deref())
             {
+                if device.vendor.as_deref() != Some(&v) {
+                    device.vendor = Some(v.clone());
+                }
                 updated += 1;
             }
 
             // Set device type if detected
             if let Some(t) = device_type
-                && device.set_device_type(&t)
+                && Self::should_replace_device_type(device.device_type.as_deref(), &t)
             {
+                if device.device_type.as_deref() != Some(&t) {
+                    device.device_type = Some(t.clone());
+                }
                 updated += 1;
             }
 
@@ -4055,9 +4077,25 @@ impl DeviceTracker {
     }
 
     /// Detect vendor from hostname patterns
-    #[cfg(feature = "mdns")]
     fn detect_vendor_from_hostname(hostname: Option<&str>) -> Option<String> {
         let hostname = hostname?.to_lowercase();
+
+        if hostname.contains("roborock") {
+            return Some("Roborock".to_string());
+        }
+
+        if hostname.contains("rachio") {
+            return Some("Rachio".to_string());
+        }
+
+        if hostname.contains("lenovo")
+            || hostname.contains("legion")
+            || hostname.contains("thinkpad")
+            || hostname.contains("ideapad")
+            || hostname.contains("yoga")
+        {
+            return Some("Lenovo".to_string());
+        }
 
         // Google/Nest devices often use WICED platform
         if hostname.starts_with("wiced-hap") || hostname.contains("nest") {
@@ -4099,9 +4137,25 @@ impl DeviceTracker {
     }
 
     /// Detect device type from hostname patterns
-    #[cfg(feature = "mdns")]
     fn detect_device_type_from_hostname(hostname: Option<&str>) -> Option<String> {
         let hostname = hostname?.to_lowercase();
+
+        if hostname.contains("roborock") {
+            return Some("Smart Cleaning Device".to_string());
+        }
+
+        if hostname.contains("rachio") {
+            return Some("Smart Watering Device".to_string());
+        }
+
+        if hostname.contains("lenovo")
+            || hostname.contains("legion")
+            || hostname.contains("thinkpad")
+            || hostname.contains("ideapad")
+            || hostname.contains("yoga")
+        {
+            return Some("Laptop".to_string());
+        }
 
         // Google Pixel phones - check before other patterns
         if hostname.contains("pixel") {
@@ -4236,6 +4290,35 @@ impl DeviceTracker {
         None
     }
 
+    fn should_replace_vendor(current: Option<&str>, incoming: &str, oui_vendor: Option<&str>) -> bool {
+        match current {
+            None => true,
+            Some(existing) if existing.eq_ignore_ascii_case(incoming) => false,
+            Some(existing) => oui_vendor
+                .map(|oui| existing.eq_ignore_ascii_case(oui))
+                .unwrap_or(false),
+        }
+    }
+
+    fn should_replace_device_type(current: Option<&str>, incoming: &str) -> bool {
+        match current {
+            None => true,
+            Some(existing) if existing.eq_ignore_ascii_case(incoming) => false,
+            Some(existing) => {
+                let existing = existing.to_ascii_lowercase();
+                let incoming = incoming.to_ascii_lowercase();
+                matches!(
+                    incoming.as_str(),
+                    "smart watering device" | "Smart Cleaning Device" | "laptop"
+                )
+                    && matches!(
+                        existing.as_str(),
+                        "security camera" | "router" | "Smart Home Device" | "unknown"
+                    )
+            }
+        }
+    }
+
     /// Detect device type from a list of services
     #[cfg(feature = "mdns")]
     fn detect_device_type_from_services(&self, services: &[&str]) -> Option<String> {
@@ -4325,6 +4408,11 @@ impl DeviceTracker {
         let mut updated = 0;
         let mac = &packet.source_mac;
         let services = packet.service_terms();
+        let oui_vendor = self
+            .oui_registry
+            .as_ref()
+            .and_then(|registry| registry.lookup(mac))
+            .map(str::to_string);
 
         let vendor = packet.detect_vendor_from_view();
         let device_type = packet.detect_device_type_from_view();
@@ -4369,14 +4457,20 @@ impl DeviceTracker {
             }
 
             if let Some(v) = vendor
-                && device.set_vendor(&v)
+                && Self::should_replace_vendor(device.vendor.as_deref(), &v, oui_vendor.as_deref())
             {
+                if device.vendor.as_deref() != Some(&v) {
+                    device.vendor = Some(v.clone());
+                }
                 updated += 1;
             }
 
             if let Some(t) = device_type
-                && device.set_device_type(&t)
+                && Self::should_replace_device_type(device.device_type.as_deref(), &t)
             {
+                if device.device_type.as_deref() != Some(&t) {
+                    device.device_type = Some(t.clone());
+                }
                 updated += 1;
             }
 
@@ -4397,38 +4491,46 @@ impl DeviceTracker {
     }
 
     /// Detect device type from vendor name
-    fn detect_device_type_from_vendor(vendor: &str) -> Option<String> {
+    fn detect_device_type_from_vendor(vendor: &str) -> Option<&'static str> {
         let v = vendor.to_lowercase();
+
+        if v.contains("lenovo") {
+            return Some("Laptop");
+        }
+
+        if v.contains("eero") {
+            return Some("Router");
+        }
 
         // Security systems
         if v.contains("simplisafe") {
-            return Some("Security System".to_string());
+            return Some("Security System");
         }
         if v.contains("ring") && !v.contains("engineering") {
-            return Some("Security Camera".to_string());
+            return Some("Security Camera");
         }
         if v.contains("arlo") {
-            return Some("Security Camera".to_string());
+            return Some("Security Camera");
         }
         if v.contains("nest") {
-            return Some("Smart Home Device".to_string());
+            return Some("Smart Home Device");
         }
         if v.contains("alarm") || v.contains("security") {
-            return Some("Security System".to_string());
+            return Some("Security System");
         }
 
         // Smart home devices
         if v.contains("tuya") || v.contains("smartlife") {
-            return Some("Smart Home Device".to_string());
+            return Some("Smart Home Device");
         }
         if v.contains("philips hue") || v.contains("signify") {
-            return Some("Smart Light".to_string());
+            return Some("Smart Light");
         }
         if v.contains("sonos") {
-            return Some("Speaker".to_string());
+            return Some("Speaker");
         }
         if v.contains("ecobee") || v.contains("honeywell") {
-            return Some("Thermostat".to_string());
+            return Some("Thermostat");
         }
 
         // Networking equipment
@@ -4437,49 +4539,49 @@ impl DeviceTracker {
             || v.contains("tp-link")
             || v.contains("linksys")
         {
-            return Some("Network Equipment".to_string());
+            return Some("Network Equipment");
         }
         if v.contains("cisco") {
-            return Some("Network Equipment".to_string());
+            return Some("Network Equipment");
         }
 
         // Gaming consoles
         if v.contains("nintendo") {
-            return Some("Gaming Console".to_string());
+            return Some("Gaming Console");
         }
         if v.contains("sony") && (v.contains("playstation") || v.contains("entertainment")) {
-            return Some("Gaming Console".to_string());
+            return Some("Gaming Console");
         }
         if v.contains("microsoft") && v.contains("xbox") {
-            return Some("Gaming Console".to_string());
+            return Some("Gaming Console");
         }
 
         // IoT / Microcontrollers
         if v.contains("espressif") {
-            return Some("IoT Device".to_string());
+            return Some("IoT Device");
         }
         if v.contains("raspberry") {
-            return Some("Raspberry Pi".to_string());
+            return Some("Raspberry Pi");
         }
         if v.contains("arduino") {
-            return Some("Microcontroller".to_string());
+            return Some("Microcontroller");
         }
 
         // Printers
         if v.contains("hp") && v.contains("print") {
-            return Some("Printer".to_string());
+            return Some("Printer");
         }
         if v.contains("canon")
             || v.contains("epson")
             || v.contains("brother")
             || v.contains("lexmark")
         {
-            return Some("Printer".to_string());
+            return Some("Printer");
         }
 
         // Storage
         if v.contains("synology") || v.contains("qnap") || v.contains("western digital") {
-            return Some("NAS".to_string());
+            return Some("NAS");
         }
 
         None
@@ -4490,24 +4592,39 @@ impl DeviceTracker {
     /// This method assumes `mac` is already normalized to lowercase (which all ingestion paths ensure).
     fn update_device(&mut self, mac: &str, ip: IpAddr, hostname: Option<&str>) -> bool {
         let hostname = hostname.and_then(sanitize_hostname);
-        // Look up vendor from OUI registry if available
-        let vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(mac));
-        // Infer device type from vendor name
+        let oui_vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(mac));
+        let hostname_vendor = Self::detect_vendor_from_hostname(hostname.as_deref());
+        // Prefer hostname-derived identity over generic OUI data when both are present.
+        let vendor = hostname_vendor
+            .or_else(|| oui_vendor.map(str::to_string));
+        let device_type_from_hostname = Self::detect_device_type_from_hostname(hostname.as_deref());
         let device_type_from_vendor = vendor
-            .as_ref()
-            .and_then(|v| Self::detect_device_type_from_vendor(v));
+            .as_deref()
+            .and_then(Self::detect_device_type_from_vendor);
 
         // We'll defer any journal append until after mutable borrows are dropped
         let mut append_needed = false;
         let result = if let Some(device) = self.devices.get_mut(mac) {
             let changed = device.update(ip, hostname.as_deref());
-            // Set vendor if not already set and we found one
-            if let Some(v) = vendor {
-                device.set_vendor(v);
+            // Allow hostname-derived identity to replace a generic OUI vendor.
+            if let Some(v) = vendor.as_deref()
+                && Self::should_replace_vendor(device.vendor.as_deref(), v, oui_vendor)
+            {
+                let previous = device.vendor.as_deref();
+                if previous != Some(v) {
+                    device.vendor = Some(v.to_string());
+                }
+            }
+            if let Some(dt) = device_type_from_hostname {
+                if Self::should_replace_device_type(device.device_type.as_deref(), &dt) {
+                    device.device_type = Some(dt);
+                }
             }
             // Set device type from vendor if not already set
-            if let Some(dt) = device_type_from_vendor {
-                device.set_device_type(&dt);
+            if let Some(dt) = device_type_from_vendor
+                && Self::should_replace_device_type(device.device_type.as_deref(), &dt)
+            {
+                device.device_type = Some(dt.to_string());
             }
             if self.auto_save {
                 append_needed = true;
@@ -4516,13 +4633,15 @@ impl DeviceTracker {
         } else {
             // New device
             let mut device = DeviceInfo::new(mac.to_string(), ip, hostname);
-            // Set vendor if we found one
-            if let Some(v) = vendor {
-                device.set_vendor(v);
+            if let Some(v) = vendor.as_deref() {
+                device.vendor = Some(v.to_string());
+            }
+            if let Some(dt) = device_type_from_hostname {
+                device.device_type = Some(dt);
             }
             // Set device type from vendor
             if let Some(dt) = device_type_from_vendor {
-                device.set_device_type(&dt);
+                device.device_type = Some(dt.to_string());
             }
             // Insert device first so subsequent persistence sees it.
             self.devices.insert(mac.to_string(), device);
@@ -5331,6 +5450,128 @@ mod tests {
         let is_new = tracker.update_from_dhcpv6(&packet);
         assert!(!is_new); // Should return false - can't track without DUID
         assert_eq!(tracker.device_count(), 0);
+
+        let _ = std::fs::remove_file(temp_path);
+    }
+
+    #[test]
+    fn test_device_tracker_prefers_hostname_over_oui_vendor() {
+        let temp_path = "/tmp/lanwatch_test_lenovo_fingerprint.csv";
+        let _ = std::fs::remove_file(temp_path);
+
+        let mut tracker = DeviceTracker::new(temp_path).unwrap();
+        tracker.set_oui_registry(OuiRegistry::new());
+
+        let packet = Dhcpv4Packet {
+            source_ip: Ipv4Addr::new(192, 168, 4, 112),
+            dest_ip: Ipv4Addr::new(255, 255, 255, 255),
+            source_port: 68,
+            dest_port: 67,
+            operation: Dhcpv4Operation::BootRequest,
+            client_mac: [0x48, 0x45, 0xE6, 0x48, 0x4C, 0x85],
+            message_type: Some(Dhcpv4MessageType::Discover),
+            hostname: Some("RVD_Legion".to_string()),
+            requested_ip: Some(Ipv4Addr::new(192, 168, 4, 112)),
+        };
+
+        tracker.update_from_dhcpv4(&packet);
+
+        let device = tracker.devices().get("48:45:e6:48:4c:85").unwrap();
+        assert_eq!(device.vendor.as_deref(), Some("Lenovo"));
+        assert_eq!(device.device_type.as_deref(), Some("Laptop"));
+
+        let _ = std::fs::remove_file(temp_path);
+    }
+
+    #[test]
+    fn test_device_tracker_reclassifies_rachio_from_loaded_csv() {
+        let temp_path = "/tmp/lanwatch_test_rachio_reclassify.csv";
+        let _ = std::fs::remove_file(temp_path);
+
+        let seeded = "first_seen,last_seen,mac_address,ip_address,ipv6_address,hostname,device_type,vendor,services\n2026-05-22T16:50:19Z,2026-05-22T23:52:20Z,9c:50:d1:18:8d:cc,192.168.4.36,\"\",\"rachio-188dcc\",\"Security Camera\",\"Murata Manufacturing Co., Ltd.\",\"\"\n";
+        std::fs::write(temp_path, seeded).unwrap();
+
+        let mut tracker = DeviceTracker::new(temp_path).unwrap();
+        tracker.set_oui_registry(OuiRegistry::new());
+
+        let packet = Dhcpv4Packet {
+            source_ip: Ipv4Addr::new(192, 168, 4, 36),
+            dest_ip: Ipv4Addr::new(255, 255, 255, 255),
+            source_port: 68,
+            dest_port: 67,
+            operation: Dhcpv4Operation::BootRequest,
+            client_mac: [0x9C, 0x50, 0xD1, 0x18, 0x8D, 0xCC],
+            message_type: Some(Dhcpv4MessageType::Discover),
+            hostname: Some("rachio-188dcc".to_string()),
+            requested_ip: Some(Ipv4Addr::new(192, 168, 4, 36)),
+        };
+
+        tracker.update_from_dhcpv4(&packet);
+
+        let device = tracker.devices().get("9c:50:d1:18:8d:cc").unwrap();
+        assert_eq!(device.vendor.as_deref(), Some("Rachio"));
+        assert_eq!(device.device_type.as_deref(), Some("Smart Watering Device"));
+
+        let _ = std::fs::remove_file(temp_path);
+    }
+
+    #[test]
+    fn test_device_tracker_reclassifies_roborock_from_loaded_csv() {
+        let temp_path = "/tmp/lanwatch_test_roborock_reclassify.csv";
+        let _ = std::fs::remove_file(temp_path);
+
+        let seeded = "first_seen,last_seen,mac_address,ip_address,ipv6_address,hostname,device_type,vendor,services\n2026-05-22T16:50:19Z,2026-05-22T23:52:20Z,b0:4a:39:e3:3f:da,192.168.7.193,\"\",\"roborock-vacuum-a75\",\"Security Camera\",\"Beijing Roborock Technology Co., Ltd.\",\"\"\n";
+        std::fs::write(temp_path, seeded).unwrap();
+
+        let mut tracker = DeviceTracker::new(temp_path).unwrap();
+        tracker.set_oui_registry(OuiRegistry::new());
+
+        let packet = Dhcpv4Packet {
+            source_ip: Ipv4Addr::new(192, 168, 7, 193),
+            dest_ip: Ipv4Addr::new(255, 255, 255, 255),
+            source_port: 68,
+            dest_port: 67,
+            operation: Dhcpv4Operation::BootRequest,
+            client_mac: [0xB0, 0x4A, 0x39, 0xE3, 0x3F, 0xDA],
+            message_type: Some(Dhcpv4MessageType::Discover),
+            hostname: Some("roborock-vacuum-a75".to_string()),
+            requested_ip: Some(Ipv4Addr::new(192, 168, 7, 193)),
+        };
+
+        tracker.update_from_dhcpv4(&packet);
+
+        let device = tracker.devices().get("b0:4a:39:e3:3f:da").unwrap();
+        assert_eq!(device.vendor.as_deref(), Some("Roborock"));
+        assert_eq!(device.device_type.as_deref(), Some("Smart Cleaning Device"));
+
+        let _ = std::fs::remove_file(temp_path);
+    }
+
+    #[test]
+    fn test_device_tracker_uses_oui_for_eero_when_no_hostname_present() {
+        let temp_path = "/tmp/lanwatch_test_eero_oui.csv";
+        let _ = std::fs::remove_file(temp_path);
+
+        let mut tracker = DeviceTracker::new(temp_path).unwrap();
+        tracker.set_oui_registry(OuiRegistry::new());
+
+        let packet = Dhcpv4Packet {
+            source_ip: Ipv4Addr::new(192, 168, 7, 1),
+            dest_ip: Ipv4Addr::new(255, 255, 255, 255),
+            source_port: 68,
+            dest_port: 67,
+            operation: Dhcpv4Operation::BootRequest,
+            client_mac: [0xDC, 0x69, 0xB5, 0x95, 0x58, 0xB2],
+            message_type: Some(Dhcpv4MessageType::Discover),
+            hostname: None,
+            requested_ip: Some(Ipv4Addr::new(192, 168, 7, 1)),
+        };
+
+        tracker.update_from_dhcpv4(&packet);
+
+        let device = tracker.devices().get("dc:69:b5:95:58:b2").unwrap();
+        assert_eq!(device.vendor.as_deref(), Some("eero inc."));
+        assert_eq!(device.device_type.as_deref(), Some("Router"));
 
         let _ = std::fs::remove_file(temp_path);
     }
