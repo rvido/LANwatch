@@ -1440,25 +1440,36 @@ impl OuiRegistry {
 
     /// Normalize a MAC address to OUI format (first 3 octets, uppercase, colon-separated)
     fn normalize_mac(mac: &str) -> String {
-        // Remove common separators and convert to uppercase
-        let clean: String = mac
-            .to_uppercase()
-            .chars()
-            .filter(|c| c.is_ascii_hexdigit())
-            .collect();
+        let mut buf = [0u8; 6];
+        let mut len = 0;
 
-        // Take first 6 hex characters (3 octets = OUI)
-        let oui = if clean.len() >= 6 {
-            &clean[..6]
-        } else {
-            &clean
-        };
+        for c in mac.chars() {
+            if len >= 6 {
+                break;
+            }
+            if c.is_ascii_hexdigit() {
+                buf[len] = c.to_ascii_uppercase() as u8;
+                len += 1;
+            }
+        }
 
-        // Format as XX:XX:XX
-        if oui.len() >= 6 {
-            format!("{}:{}:{}", &oui[0..2], &oui[2..4], &oui[4..6])
+        if len >= 6 {
+            let mut s = String::with_capacity(8);
+            s.push(buf[0] as char);
+            s.push(buf[1] as char);
+            s.push(':');
+            s.push(buf[2] as char);
+            s.push(buf[3] as char);
+            s.push(':');
+            s.push(buf[4] as char);
+            s.push(buf[5] as char);
+            s
         } else {
-            oui.to_string()
+            let mut s = String::with_capacity(len);
+            for &b in &buf[..len] {
+                s.push(b as char);
+            }
+            s
         }
     }
 
@@ -4619,14 +4630,14 @@ impl DeviceTracker {
                     device.vendor = Some(v.to_string());
                 }
             }
-            if let Some(dt) = device_type_from_hostname {
-                if Self::should_replace_device_type(device.device_type.as_deref(), &dt) {
-                    device.device_type = Some(dt.to_string());
-                }
+            if let Some(dt) = device_type_from_hostname
+                && Self::should_replace_device_type(device.device_type.as_deref(), dt)
+            {
+                device.device_type = Some(dt.to_string());
             }
             // Set device type from vendor if not already set
             if let Some(dt) = device_type_from_vendor
-                && Self::should_replace_device_type(device.device_type.as_deref(), &dt)
+                && Self::should_replace_device_type(device.device_type.as_deref(), dt)
             {
                 device.device_type = Some(dt.to_string());
             }
