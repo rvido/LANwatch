@@ -3826,6 +3826,7 @@ impl DeviceTracker {
     /// Append a pre-serialized CSV line to the journal. This helper lets callers
     /// prepare the CSV string while holding mutable borrows to device entries,
     /// then write it after the borrow ends to avoid borrowing `self` twice.
+    #[cfg(any(feature = "mdns", feature = "ssdp"))]
     fn append_journal_line(&self, line: &str) -> std::io::Result<()> {
         use std::fs::OpenOptions;
         let jpath = self.journal_path();
@@ -3995,8 +3996,10 @@ impl DeviceTracker {
 
         // Determine vendor and device type from services and hostname (before borrowing device)
         let vendor = Self::detect_vendor_from_hostname(first_hostname)
+            .map(str::to_string)
             .or_else(|| self.detect_vendor_from_services(&services));
         let device_type = Self::detect_device_type_from_hostname(first_hostname)
+            .map(str::to_string)
             .or_else(|| self.detect_device_type_from_services(&services));
 
         let ipv6_addr = first_ipv6;
@@ -4077,15 +4080,15 @@ impl DeviceTracker {
     }
 
     /// Detect vendor from hostname patterns
-    fn detect_vendor_from_hostname(hostname: Option<&str>) -> Option<String> {
+    fn detect_vendor_from_hostname(hostname: Option<&str>) -> Option<&'static str> {
         let hostname = hostname?.to_lowercase();
 
         if hostname.contains("roborock") {
-            return Some("Roborock".to_string());
+            return Some("Roborock");
         }
 
         if hostname.contains("rachio") {
-            return Some("Rachio".to_string());
+            return Some("Rachio");
         }
 
         if hostname.contains("lenovo")
@@ -4094,17 +4097,17 @@ impl DeviceTracker {
             || hostname.contains("ideapad")
             || hostname.contains("yoga")
         {
-            return Some("Lenovo".to_string());
+            return Some("Lenovo");
         }
 
         // Google/Nest devices often use WICED platform
         if hostname.starts_with("wiced-hap") || hostname.contains("nest") {
-            return Some("Google".to_string());
+            return Some("Google");
         }
 
         // Google Pixel phones
         if hostname.contains("pixel") {
-            return Some("Google".to_string());
+            return Some("Google");
         }
 
         // Apple devices
@@ -4115,37 +4118,37 @@ impl DeviceTracker {
             || hostname.contains("mac-mini")
             || hostname.contains("apple")
         {
-            return Some("Apple".to_string());
+            return Some("Apple");
         }
 
         // Samsung devices
         if hostname.contains("samsung") || hostname.contains("galaxy") {
-            return Some("Samsung".to_string());
+            return Some("Samsung");
         }
 
         // Android devices
         if hostname.starts_with("android") || hostname.starts_with("android_") {
-            return Some("Google".to_string());
+            return Some("Google");
         }
 
         // HP printers (NPI prefix)
         if hostname.starts_with("npi") {
-            return Some("HP".to_string());
+            return Some("HP");
         }
 
         None
     }
 
     /// Detect device type from hostname patterns
-    fn detect_device_type_from_hostname(hostname: Option<&str>) -> Option<String> {
+    fn detect_device_type_from_hostname(hostname: Option<&str>) -> Option<&'static str> {
         let hostname = hostname?.to_lowercase();
 
         if hostname.contains("roborock") {
-            return Some("Smart Cleaning Device".to_string());
+            return Some("Smart Cleaning Device");
         }
 
         if hostname.contains("rachio") {
-            return Some("Smart Watering Device".to_string());
+            return Some("Smart Watering Device");
         }
 
         if hostname.contains("lenovo")
@@ -4154,36 +4157,36 @@ impl DeviceTracker {
             || hostname.contains("ideapad")
             || hostname.contains("yoga")
         {
-            return Some("Laptop".to_string());
+            return Some("Laptop");
         }
 
         // Google Pixel phones - check before other patterns
         if hostname.contains("pixel") {
-            return Some("Pixel Phone".to_string());
+            return Some("Pixel Phone");
         }
 
         // Google/Nest thermostats use WICED-hap prefix
         if hostname.starts_with("wiced-hap") {
-            return Some("Thermostat".to_string());
+            return Some("Thermostat");
         }
 
         // Nest devices
         if hostname.contains("nest") {
             if hostname.contains("thermostat") {
-                return Some("Thermostat".to_string());
+                return Some("Thermostat");
             }
             if hostname.contains("cam") || hostname.contains("doorbell") {
-                return Some("Security Camera".to_string());
+                return Some("Security Camera");
             }
-            return Some("Smart Home Device".to_string());
+            return Some("Smart Home Device");
         }
 
         // iPhones/iPads
         if hostname.contains("iphone") {
-            return Some("Apple iPhone".to_string());
+            return Some("Apple iPhone");
         }
         if hostname.contains("ipad") {
-            return Some("Apple iPad".to_string());
+            return Some("Apple iPad");
         }
 
         // Macs
@@ -4192,17 +4195,17 @@ impl DeviceTracker {
             || hostname.contains("mac-mini")
             || hostname.contains("mac-pro")
         {
-            return Some("Mac".to_string());
+            return Some("Mac");
         }
 
         // HP printers (NPI prefix = Network Peripheral Interface)
         if hostname.starts_with("npi") {
-            return Some("Printer".to_string());
+            return Some("Printer");
         }
 
         // Android phones
         if hostname.starts_with("android") || hostname.starts_with("android_") {
-            return Some("Android Phone".to_string());
+            return Some("Android Phone");
         }
 
         None
@@ -4596,6 +4599,7 @@ impl DeviceTracker {
         let hostname_vendor = Self::detect_vendor_from_hostname(hostname.as_deref());
         // Prefer hostname-derived identity over generic OUI data when both are present.
         let vendor = hostname_vendor
+            .map(str::to_string)
             .or_else(|| oui_vendor.map(str::to_string));
         let device_type_from_hostname = Self::detect_device_type_from_hostname(hostname.as_deref());
         let device_type_from_vendor = vendor
@@ -4617,7 +4621,7 @@ impl DeviceTracker {
             }
             if let Some(dt) = device_type_from_hostname {
                 if Self::should_replace_device_type(device.device_type.as_deref(), &dt) {
-                    device.device_type = Some(dt);
+                    device.device_type = Some(dt.to_string());
                 }
             }
             // Set device type from vendor if not already set
@@ -4637,7 +4641,7 @@ impl DeviceTracker {
                 device.vendor = Some(v.to_string());
             }
             if let Some(dt) = device_type_from_hostname {
-                device.device_type = Some(dt);
+                device.device_type = Some(dt.to_string());
             }
             // Set device type from vendor
             if let Some(dt) = device_type_from_vendor {
@@ -5331,6 +5335,7 @@ mod tests {
     fn test_device_tracker_new_device() {
         let temp_path = "/tmp/lanwatch_test_devices.csv";
         let _ = std::fs::remove_file(temp_path); // Clean up any existing file
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
 
         let mut tracker = DeviceTracker::new(temp_path).unwrap();
 
@@ -5358,6 +5363,7 @@ mod tests {
 
         // Clean up
         let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
     }
 
     #[test]
