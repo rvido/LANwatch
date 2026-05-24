@@ -4053,8 +4053,9 @@ impl DeviceTracker {
                 }
             }
 
-            // Set vendor if detected
-            if let Some(v) = vendor
+            // Set vendor if detected (or fall back to OUI vendor)
+            let vendor_to_apply = vendor.or_else(|| oui_vendor.clone());
+            if let Some(v) = vendor_to_apply
                 && Self::should_replace_vendor(device.vendor.as_deref(), &v, oui_vendor.as_deref())
             {
                 if device.vendor.as_deref() != Some(&v) {
@@ -4137,6 +4138,14 @@ impl DeviceTracker {
             return Some("Samsung");
         }
 
+        // Motorola devices
+        if hostname.contains("moto")
+            || hostname.contains("stylus")
+            || hostname.contains("motorola")
+        {
+            return Some("Motorola");
+        }
+
         // Android devices
         if hostname.starts_with("android") || hostname.starts_with("android_") {
             return Some("Google");
@@ -4212,6 +4221,14 @@ impl DeviceTracker {
         // HP printers (NPI prefix = Network Peripheral Interface)
         if hostname.starts_with("npi") {
             return Some("Printer");
+        }
+
+        // Motorola devices
+        if hostname.contains("moto")
+            || hostname.contains("stylus")
+            || hostname.contains("motorola")
+        {
+            return Some("Android Phone");
         }
 
         // Android phones
@@ -4323,12 +4340,20 @@ impl DeviceTracker {
                 let incoming = incoming.to_ascii_lowercase();
                 matches!(
                     incoming.as_str(),
-                    "smart watering device" | "Smart Cleaning Device" | "laptop"
+                    "smart watering device"
+                        | "smart cleaning device"
+                        | "laptop"
+                        | "android phone"
+                        | "pixel phone"
+                        | "apple iphone"
+                ) && matches!(
+                    existing.as_str(),
+                    "security camera"
+                        | "router"
+                        | "smart home device"
+                        | "unknown"
+                        | "chromecast"
                 )
-                    && matches!(
-                        existing.as_str(),
-                        "security camera" | "router" | "Smart Home Device" | "unknown"
-                    )
             }
         }
     }
@@ -4470,7 +4495,9 @@ impl DeviceTracker {
                 }
             }
 
-            if let Some(v) = vendor
+            // Set vendor if detected (or fall back to OUI vendor)
+            let vendor_to_apply = vendor.or_else(|| oui_vendor.clone());
+            if let Some(v) = vendor_to_apply
                 && Self::should_replace_vendor(device.vendor.as_deref(), &v, oui_vendor.as_deref())
             {
                 if device.vendor.as_deref() != Some(&v) {
@@ -4606,56 +4633,75 @@ impl DeviceTracker {
     /// This method assumes `mac` is already normalized to lowercase (which all ingestion paths ensure).
     fn update_device(&mut self, mac: &str, ip: IpAddr, hostname: Option<&str>) -> bool {
         let hostname = hostname.and_then(sanitize_hostname);
-        let oui_vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(mac));
         let hostname_vendor = Self::detect_vendor_from_hostname(hostname.as_deref());
-        // Prefer hostname-derived identity over generic OUI data when both are present.
-        let vendor = hostname_vendor
-            .map(str::to_string)
-            .or_else(|| oui_vendor.map(str::to_string));
         let device_type_from_hostname = Self::detect_device_type_from_hostname(hostname.as_deref());
-        let device_type_from_vendor = vendor
-            .as_deref()
-            .and_then(Self::detect_device_type_from_vendor);
 
         // We'll defer any journal append until after mutable borrows are dropped
         let mut append_needed = false;
         let result = if let Some(device) = self.devices.get_mut(mac) {
             let changed = device.update(ip, hostname.as_deref());
-            // Allow hostname-derived identity to replace a generic OUI vendor.
-            if let Some(v) = vendor.as_deref()
-                && Self::should_replace_vendor(device.vendor.as_deref(), v, oui_vendor)
-            {
-                let previous = device.vendor.as_deref();
-                if previous != Some(v) {
+
+            // Defer OUI vendor lookup unless we have an incoming hostname vendor that differs,
+            // or if the existing device vendor is None and we want to populate it.
+            let mut vendor_to_apply = hostname_vendor;
+            let mut oui_vendor = None;
+
+            if vendor_to_apply.is_none() && device.vendor.is_none() {
+                oui_vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(mac));
+                vendor_to_apply = oui_vendor;
+            }
+
+            if let Some(v) = vendor_to_apply {
+                if device.vendor.is_some()
+                    && device.vendor.as_deref() != Some(v)
+                    && oui_vendor.is_none()
+                {
+                    oui_vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(mac));
+                }
+
+                if Self::should_replace_vendor(device.vendor.as_deref(), v, oui_vendor) {
                     device.vendor = Some(v.to_string());
                 }
             }
+
             if let Some(dt) = device_type_from_hostname
                 && Self::should_replace_device_type(device.device_type.as_deref(), dt)
             {
                 device.device_type = Some(dt.to_string());
             }
-            // Set device type from vendor if not already set
-            if let Some(dt) = device_type_from_vendor
+
+            // Set device type from vendor if not already set or replacement is allowed
+            if let Some(v) = device.vendor.as_deref()
+                && let Some(dt) = Self::detect_device_type_from_vendor(v)
                 && Self::should_replace_device_type(device.device_type.as_deref(), dt)
             {
                 device.device_type = Some(dt.to_string());
             }
+
             if self.auto_save {
                 append_needed = true;
             }
             changed
         } else {
             // New device
+            let vendor = hostname_vendor
+                .map(str::to_string)
+                .or_else(|| {
+                    self.oui_registry.as_ref()
+                        .and_then(|r| r.lookup(mac))
+                        .map(str::to_string)
+                });
+
             let mut device = DeviceInfo::new(mac.to_string(), ip, hostname);
-            if let Some(v) = vendor.as_deref() {
-                device.vendor = Some(v.to_string());
+            if let Some(ref v) = vendor {
+                device.vendor = Some(v.clone());
             }
             if let Some(dt) = device_type_from_hostname {
                 device.device_type = Some(dt.to_string());
             }
-            // Set device type from vendor
-            if let Some(dt) = device_type_from_vendor {
+            if let Some(ref v) = vendor
+                && let Some(dt) = Self::detect_device_type_from_vendor(v)
+            {
                 device.device_type = Some(dt.to_string());
             }
             // Insert device first so subsequent persistence sees it.
@@ -5589,6 +5635,93 @@ mod tests {
         let device = tracker.devices().get("dc:69:b5:95:58:b2").unwrap();
         assert_eq!(device.vendor.as_deref(), Some("eero inc."));
         assert_eq!(device.device_type.as_deref(), Some("Router"));
+
+        let _ = std::fs::remove_file(temp_path);
+    }
+
+    #[test]
+    #[cfg(feature = "mdns")]
+    fn test_device_tracker_uses_oui_for_eero_in_mdns_when_no_vendor_present() {
+        let temp_path = "/tmp/lanwatch_test_eero_mdns_oui.csv";
+        let _ = std::fs::remove_file(temp_path);
+
+        let mut tracker = DeviceTracker::new(temp_path).unwrap();
+        tracker.set_oui_registry(OuiRegistry::new());
+
+        let packet = MdnsPacket {
+            source_mac: "dc:69:b5:95:58:b2".to_string(),
+            source_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 7, 10)),
+            dest_ip: IpAddr::V4(Ipv4Addr::new(224, 0, 0, 251)),
+            transaction_id: 1234,
+            is_response: true,
+            questions: vec![],
+            answers: vec![],
+            authority: vec![],
+            additional: vec![],
+        };
+
+        tracker.update_from_mdns(&packet);
+
+        let device = tracker.devices().get("dc:69:b5:95:58:b2").unwrap();
+        assert_eq!(device.vendor.as_deref(), Some("eero inc."));
+
+        let _ = std::fs::remove_file(temp_path);
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_device_tracker_uses_oui_for_eero_in_ssdp_when_no_vendor_present() {
+        let temp_path = "/tmp/lanwatch_test_eero_ssdp_oui.csv";
+        let _ = std::fs::remove_file(temp_path);
+
+        let mut tracker = DeviceTracker::new(temp_path).unwrap();
+        tracker.set_oui_registry(OuiRegistry::new());
+
+        let packet = SsdpPacket {
+            source_mac: "dc:69:b5:95:58:b2".to_string(),
+            source_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 7, 10)),
+            dest_ip: IpAddr::V4(Ipv4Addr::new(239, 255, 255, 250)),
+            message_type: SsdpMessageType::Response,
+            start_line: "HTTP/1.1 200 OK".to_string(),
+            headers: HashMap::new(),
+        };
+
+        tracker.update_from_ssdp(&packet);
+
+        let device = tracker.devices().get("dc:69:b5:95:58:b2").unwrap();
+        assert_eq!(device.vendor.as_deref(), Some("eero inc."));
+
+        let _ = std::fs::remove_file(temp_path);
+    }
+
+    #[test]
+    fn test_device_tracker_reclassifies_motorola_from_chromecast() {
+        let temp_path = "/tmp/lanwatch_test_motorola.csv";
+        let _ = std::fs::remove_file(temp_path);
+
+        let mut tracker = DeviceTracker::new(temp_path).unwrap();
+        tracker.set_oui_registry(OuiRegistry::new());
+
+        // 1. Initially seen as Chromecast with an OUI-derived vendor (eero inc.)
+        let mut device = DeviceInfo::new(
+            "dc:69:b5:33:44:55".to_string(),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)),
+            None,
+        );
+        device.device_type = Some("Chromecast".to_string());
+        device.vendor = Some("eero inc.".to_string());
+        tracker.devices.insert(device.mac_address.clone(), device);
+
+        // 2. Updated with Motorola hostname - should override Chromecast type and eero vendor!
+        tracker.update_device(
+            "dc:69:b5:33:44:55",
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)),
+            Some("Moto-G-Stylus-2025"),
+        );
+
+        let device = tracker.devices().get("dc:69:b5:33:44:55").unwrap();
+        assert_eq!(device.vendor.as_deref(), Some("Motorola"));
+        assert_eq!(device.device_type.as_deref(), Some("Android Phone"));
 
         let _ = std::fs::remove_file(temp_path);
     }
