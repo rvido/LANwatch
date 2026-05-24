@@ -250,24 +250,35 @@ fn start_dhcp_worker(
                         }
                     };
 
-                    let process_event = |ev: &DhcpEvent, tracker: &mut DeviceTracker, pending_updates: &mut usize| {
-                        match ev {
-                            DhcpEvent::V4(packet) => {
-                                let is_new_or_updated = tracker.update_from_dhcpv4(packet);
-                                if is_new_or_updated {
-                                    *pending_updates += 1;
+                    let process_event =
+                        |ev: &DhcpEvent,
+                         tracker: &mut DeviceTracker,
+                         pending_updates: &mut usize| {
+                            match ev {
+                                DhcpEvent::V4(packet) => {
+                                    let is_new_or_updated = tracker.update_from_dhcpv4(packet);
+                                    if is_new_or_updated {
+                                        *pending_updates += 1;
+                                    }
+                                    print_dhcpv4_packet(
+                                        packet,
+                                        is_new_or_updated,
+                                        tracker.device_count(),
+                                    );
                                 }
-                                print_dhcpv4_packet(packet, is_new_or_updated, tracker.device_count());
-                            }
-                            DhcpEvent::V6(packet) => {
-                                let is_new_or_updated = tracker.update_from_dhcpv6(packet);
-                                if is_new_or_updated {
-                                    *pending_updates += 1;
+                                DhcpEvent::V6(packet) => {
+                                    let is_new_or_updated = tracker.update_from_dhcpv6(packet);
+                                    if is_new_or_updated {
+                                        *pending_updates += 1;
+                                    }
+                                    print_dhcpv6_packet(
+                                        packet,
+                                        is_new_or_updated,
+                                        tracker.device_count(),
+                                    );
                                 }
-                                print_dhcpv6_packet(packet, is_new_or_updated, tracker.device_count());
                             }
-                        }
-                    };
+                        };
 
                     process_event(&first_event, &mut tracker, &mut pending_updates);
 
@@ -317,44 +328,63 @@ fn start_network_worker(
                         }
                     };
 
-                    let process_event = |ev: &NetworkEvent, tracker: &mut DeviceTracker, pending_updates: &mut usize| {
-                        match ev {
-                            NetworkEvent::Dhcpv4(packet) => {
-                                let is_new_or_updated = tracker.update_from_dhcpv4(packet);
-                                if is_new_or_updated {
-                                    *pending_updates += 1;
-                                }
-                                print_dhcpv4_packet(packet, is_new_or_updated, tracker.device_count());
-                            }
-                            NetworkEvent::Dhcpv6(packet) => {
-                                let is_new_or_updated = tracker.update_from_dhcpv6(packet);
-                                if is_new_or_updated {
-                                    *pending_updates += 1;
-                                }
-                                print_dhcpv6_packet(packet, is_new_or_updated, tracker.device_count());
-                            }
-                            #[cfg(feature = "mdns")]
-                            NetworkEvent::Mdns(packet) => {
-                                if _enable_mdns {
-                                    let updated_count = tracker.update_from_mdns(packet);
-                                    if updated_count > 0 {
+                    let process_event =
+                        |ev: &NetworkEvent,
+                         tracker: &mut DeviceTracker,
+                         pending_updates: &mut usize| {
+                            match ev {
+                                NetworkEvent::Dhcpv4(packet) => {
+                                    let is_new_or_updated = tracker.update_from_dhcpv4(packet);
+                                    if is_new_or_updated {
                                         *pending_updates += 1;
                                     }
-                                    print_mdns_packet(packet, updated_count, tracker.device_count());
+                                    print_dhcpv4_packet(
+                                        packet,
+                                        is_new_or_updated,
+                                        tracker.device_count(),
+                                    );
                                 }
-                            }
-                            #[cfg(feature = "ssdp")]
-                            NetworkEvent::Ssdp(packet) => {
-                                if _enable_ssdp {
-                                    let updated_count = tracker.update_from_ssdp(packet);
-                                    if updated_count > 0 {
+                                NetworkEvent::Dhcpv6(packet) => {
+                                    let is_new_or_updated = tracker.update_from_dhcpv6(packet);
+                                    if is_new_or_updated {
                                         *pending_updates += 1;
                                     }
-                                    print_ssdp_packet(packet, updated_count, tracker.device_count());
+                                    print_dhcpv6_packet(
+                                        packet,
+                                        is_new_or_updated,
+                                        tracker.device_count(),
+                                    );
+                                }
+                                #[cfg(feature = "mdns")]
+                                NetworkEvent::Mdns(packet) => {
+                                    if _enable_mdns {
+                                        let updated_count = tracker.update_from_mdns(packet);
+                                        if updated_count > 0 {
+                                            *pending_updates += 1;
+                                        }
+                                        print_mdns_packet(
+                                            packet,
+                                            updated_count,
+                                            tracker.device_count(),
+                                        );
+                                    }
+                                }
+                                #[cfg(feature = "ssdp")]
+                                NetworkEvent::Ssdp(packet) => {
+                                    if _enable_ssdp {
+                                        let updated_count = tracker.update_from_ssdp(packet);
+                                        if updated_count > 0 {
+                                            *pending_updates += 1;
+                                        }
+                                        print_ssdp_packet(
+                                            packet,
+                                            updated_count,
+                                            tracker.device_count(),
+                                        );
+                                    }
                                 }
                             }
-                        }
-                    };
+                        };
 
                     process_event(&first_event, &mut tracker, &mut pending_updates);
 
