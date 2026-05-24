@@ -2637,8 +2637,11 @@ impl<'a> SsdpPacketView<'a> {
         if self.view_contains_any(&["lenovo", "legion", "thinkpad", "ideapad", "yoga"]) {
             return Some("Laptop".to_string());
         }
-        if self.view_contains_any(&["googlecast", "dial-multiscreen-org", "internetgatewaydevice"])
-            && self.view_contains_any(&["windows", "rvd_", "pc", "lenovo", "legion"])
+        if self.view_contains_any(&[
+            "googlecast",
+            "dial-multiscreen-org",
+            "internetgatewaydevice",
+        ]) && self.view_contains_any(&["windows", "rvd_", "pc", "lenovo", "legion"])
         {
             return Some("Laptop".to_string());
         }
@@ -4139,9 +4142,7 @@ impl DeviceTracker {
         }
 
         // Motorola devices
-        if hostname.contains("moto")
-            || hostname.contains("stylus")
-            || hostname.contains("motorola")
+        if hostname.contains("moto") || hostname.contains("stylus") || hostname.contains("motorola")
         {
             return Some("Motorola");
         }
@@ -4224,9 +4225,7 @@ impl DeviceTracker {
         }
 
         // Motorola devices
-        if hostname.contains("moto")
-            || hostname.contains("stylus")
-            || hostname.contains("motorola")
+        if hostname.contains("moto") || hostname.contains("stylus") || hostname.contains("motorola")
         {
             return Some("Android Phone");
         }
@@ -4321,7 +4320,11 @@ impl DeviceTracker {
         None
     }
 
-    fn should_replace_vendor(current: Option<&str>, incoming: &str, oui_vendor: Option<&str>) -> bool {
+    fn should_replace_vendor(
+        current: Option<&str>,
+        incoming: &str,
+        oui_vendor: Option<&str>,
+    ) -> bool {
         match current {
             None => true,
             Some(existing) if existing.eq_ignore_ascii_case(incoming) => false,
@@ -4348,11 +4351,7 @@ impl DeviceTracker {
                         | "apple iphone"
                 ) && matches!(
                     existing.as_str(),
-                    "security camera"
-                        | "router"
-                        | "smart home device"
-                        | "unknown"
-                        | "chromecast"
+                    "security camera" | "router" | "smart home device" | "unknown" | "chromecast"
                 )
             }
         }
@@ -4684,13 +4683,12 @@ impl DeviceTracker {
             changed
         } else {
             // New device
-            let vendor = hostname_vendor
-                .map(str::to_string)
-                .or_else(|| {
-                    self.oui_registry.as_ref()
-                        .and_then(|r| r.lookup(mac))
-                        .map(str::to_string)
-                });
+            let vendor = hostname_vendor.map(str::to_string).or_else(|| {
+                self.oui_registry
+                    .as_ref()
+                    .and_then(|r| r.lookup(mac))
+                    .map(str::to_string)
+            });
 
             let mut device = DeviceInfo::new(mac.to_string(), ip, hostname);
             if let Some(ref v) = vendor {
