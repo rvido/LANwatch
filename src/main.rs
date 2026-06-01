@@ -242,6 +242,15 @@ fn start_dhcp_worker(
         loop {
             match rx.recv_timeout(flush_interval) {
                 Ok(first_event) => {
+                    let mut events = Vec::new();
+                    events.push(first_event);
+                    while let Ok(ev) = rx.try_recv() {
+                        events.push(ev);
+                        if events.len() >= 256 {
+                            break;
+                        }
+                    }
+
                     let mut tracker = match tracker.write() {
                         Ok(t) => t,
                         Err(e) => {
@@ -250,40 +259,31 @@ fn start_dhcp_worker(
                         }
                     };
 
-                    let process_event =
-                        |ev: &DhcpEvent,
-                         tracker: &mut DeviceTracker,
-                         pending_updates: &mut usize| {
-                            match ev {
-                                DhcpEvent::V4(packet) => {
-                                    let is_new_or_updated = tracker.update_from_dhcpv4(packet);
-                                    if is_new_or_updated {
-                                        *pending_updates += 1;
-                                    }
-                                    print_dhcpv4_packet(
-                                        packet,
-                                        is_new_or_updated,
-                                        tracker.device_count(),
-                                    );
+                    for ev in &events {
+                        match ev {
+                            DhcpEvent::V4(packet) => {
+                                let is_new_or_updated = tracker.update_from_dhcpv4(packet);
+                                if is_new_or_updated {
+                                    pending_updates += 1;
                                 }
-                                DhcpEvent::V6(packet) => {
-                                    let is_new_or_updated = tracker.update_from_dhcpv6(packet);
-                                    if is_new_or_updated {
-                                        *pending_updates += 1;
-                                    }
-                                    print_dhcpv6_packet(
-                                        packet,
-                                        is_new_or_updated,
-                                        tracker.device_count(),
-                                    );
-                                }
+                                print_dhcpv4_packet(
+                                    packet,
+                                    is_new_or_updated,
+                                    tracker.device_count(),
+                                );
                             }
-                        };
-
-                    process_event(&first_event, &mut tracker, &mut pending_updates);
-
-                    while let Ok(next_event) = rx.try_recv() {
-                        process_event(&next_event, &mut tracker, &mut pending_updates);
+                            DhcpEvent::V6(packet) => {
+                                let is_new_or_updated = tracker.update_from_dhcpv6(packet);
+                                if is_new_or_updated {
+                                    pending_updates += 1;
+                                }
+                                print_dhcpv6_packet(
+                                    packet,
+                                    is_new_or_updated,
+                                    tracker.device_count(),
+                                );
+                            }
+                        }
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {}
@@ -320,6 +320,15 @@ fn start_network_worker(
         loop {
             match rx.recv_timeout(flush_interval) {
                 Ok(first_event) => {
+                    let mut events = Vec::new();
+                    events.push(first_event);
+                    while let Ok(ev) = rx.try_recv() {
+                        events.push(ev);
+                        if events.len() >= 256 {
+                            break;
+                        }
+                    }
+
                     let mut tracker = match tracker.write() {
                         Ok(t) => t,
                         Err(e) => {
@@ -328,68 +337,59 @@ fn start_network_worker(
                         }
                     };
 
-                    let process_event =
-                        |ev: &NetworkEvent,
-                         tracker: &mut DeviceTracker,
-                         pending_updates: &mut usize| {
-                            match ev {
-                                NetworkEvent::Dhcpv4(packet) => {
-                                    let is_new_or_updated = tracker.update_from_dhcpv4(packet);
-                                    if is_new_or_updated {
-                                        *pending_updates += 1;
+                    for ev in &events {
+                        match ev {
+                            NetworkEvent::Dhcpv4(packet) => {
+                                let is_new_or_updated = tracker.update_from_dhcpv4(packet);
+                                if is_new_or_updated {
+                                    pending_updates += 1;
+                                }
+                                print_dhcpv4_packet(
+                                    packet,
+                                    is_new_or_updated,
+                                    tracker.device_count(),
+                                );
+                            }
+                            NetworkEvent::Dhcpv6(packet) => {
+                                let is_new_or_updated = tracker.update_from_dhcpv6(packet);
+                                if is_new_or_updated {
+                                    pending_updates += 1;
+                                }
+                                print_dhcpv6_packet(
+                                    packet,
+                                    is_new_or_updated,
+                                    tracker.device_count(),
+                                );
+                            }
+                            #[cfg(feature = "mdns")]
+                            NetworkEvent::Mdns(packet) => {
+                                if _enable_mdns {
+                                    let updated_count = tracker.update_from_mdns(packet);
+                                    if updated_count > 0 {
+                                        pending_updates += 1;
                                     }
-                                    print_dhcpv4_packet(
+                                    print_mdns_packet(
                                         packet,
-                                        is_new_or_updated,
+                                        updated_count,
                                         tracker.device_count(),
                                     );
-                                }
-                                NetworkEvent::Dhcpv6(packet) => {
-                                    let is_new_or_updated = tracker.update_from_dhcpv6(packet);
-                                    if is_new_or_updated {
-                                        *pending_updates += 1;
-                                    }
-                                    print_dhcpv6_packet(
-                                        packet,
-                                        is_new_or_updated,
-                                        tracker.device_count(),
-                                    );
-                                }
-                                #[cfg(feature = "mdns")]
-                                NetworkEvent::Mdns(packet) => {
-                                    if _enable_mdns {
-                                        let updated_count = tracker.update_from_mdns(packet);
-                                        if updated_count > 0 {
-                                            *pending_updates += 1;
-                                        }
-                                        print_mdns_packet(
-                                            packet,
-                                            updated_count,
-                                            tracker.device_count(),
-                                        );
-                                    }
-                                }
-                                #[cfg(feature = "ssdp")]
-                                NetworkEvent::Ssdp(packet) => {
-                                    if _enable_ssdp {
-                                        let updated_count = tracker.update_from_ssdp(packet);
-                                        if updated_count > 0 {
-                                            *pending_updates += 1;
-                                        }
-                                        print_ssdp_packet(
-                                            packet,
-                                            updated_count,
-                                            tracker.device_count(),
-                                        );
-                                    }
                                 }
                             }
-                        };
-
-                    process_event(&first_event, &mut tracker, &mut pending_updates);
-
-                    while let Ok(next_event) = rx.try_recv() {
-                        process_event(&next_event, &mut tracker, &mut pending_updates);
+                            #[cfg(feature = "ssdp")]
+                            NetworkEvent::Ssdp(packet) => {
+                                if _enable_ssdp {
+                                    let updated_count = tracker.update_from_ssdp(packet);
+                                    if updated_count > 0 {
+                                        pending_updates += 1;
+                                    }
+                                    print_ssdp_packet(
+                                        packet,
+                                        updated_count,
+                                        tracker.device_count(),
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {}

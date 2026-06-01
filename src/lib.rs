@@ -36,13 +36,12 @@ use pnet_packet::ip::IpNextHeaderProtocols;
 use pnet_packet::ipv4::Ipv4Packet;
 use pnet_packet::ipv6::Ipv6Packet;
 use pnet_packet::udp::UdpPacket;
-use std::collections::HashMap;
-#[cfg(any(feature = "mdns", feature = "ssdp"))]
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// DHCPv4 server port
@@ -1363,15 +1362,59 @@ impl OuiRegistry {
     /// - Full: "AA:BB:CC:DD:EE:FF" or "AA-BB-CC-DD-EE-FF"
     /// - OUI only: "AA:BB:CC" or "AABBCC"
     pub fn lookup(&self, mac_address: &str) -> Option<&str> {
-        let normalized = Self::normalize_mac(mac_address);
+        let mut buf = [0u8; 8];
+        let len = {
+            let mut l = 0;
+            for c in mac_address.chars() {
+                if l >= 6 {
+                    break;
+                }
+                if c.is_ascii_hexdigit() {
+                    let u = c.to_ascii_uppercase() as u8;
+                    if l == 0 {
+                        buf[0] = u;
+                    } else if l == 1 {
+                        buf[1] = u;
+                    } else if l == 2 {
+                        buf[3] = u;
+                    } else if l == 3 {
+                        buf[4] = u;
+                    } else if l == 4 {
+                        buf[6] = u;
+                    } else if l == 5 {
+                        buf[7] = u;
+                    }
+                    l += 1;
+                }
+            }
+            if l >= 6 {
+                buf[2] = b':';
+                buf[5] = b':';
+                8
+            } else {
+                let mut idx = 0;
+                for c in mac_address.chars() {
+                    if idx >= l {
+                        break;
+                    }
+                    if c.is_ascii_hexdigit() {
+                        buf[idx] = c.to_ascii_uppercase() as u8;
+                        idx += 1;
+                    }
+                }
+                l
+            }
+        };
+
+        let normalized = std::str::from_utf8(&buf[..len]).ok()?;
 
         // Check custom overrides first (highest priority)
-        if let Some(vendor) = self.custom_overrides.get(&normalized) {
+        if let Some(vendor) = self.custom_overrides.get(normalized) {
             return Some(vendor.as_str());
         }
 
         // Fall back to oui-data crate (IEEE database with ~40,000 entries)
-        if let Some(oui_entry) = oui_data::lookup(&normalized) {
+        if let Some(oui_entry) = oui_data::lookup(normalized) {
             // organization() already provides a borrowed string; avoid allocating on every lookup.
             Some(oui_entry.organization())
         } else {
@@ -2936,7 +2979,7 @@ fn process_ipv4_packet_extended(ethernet: &EthernetPacket) -> Option<NetworkEven
 
     #[cfg(feature = "mdns")]
     if is_mdns_ports(src, dest) {
-        let source_mac = ethernet.get_source().to_string().to_lowercase();
+        let source_mac = ethernet.get_source().to_string();
         let packet = parse_mdns_payload(
             udp.payload(),
             source_mac,
@@ -2948,7 +2991,7 @@ fn process_ipv4_packet_extended(ethernet: &EthernetPacket) -> Option<NetworkEven
 
     #[cfg(feature = "ssdp")]
     if is_ssdp_ports(src, dest) {
-        let source_mac = ethernet.get_source().to_string().to_lowercase();
+        let source_mac = ethernet.get_source().to_string();
         let packet = parse_ssdp_payload(
             udp.payload(),
             source_mac,
@@ -3013,7 +3056,7 @@ fn process_ipv6_packet_extended(ethernet: &EthernetPacket) -> Option<NetworkEven
 
     #[cfg(feature = "mdns")]
     if is_mdns_ports(src, dest) {
-        let source_mac = ethernet.get_source().to_string().to_lowercase();
+        let source_mac = ethernet.get_source().to_string();
         let packet = parse_mdns_payload(
             udp.payload(),
             source_mac,
@@ -3025,7 +3068,7 @@ fn process_ipv6_packet_extended(ethernet: &EthernetPacket) -> Option<NetworkEven
 
     #[cfg(feature = "ssdp")]
     if is_ssdp_ports(src, dest) {
-        let source_mac = ethernet.get_source().to_string().to_lowercase();
+        let source_mac = ethernet.get_source().to_string();
         let packet = parse_ssdp_payload(
             udp.payload(),
             source_mac,
@@ -3378,14 +3421,14 @@ impl DeviceInfo {
             return None;
         }
 
-        let first_seen = parse_timestamp(&parts[0])?;
+        let first_seen = parse_timestamp(parts[0])?;
         let last_seen = if parts.len() > 1 {
-            parse_timestamp(&parts[1])?
+            parse_timestamp(parts[1])?
         } else {
             first_seen
         };
         // Normalize MAC address and migrate legacy DHCPv6 DUID-like identifiers.
-        let mac_address = normalize_device_identifier(&parts[2]);
+        let mac_address = normalize_device_identifier(parts[2]);
         let ip_address = parts[3].parse().ok()?;
         let ipv6_address = if parts.len() > 4 {
             let v6 = parts[4].trim_matches('"');
@@ -3398,20 +3441,28 @@ impl DeviceInfo {
             None
         };
         let hostname = if parts.len() > 5 {
-            let h = parts[5].trim_matches('"').to_string();
-            sanitize_hostname(&h)
+            let h = parts[5].trim_matches('"');
+            sanitize_hostname(h)
         } else {
             None
         };
         let device_type = if parts.len() > 6 {
-            let t = parts[6].trim_matches('"').to_string();
-            if t.is_empty() { None } else { Some(t) }
+            let t = parts[6].trim_matches('"');
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
         } else {
             None
         };
         let vendor = if parts.len() > 7 {
-            let v = parts[7].trim_matches('"').to_string();
-            if v.is_empty() { None } else { Some(v) }
+            let v = parts[7].trim_matches('"');
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
         } else {
             None
         };
@@ -3440,22 +3491,32 @@ impl DeviceInfo {
     }
 }
 
-/// Parse a CSV line handling quoted fields
-fn parse_csv_line(line: &str) -> Vec<String> {
-    let mut fields = Vec::new();
-    let mut current = String::new();
+/// Parse a CSV line handling quoted fields without allocations
+fn parse_csv_line(line: &str) -> Vec<&str> {
+    let mut fields = Vec::with_capacity(9);
+    let mut start = 0;
     let mut in_quotes = false;
+    let mut i = 0;
+    let bytes = line.as_bytes();
 
-    for c in line.chars() {
-        match c {
-            '"' => in_quotes = !in_quotes,
-            ',' if !in_quotes => {
-                fields.push(std::mem::take(&mut current));
+    while i < bytes.len() {
+        if bytes[i] == b'"' {
+            in_quotes = !in_quotes;
+        } else if bytes[i] == b',' && !in_quotes {
+            let mut field = &line[start..i];
+            if field.starts_with('"') && field.ends_with('"') && field.len() >= 2 {
+                field = &field[1..field.len() - 1];
             }
-            _ => current.push(c),
+            fields.push(field);
+            start = i + 1;
         }
+        i += 1;
     }
-    fields.push(current);
+    let mut field = &line[start..i];
+    if field.starts_with('"') && field.ends_with('"') && field.len() >= 2 {
+        field = &field[1..field.len() - 1];
+    }
+    fields.push(field);
     fields
 }
 
@@ -3670,6 +3731,8 @@ pub struct DeviceTracker {
     oui_registry: Option<OuiRegistry>,
     #[cfg(feature = "mdns")]
     service_registry: Option<MdnsServiceRegistry>,
+    /// Track updated MAC addresses for incremental journal flushes
+    dirty_devices: Mutex<HashSet<String>>,
 }
 
 impl DeviceTracker {
@@ -3686,6 +3749,7 @@ impl DeviceTracker {
             oui_registry: None,
             #[cfg(feature = "mdns")]
             service_registry: None,
+            dirty_devices: Mutex::new(HashSet::new()),
         };
 
         // Load existing data if file exists
@@ -3793,9 +3857,9 @@ impl DeviceTracker {
             "first_seen,last_seen,mac_address,ip_address,ipv6_address,hostname,device_type,vendor,services"
         )?;
 
-        // Write devices sorted by last_seen
+        // Write devices sorted by last_seen (use unstable sort for speed)
         let mut devices: Vec<_> = self.devices.values().collect();
-        devices.sort_by_key(|device| std::cmp::Reverse(device.last_seen));
+        devices.sort_unstable_by_key(|device| std::cmp::Reverse(device.last_seen));
 
         for device in devices {
             writeln!(file, "{}", device.to_csv_line())?;
@@ -3807,6 +3871,9 @@ impl DeviceTracker {
         // Truncate journal after successful compaction
         let journal_path = format!("{}.journal", &self.csv_path);
         let _ = std::fs::remove_file(journal_path);
+
+        // Clear dirty devices as they are now fully persisted in the main CSV
+        self.dirty_devices.lock().unwrap().clear();
 
         Ok(())
     }
@@ -3863,9 +3930,30 @@ impl DeviceTracker {
     }
 
     /// Explicitly flushes the current in-memory device state to the CSV file.
+    /// If the main CSV exists, it appends updated devices incrementally to the journal
+    /// to avoid rewriting the entire file, triggering compaction when the journal exceeds 1MB.
     pub fn flush_to_csv(&self) -> std::io::Result<()> {
-        // Force a full compaction of current in-memory state to the main CSV
-        self.save_to_csv()
+        let dirty = {
+            let mut guard = self.dirty_devices.lock().unwrap();
+            if guard.is_empty() {
+                return Ok(());
+            }
+            std::mem::take(&mut *guard)
+        };
+
+        let path = Path::new(&self.csv_path);
+        if !path.exists() {
+            // If the main CSV doesn't exist, do a full save
+            self.save_to_csv()?;
+        } else {
+            // Append dirty devices to the journal
+            for mac in &dirty {
+                if let Some(device) = self.devices.get(mac) {
+                    self.append_device_journal(device)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Updates the tracker state with information extracted from a DHCPv4 packet.
@@ -4090,6 +4178,8 @@ impl DeviceTracker {
         if let Some(line) = csv_line {
             let _ = self.append_journal_line(&line);
         }
+
+        self.dirty_devices.lock().unwrap().insert(mac.to_string());
 
         updated
     }
@@ -4527,6 +4617,8 @@ impl DeviceTracker {
             let _ = self.append_journal_line(&line);
         }
 
+        self.dirty_devices.lock().unwrap().insert(mac.to_string());
+
         updated
     }
 
@@ -4724,6 +4816,8 @@ impl DeviceTracker {
             let _ = self.append_device_journal(d);
         }
 
+        self.dirty_devices.lock().unwrap().insert(mac.to_string());
+
         result
     }
 
@@ -4864,7 +4958,7 @@ impl ApiServer {
                     data: devices,
                 };
 
-                let json = serde_json::to_string_pretty(&response).unwrap_or_default();
+                let json = serde_json::to_string(&response).unwrap_or_default();
                 Response::from_string(json).with_header(
                     tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap(),
                 )
@@ -4883,7 +4977,7 @@ impl ApiServer {
                         data: device,
                     };
 
-                    let json = serde_json::to_string_pretty(&response).unwrap_or_default();
+                    let json = serde_json::to_string(&response).unwrap_or_default();
                     Response::from_string(json).with_header(
                         tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap(),
                     )
@@ -4930,7 +5024,7 @@ impl ApiServer {
                 "/health": "GET - Health check"
             }
         });
-        Response::from_string(serde_json::to_string_pretty(&json).unwrap_or_default())
+        Response::from_string(serde_json::to_string(&json).unwrap_or_default())
             .with_header(tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap())
     }
 
