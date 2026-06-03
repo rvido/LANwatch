@@ -8,6 +8,8 @@ A Rust library and CLI tool for network device discovery and tracking via DHCP, 
 - **DHCPv6 Support**: Capture and parse SOLICIT, ADVERTISE, REQUEST, CONFIRM, RENEW, REBIND, REPLY, RELEASE, DECLINE, RECONFIGURE, and INFO-REQUEST messages
 - **mDNS Support** (optional): Passive and active mDNS discovery for enhanced device identification
 - **SSDP/UPnP Support** (optional): Passive and active SSDP discovery for UPnP and media devices
+- **ARP Sniffing**: Passive Layer 2 sniffing of ARP frames (Request & Reply) to dynamically discover silent network devices
+- **DHCP Option 55 OS Fingerprinting**: Parameter Request List (PRL) matching to identify and classify operating systems (Windows, Apple/iOS, Google/Android/Linux)
 - **Device Classification**: Automatic identification of device types (phones, printers, thermostats, etc.) from hostnames, services, and vendor data
 - **IEEE OUI Database**: Built-in vendor identification from MAC addresses using IEEE OUI (Organizationally Unique Identifier) prefixes
 - **Device Tracking**: Automatically track detected devices and save to CSV file
@@ -448,6 +450,14 @@ When the `ssdp` feature is enabled, the tool can capture SSDP (Simple Service Di
 - Printer and DIAL-enabled devices (Chromecast, etc.)
 
 The tool extracts vendor information and device types from SSDP server headers and service descriptors.
+
+### ARP Sniffing (Layer 2 Passive Discovery)
+
+When raw network sniffing is enabled (via the `mdns` or `ssdp` features), LANwatch automatically captures Layer 2 ARP frames (both Request and Reply operations). This allows LANwatch to discover silent devices on the local network link that do not transmit DHCP, mDNS, or SSDP/UPnP traffic, expanding discovery coverage significantly.
+
+### DHCP Option 55 OS Fingerprinting
+
+When parsing DHCPv4 payloads, LANwatch extracts Option 55 (Parameter Request List). By matching common signature sequences (such as Option 249 for Microsoft Windows, Option 95 for Apple, and Options 26 & 28 for Android/Linux), the tracker can identify the operating system and refine device classification even when no hostname or service description is broadcast.
 
 ## Testing
 
