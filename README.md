@@ -9,8 +9,9 @@ A Rust library and CLI tool for network device discovery and tracking via DHCP, 
 - **mDNS Support** (optional): Passive and active mDNS discovery for enhanced device identification
 - **SSDP/UPnP Support** (optional): Passive and active SSDP discovery for UPnP and media devices
 - **ARP Sniffing**: Passive Layer 2 sniffing of ARP frames (Request & Reply) to dynamically discover silent network devices
-- **DHCP Option 55 OS Fingerprinting**: Parameter Request List (PRL) matching to identify and classify operating systems (Windows, Apple/iOS, Google/Android/Linux)
-- **Device Classification**: Automatic identification of device types (phones, printers, thermostats, etc.) from hostnames, services, and vendor data
+- **DHCP Option 55 & 60 Fingerprinting**: Parameter Request List (PRL) and Vendor Class Identifier matching to identify and classify operating systems and device brands (Windows, Apple/iOS, Google/Android, HP printers, Sonos, Roku, etc.)
+- **LLMNR Sniffing** (optional): Passive sniffing of Link-Local Multicast Name Resolution (LLMNR) traffic to resolve and update local device hostnames
+- **Device Classification**: Automatic identification of device types (phones, printers, media players, smart speakers, etc.) from hostnames, services, and vendor data
 - **IEEE OUI Database**: Built-in vendor identification from MAC addresses using IEEE OUI (Organizationally Unique Identifier) prefixes
 - **Device Tracking**: Automatically track detected devices and save to CSV file
 - **CSV Export**: Export device information with timestamps, MAC addresses, IP addresses, and hostnames
@@ -455,9 +456,15 @@ The tool extracts vendor information and device types from SSDP server headers a
 
 When raw network sniffing is enabled (via the `mdns` or `ssdp` features), LANwatch automatically captures Layer 2 ARP frames (both Request and Reply operations). This allows LANwatch to discover silent devices on the local network link that do not transmit DHCP, mDNS, or SSDP/UPnP traffic, expanding discovery coverage significantly.
 
-### DHCP Option 55 OS Fingerprinting
+### DHCP Option 55 & 60 OS/Vendor Fingerprinting
 
-When parsing DHCPv4 payloads, LANwatch extracts Option 55 (Parameter Request List). By matching common signature sequences (such as Option 249 for Microsoft Windows, Option 95 for Apple, and Options 26 & 28 for Android/Linux), the tracker can identify the operating system and refine device classification even when no hostname or service description is broadcast.
+When parsing DHCPv4 payloads, LANwatch extracts:
+- **Option 55 (Parameter Request List)**: Matches common signature sequences (such as Option 249 for Microsoft Windows, Option 95 for Apple, and Options 26 & 28 for Android/Linux) to identify the operating system.
+- **Option 60 (Vendor Class Identifier)**: Matches vendor class identifier strings to classify device brands and operating systems (e.g., `MSFT` -> Microsoft PC/Windows, `Android` -> Google Android Phone, `Hewlett-Packard JetDirect` -> HP Printer, `Roku` -> Roku Media Player, `Sonos` -> Sonos Smart Speaker, `Apple TV` -> Apple TV).
+
+### LLMNR Sniffing (Link-Local Multicast Name Resolution)
+
+Under the `mdns` feature gate, LANwatch listens passively to UDP port 5355 LLMNR packets. LLMNR requests and responses (which share standard RFC 1035 DNS structure) are sniffed and parsed to automatically associate IP addresses with local device hostnames without needing active reverse DNS queries.
 
 ## Testing
 

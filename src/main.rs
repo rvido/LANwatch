@@ -375,6 +375,20 @@ fn start_network_worker(
                                     );
                                 }
                             }
+                            #[cfg(feature = "mdns")]
+                            NetworkEvent::Llmnr(packet) => {
+                                if _enable_mdns {
+                                    let updated_count = tracker.update_from_llmnr(packet);
+                                    if updated_count > 0 {
+                                        pending_updates += 1;
+                                    }
+                                    print_llmnr_packet(
+                                        packet,
+                                        updated_count,
+                                        tracker.device_count(),
+                                    );
+                                }
+                            }
                             #[cfg(feature = "ssdp")]
                             NetworkEvent::Ssdp(packet) => {
                                 if _enable_ssdp {
@@ -544,6 +558,43 @@ fn print_mdns_packet(packet: &lanwatch::MdnsPacket, updated_count: usize, total:
                 }
             }
             MdnsRecordData::Raw(_) => {}
+        }
+    }
+
+    if updated_count > 0 {
+        println!(
+            "-> [CSV Updated] {} device(s), Total: {}",
+            updated_count, total
+        );
+    }
+    println!("------------------------------");
+}
+
+#[cfg(feature = "mdns")]
+fn print_llmnr_packet(packet: &lanwatch::MdnsPacket, updated_count: usize, total: usize) {
+    let packet_type = if packet.is_response {
+        "Response"
+    } else {
+        "Query"
+    };
+    println!(
+        "\n[LLMNR] {} from {} (MAC: {})",
+        packet_type, packet.source_ip, packet.source_mac
+    );
+
+    for q in &packet.questions {
+        println!("  ? {} ({})", q.name, q.record_type);
+    }
+
+    for record in packet.all_records() {
+        match &record.data {
+            MdnsRecordData::A(addr) => {
+                println!("  A: {} -> {}", record.name, addr);
+            }
+            MdnsRecordData::Aaaa(addr) => {
+                println!("  AAAA: {} -> {}", record.name, addr);
+            }
+            _ => {}
         }
     }
 
