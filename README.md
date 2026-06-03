@@ -9,10 +9,13 @@ A Rust library and CLI tool for network device discovery and tracking via DHCP, 
 - **mDNS Support** (optional): Passive and active mDNS discovery for enhanced device identification
 - **SSDP/UPnP Support** (optional): Passive and active SSDP discovery for UPnP and media devices
 - **ARP Sniffing**: Passive Layer 2 sniffing of ARP frames (Request & Reply) to dynamically discover silent network devices
-- **DHCP Option 55 & 60 Fingerprinting**: Parameter Request List (PRL) and Vendor Class Identifier matching to identify and classify operating systems and device brands (Windows, Apple/iOS, Google/Android, HP printers, Sonos, Roku, etc.)
+- **DHCP Option 55, 60, & 43 OS/Vendor Fingerprinting**: Identifies device operating systems and brands using PRL (Parameter Request List), Vendor Class Identifiers, and Option 43 Vendor-Specific Information (e.g., Windows, macOS/iOS, Android/Linux, HP printers, Sonos, Ubiquiti/UniFi, Cisco, Yealink, Polycom, etc.)
 - **LLMNR Sniffing** (optional): Passive sniffing of Link-Local Multicast Name Resolution (LLMNR) traffic to resolve and update local device hostnames
-- **Device Classification**: Automatic identification of device types (phones, printers, media players, smart speakers, etc.) from hostnames, services, and vendor data
-- **IEEE OUI Database**: Built-in vendor identification from MAC addresses using IEEE OUI (Organizationally Unique Identifier) prefixes
+- **NetBIOS Name Service (NBNS) Sniffing** (optional): Passive sniffing of NetBIOS traffic on UDP port 137 to resolve hostnames and infer device roles (e.g., file server). Gated under `mdns` feature.
+- **WS-Discovery (WSD) Sniffing** (optional): Passive sniffing of SOAP XML multicast probe traffic on UDP port 3702 to discover network hardware, PCs, and IP Cameras. Gated under `ssdp` feature.
+- **mDNS TXT Record Parsing**: Extracts model, md, and ty metadata from DNS-SD records to identify specific hardware devices (Apple TV, Chromecast, Sonos speakers, and printer models)
+- **Device Classification**: Expanded classification engine mapping hostnames, mDNS TXT metadata, and service fingerprints to specific device types and vendors (Roku, Sonos, Apple TV, Google Chromecast, ESP32 IoT, Raspberry Pi, Synology NAS, Playstation, Xbox, Nintendo, smart plugs, printers, etc.)
+- **IEEE OUI Database**: Built-in vendor identification from MAC addresses using IEEE OUI (Organizationally Unique Identifier) prefixes (40,000+ entries)
 - **Device Tracking**: Automatically track detected devices and save to CSV file
 - **CSV Export**: Export device information with timestamps, MAC addresses, IP addresses, and hostnames
 - **HTTP API** (optional): Opt-in REST API server to query devices as JSON. (Requires the `http-api` feature.)
@@ -456,15 +459,28 @@ The tool extracts vendor information and device types from SSDP server headers a
 
 When raw network sniffing is enabled (via the `mdns` or `ssdp` features), LANwatch automatically captures Layer 2 ARP frames (both Request and Reply operations). This allows LANwatch to discover silent devices on the local network link that do not transmit DHCP, mDNS, or SSDP/UPnP traffic, expanding discovery coverage significantly.
 
-### DHCP Option 55 & 60 OS/Vendor Fingerprinting
+### DHCP Option 55, 60 & 43 OS/Vendor Fingerprinting
 
 When parsing DHCPv4 payloads, LANwatch extracts:
 - **Option 55 (Parameter Request List)**: Matches common signature sequences (such as Option 249 for Microsoft Windows, Option 95 for Apple, and Options 26 & 28 for Android/Linux) to identify the operating system.
 - **Option 60 (Vendor Class Identifier)**: Matches vendor class identifier strings to classify device brands and operating systems (e.g., `MSFT` -> Microsoft PC/Windows, `Android` -> Google Android Phone, `Hewlett-Packard JetDirect` -> HP Printer, `Roku` -> Roku Media Player, `Sonos` -> Sonos Smart Speaker, `Apple TV` -> Apple TV).
+- **Option 43 (Vendor-Specific Info)**: Extracts printable ASCII sequences from Option 43 sub-options to identify enterprise and VoIP hardware (e.g., `UniFi` -> Ubiquiti Network Device, `Yealink`/`Polycom`/`Mitel`/`Avaya` -> IP Phone, `Cisco`).
 
 ### LLMNR Sniffing (Link-Local Multicast Name Resolution)
 
 Under the `mdns` feature gate, LANwatch listens passively to UDP port 5355 LLMNR packets. LLMNR requests and responses (which share standard RFC 1035 DNS structure) are sniffed and parsed to automatically associate IP addresses with local device hostnames without needing active reverse DNS queries.
+
+### NetBIOS Name Service (NBNS) Sniffing
+
+Under the `mdns` feature gate, LANwatch passively sniffs NetBIOS Name Service (NBNS) packets on UDP port 137. It decodes the two-character nibble-encoded NetBIOS names to resolve local network hostnames, and checks name suffix roles (e.g. `0x20` indicating the File Sharing service) to identify and classify roles like "File Server".
+
+### WS-Discovery (WSD) Sniffing
+
+Under the `ssdp` feature gate, LANwatch passively listens to UDP port 3702 WS-Discovery SOAP XML probe and announcement traffic. By parsing elements such as `<wsd:Types>` (e.g., `NetworkVideoTransmitter` for IP Cameras) and publisher `<pub:ModelName>` metadata, WSD sniffing dynamically identifies smart hardware, printers, and surveillance equipment.
+
+### mDNS TXT Record Parsing
+
+When processing mDNS traffic under the `mdns` feature gate, LANwatch extracts key-value parameters from TXT records (such as `model`, `md`, or `ty`). These hardware and model descriptors (e.g., `AppleTV14,1`, `Sonos Play:1`, or printer models) are cross-referenced to determine exact manufacturer and device classifications.
 
 ## Testing
 
