@@ -389,6 +389,22 @@ fn start_network_worker(
                                     );
                                 }
                             }
+                            NetworkEvent::Arp {
+                                source_mac,
+                                source_ip,
+                            } => {
+                                let is_new_or_updated =
+                                    tracker.update_device(source_mac, *source_ip, None);
+                                if is_new_or_updated {
+                                    pending_updates += 1;
+                                }
+                                print_arp_packet(
+                                    source_mac,
+                                    source_ip,
+                                    is_new_or_updated,
+                                    tracker.device_count(),
+                                );
+                            }
                         }
                     }
                 }
@@ -429,6 +445,17 @@ fn flush_tracker(tracker: &Arc<RwLock<DeviceTracker>>, pending_updates: usize) {
             tracker.device_count()
         );
     }
+}
+
+#[cfg(any(feature = "mdns", feature = "ssdp"))]
+fn print_arp_packet(mac: &str, ip: &std::net::IpAddr, is_new_or_updated: bool, total: usize) {
+    println!("\n[ARP] Packet Detected");
+    println!("Sender MAC: {}", mac);
+    println!("Sender IP:  {}", ip);
+    if is_new_or_updated {
+        println!("-> [CSV Updated] Total devices: {}", total);
+    }
+    println!("------------------------------");
 }
 
 fn print_dhcpv4_packet(packet: &lanwatch::Dhcpv4Packet, is_new_or_updated: bool, total: usize) {
