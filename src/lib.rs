@@ -31,6 +31,8 @@
 use pnet_datalink as datalink;
 use pnet_datalink::{Channel::Ethernet, DataLinkReceiver, NetworkInterface};
 use pnet_packet::Packet;
+#[cfg(any(feature = "mdns", feature = "ssdp"))]
+use pnet_packet::arp::{ArpOperations, ArpPacket};
 use pnet_packet::ethernet::{EtherTypes, EthernetPacket};
 use pnet_packet::ip::IpNextHeaderProtocols;
 use pnet_packet::ipv4::Ipv4Packet;
@@ -231,6 +233,8 @@ pub struct Dhcpv4Packet {
     pub hostname: Option<String>,
     /// Requested IP address (from options)
     pub requested_ip: Option<Ipv4Addr>,
+    /// Parameter request list (Option 55, from options)
+    pub parameter_request_list: Option<Vec<u8>>,
 }
 
 impl Dhcpv4Packet {
@@ -318,6 +322,11 @@ pub enum NetworkEvent {
     /// SSDP/UPnP packet
     #[cfg(feature = "ssdp")]
     Ssdp(SsdpPacket),
+    /// ARP packet
+    Arp {
+        source_mac: String,
+        source_ip: std::net::IpAddr,
+    },
 }
 
 #[cfg(any(feature = "mdns", feature = "ssdp"))]
@@ -391,6 +400,7 @@ pub fn parse_dhcpv4_payload(
     let mut message_type = None;
     let mut hostname = None;
     let mut requested_ip = None;
+    let mut parameter_request_list = None;
 
     // BOOTP/DHCP fixed header fields
     // ciaddr: client IP address (set by client in bound/renewing states)
@@ -435,6 +445,10 @@ pub fn parse_dhcpv4_payload(
                 // Requested IP Address
                 requested_ip = Some(Ipv4Addr::new(value[0], value[1], value[2], value[3]));
             }
+            55 => {
+                // Parameter Request List (Option 55)
+                parameter_request_list = Some(value.to_vec());
+            }
             _ => {}
         }
         index += 2 + len;
@@ -460,6 +474,7 @@ pub fn parse_dhcpv4_payload(
         message_type,
         hostname,
         requested_ip,
+        parameter_request_list,
     })
 }
 
@@ -2935,6 +2950,21 @@ pub fn process_ethernet_frame_extended(frame: &[u8]) -> Option<NetworkEvent> {
     match ethernet.get_ethertype() {
         EtherTypes::Ipv4 => process_ipv4_packet_extended(&ethernet),
         EtherTypes::Ipv6 => process_ipv6_packet_extended(&ethernet),
+        EtherTypes::Arp => {
+            let arp = ArpPacket::new(ethernet.payload())?;
+            if arp.get_operation() == ArpOperations::Reply
+                || arp.get_operation() == ArpOperations::Request
+            {
+                let src_mac = arp.get_sender_hw_addr().to_string();
+                let src_ip = std::net::IpAddr::V4(arp.get_sender_proto_addr());
+                Some(NetworkEvent::Arp {
+                    source_mac: src_mac,
+                    source_ip: src_ip,
+                })
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
@@ -3907,7 +3937,6 @@ impl DeviceTracker {
     /// Append a pre-serialized CSV line to the journal. This helper lets callers
     /// prepare the CSV string while holding mutable borrows to device entries,
     /// then write it after the borrow ends to avoid borrowing `self` twice.
-    #[cfg(any(feature = "mdns", feature = "ssdp"))]
     fn append_journal_line(&self, line: &str) -> std::io::Result<()> {
         use std::fs::OpenOptions;
         let jpath = self.journal_path();
@@ -3982,7 +4011,55 @@ impl DeviceTracker {
             }
         });
 
-        self.update_device(&mac, ip, packet.hostname.as_deref())
+        let mut changed = self.update_device(&mac, ip, packet.hostname.as_deref());
+
+        // Apply Option 55 fingerprint if present
+        let csv_line = if let Some(ref prl) = packet.parameter_request_list {
+            if let Some(device) = self.devices.get_mut(&mac) {
+                let (opt_vendor, opt_type) = Self::detect_device_details_from_dhcp_options(prl);
+                let mut local_changed = false;
+                if let Some(v) = opt_vendor
+                    && (device.vendor.is_none()
+                        || (device.vendor.as_deref() != Some(v)
+                            && device
+                                .vendor
+                                .as_deref()
+                                .map(|ov| ov.to_lowercase())
+                                .as_deref()
+                                == Some("eero inc.")))
+                {
+                    device.vendor = Some(v.to_string());
+                    local_changed = true;
+                }
+                if let Some(t) = opt_type
+                    && device.device_type.is_none()
+                {
+                    device.device_type = Some(t.to_string());
+                    local_changed = true;
+                }
+                if local_changed {
+                    self.dirty_devices.lock().unwrap().insert(mac.clone());
+                    changed = true;
+                    if self.auto_save {
+                        Some(device.to_csv_line())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(line) = csv_line {
+            let _ = self.append_journal_line(&line);
+        }
+
+        changed
     }
 
     /// Updates the tracker state with information extracted from a DHCPv6 packet.
@@ -4182,6 +4259,37 @@ impl DeviceTracker {
         self.dirty_devices.lock().unwrap().insert(mac.to_string());
 
         updated
+    }
+
+    /// Detect vendor and device type from DHCP Option 55 (Parameter Request List)
+    fn detect_device_details_from_dhcp_options(
+        prl: &[u8],
+    ) -> (Option<&'static str>, Option<&'static str>) {
+        if prl.is_empty() {
+            return (None, None);
+        }
+
+        let has_26 = prl.contains(&26);
+        let has_28 = prl.contains(&28);
+        let has_95 = prl.contains(&95);
+        let has_249 = prl.contains(&249);
+
+        // Windows Signature: contains 249 (MS Classless Route)
+        if has_249 {
+            return (Some("Microsoft"), Some("PC/Windows"));
+        }
+
+        // Apple (iOS/macOS) Signature: contains 95 (LDAP) and lacks 26/28
+        if has_95 && !has_26 && !has_28 {
+            return (Some("Apple"), Some("Apple Device"));
+        }
+
+        // Android / Linux Signature: contains 26 (Interface MTU) and 28 (Broadcast Address)
+        if has_26 && has_28 {
+            return (Some("Google"), Some("Android Phone"));
+        }
+
+        (None, None)
     }
 
     /// Detect vendor from hostname patterns
@@ -4722,7 +4830,7 @@ impl DeviceTracker {
     /// Update or add a device
     /// # Note
     /// This method assumes `mac` is already normalized to lowercase (which all ingestion paths ensure).
-    fn update_device(&mut self, mac: &str, ip: IpAddr, hostname: Option<&str>) -> bool {
+    pub fn update_device(&mut self, mac: &str, ip: IpAddr, hostname: Option<&str>) -> bool {
         let hostname = hostname.and_then(sanitize_hostname);
         let hostname_vendor = Self::detect_vendor_from_hostname(hostname.as_deref());
         let device_type_from_hostname = Self::detect_device_type_from_hostname(hostname.as_deref());
@@ -5499,6 +5607,7 @@ mod tests {
             message_type: Some(Dhcpv4MessageType::Discover),
             hostname: Some("testhost".to_string()),
             requested_ip: Some(Ipv4Addr::new(192, 168, 1, 100)),
+            parameter_request_list: None,
         };
 
         let is_new = tracker.update_from_dhcpv4(&packet);
@@ -5534,6 +5643,7 @@ mod tests {
             message_type: Some(Dhcpv4MessageType::Offer),
             hostname: None,
             requested_ip: None,
+            parameter_request_list: None,
         };
 
         tracker.update_from_dhcpv4(&packet);
@@ -5627,6 +5737,7 @@ mod tests {
             message_type: Some(Dhcpv4MessageType::Discover),
             hostname: Some("RVD_Legion".to_string()),
             requested_ip: Some(Ipv4Addr::new(192, 168, 4, 112)),
+            parameter_request_list: None,
         };
 
         tracker.update_from_dhcpv4(&packet);
@@ -5659,6 +5770,7 @@ mod tests {
             message_type: Some(Dhcpv4MessageType::Discover),
             hostname: Some("rachio-188dcc".to_string()),
             requested_ip: Some(Ipv4Addr::new(192, 168, 4, 36)),
+            parameter_request_list: None,
         };
 
         tracker.update_from_dhcpv4(&packet);
@@ -5691,6 +5803,7 @@ mod tests {
             message_type: Some(Dhcpv4MessageType::Discover),
             hostname: Some("roborock-vacuum-a75".to_string()),
             requested_ip: Some(Ipv4Addr::new(192, 168, 7, 193)),
+            parameter_request_list: None,
         };
 
         tracker.update_from_dhcpv4(&packet);
@@ -5720,6 +5833,7 @@ mod tests {
             message_type: Some(Dhcpv4MessageType::Discover),
             hostname: None,
             requested_ip: Some(Ipv4Addr::new(192, 168, 7, 1)),
+            parameter_request_list: None,
         };
 
         tracker.update_from_dhcpv4(&packet);
@@ -5857,6 +5971,7 @@ mod tests {
                 message_type: Some(Dhcpv4MessageType::Request),
                 hostname: Some("persistent-host".to_string()),
                 requested_ip: Some(Ipv4Addr::new(192, 168, 1, 100)),
+                parameter_request_list: None,
             };
             tracker.update_from_dhcpv4(&packet);
             assert_eq!(tracker.device_count(), 1);
@@ -5924,6 +6039,7 @@ mod tests {
             message_type: Some(Dhcpv4MessageType::Discover),
             hostname: Some("device1".to_string()),
             requested_ip: Some(Ipv4Addr::new(192, 168, 1, 1)),
+            parameter_request_list: None,
         };
         tracker.update_from_dhcpv4(&packet1);
 
@@ -5937,6 +6053,7 @@ mod tests {
             message_type: Some(Dhcpv4MessageType::Discover),
             hostname: None,
             requested_ip: Some(Ipv4Addr::new(192, 168, 1, 2)),
+            parameter_request_list: None,
         };
         tracker.update_from_dhcpv4(&packet2);
 
@@ -6168,6 +6285,7 @@ mod tests {
             message_type: Some(Dhcpv4MessageType::Discover),
             hostname: None,
             requested_ip: Some(Ipv4Addr::new(192, 168, 1, 100)),
+            parameter_request_list: None,
         };
         tracker.update_from_dhcpv4(&packet1);
         assert_eq!(tracker.device_count(), 1);
@@ -6183,6 +6301,7 @@ mod tests {
             message_type: Some(Dhcpv4MessageType::Request),
             hostname: Some("newname".to_string()),
             requested_ip: Some(Ipv4Addr::new(192, 168, 1, 200)),
+            parameter_request_list: None,
         };
         let changed = tracker.update_from_dhcpv4(&packet2);
         assert!(changed);
@@ -6878,5 +6997,153 @@ mod tests {
     fn test_ssdp_message_type_response() {
         let msg_type = SsdpMessageType::Response;
         assert_eq!(format!("{}", msg_type), "RESPONSE");
+    }
+
+    #[test]
+    fn test_dhcpv4_option55_parsing() {
+        let mut payload = vec![0u8; 300];
+        payload[0] = 1; // BootRequest
+
+        // Option 55 (Parameter Request List)
+        // Code 55, Length 4, Values [1, 3, 6, 42]
+        payload[240] = 55;
+        payload[241] = 4;
+        payload[242] = 1;
+        payload[243] = 3;
+        payload[244] = 6;
+        payload[245] = 42;
+
+        payload[246] = 255; // End option
+
+        let result = parse_dhcpv4_payload(
+            &payload,
+            Ipv4Addr::new(0, 0, 0, 0),
+            Ipv4Addr::new(255, 255, 255, 255),
+            68,
+            67,
+        );
+
+        assert!(result.is_some());
+        let packet = result.unwrap();
+        assert_eq!(packet.parameter_request_list, Some(vec![1, 3, 6, 42]));
+    }
+
+    #[test]
+    fn test_device_tracker_fingerprint_matching() {
+        let temp_path = "/tmp/lanwatch_test_fingerprint.csv";
+        let _ = std::fs::remove_file(temp_path);
+
+        let mut tracker = DeviceTracker::new(temp_path).unwrap();
+
+        // 1. Windows Fingerprint: contains 249 (MS Classless Route)
+        let packet_win = Dhcpv4Packet {
+            source_ip: Ipv4Addr::new(0, 0, 0, 0),
+            dest_ip: Ipv4Addr::new(255, 255, 255, 255),
+            source_port: 68,
+            dest_port: 67,
+            operation: Dhcpv4Operation::BootRequest,
+            client_mac: [0x11, 0x22, 0x33, 0x44, 0x55, 0x66],
+            message_type: Some(Dhcpv4MessageType::Discover),
+            hostname: None,
+            requested_ip: Some(Ipv4Addr::new(192, 168, 1, 101)),
+            parameter_request_list: Some(vec![1, 3, 6, 15, 31, 33, 43, 44, 46, 47, 121, 249]),
+        };
+        tracker.update_from_dhcpv4(&packet_win);
+        {
+            let device = tracker.devices.get("11:22:33:44:55:66").unwrap();
+            assert_eq!(device.vendor.as_deref(), Some("Microsoft"));
+            assert_eq!(device.device_type.as_deref(), Some("PC/Windows"));
+        }
+
+        // 2. Apple Fingerprint: contains 95 (LDAP) and lacks 26/28
+        let packet_apple = Dhcpv4Packet {
+            source_ip: Ipv4Addr::new(0, 0, 0, 0),
+            dest_ip: Ipv4Addr::new(255, 255, 255, 255),
+            source_port: 68,
+            dest_port: 67,
+            operation: Dhcpv4Operation::BootRequest,
+            client_mac: [0x22, 0x33, 0x44, 0x55, 0x66, 0x77],
+            message_type: Some(Dhcpv4MessageType::Discover),
+            hostname: None,
+            requested_ip: Some(Ipv4Addr::new(192, 168, 1, 102)),
+            parameter_request_list: Some(vec![1, 3, 6, 15, 95, 119]),
+        };
+        tracker.update_from_dhcpv4(&packet_apple);
+        {
+            let device = tracker.devices.get("22:33:44:55:66:77").unwrap();
+            assert_eq!(device.vendor.as_deref(), Some("Apple"));
+            assert_eq!(device.device_type.as_deref(), Some("Apple Device"));
+        }
+
+        // 3. Android Fingerprint: contains 26 and 28
+        let packet_android = Dhcpv4Packet {
+            source_ip: Ipv4Addr::new(0, 0, 0, 0),
+            dest_ip: Ipv4Addr::new(255, 255, 255, 255),
+            source_port: 68,
+            dest_port: 67,
+            operation: Dhcpv4Operation::BootRequest,
+            client_mac: [0x33, 0x44, 0x55, 0x66, 0x77, 0x88],
+            message_type: Some(Dhcpv4MessageType::Discover),
+            hostname: None,
+            requested_ip: Some(Ipv4Addr::new(192, 168, 1, 103)),
+            parameter_request_list: Some(vec![1, 3, 6, 15, 26, 28, 121]),
+        };
+        tracker.update_from_dhcpv4(&packet_android);
+        {
+            let device = tracker.devices.get("33:44:55:66:77:88").unwrap();
+            assert_eq!(device.vendor.as_deref(), Some("Google"));
+            assert_eq!(device.device_type.as_deref(), Some("Android Phone"));
+        }
+
+        let _ = std::fs::remove_file(temp_path);
+    }
+
+    #[test]
+    #[cfg(any(feature = "mdns", feature = "ssdp"))]
+    fn test_parse_arp_packet() {
+        let mut frame = vec![0u8; 42];
+        // Ethernet Header
+        // Destination MAC (Broadcast)
+        frame[0..6].copy_from_slice(&[0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+        // Source MAC (00:11:22:33:44:55)
+        frame[6..12].copy_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+        // EtherType ARP (0x0806)
+        frame[12..14].copy_from_slice(&[0x08, 0x06]);
+
+        // ARP Packet
+        // Hardware type: Ethernet (0x0001)
+        frame[14..16].copy_from_slice(&[0x00, 0x01]);
+        // Protocol type: IPv4 (0x0800)
+        frame[16..18].copy_from_slice(&[0x08, 0x00]);
+        // Hardware size (6)
+        frame[18] = 6;
+        // Protocol size (4)
+        frame[19] = 4;
+        // Opcode: Request (0x0001)
+        frame[20..22].copy_from_slice(&[0x00, 0x01]);
+        // Sender MAC: 00:11:22:33:44:55
+        frame[22..28].copy_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+        // Sender IP: 192.168.1.50
+        frame[28..32].copy_from_slice(&[192, 168, 1, 50]);
+        // Target MAC: 00:00:00:00:00:00
+        frame[32..38].copy_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        // Target IP: 192.168.1.1
+        frame[38..42].copy_from_slice(&[192, 168, 1, 1]);
+
+        let result = process_ethernet_frame_extended(&frame);
+        assert!(result.is_some());
+        match result.unwrap() {
+            NetworkEvent::Arp {
+                source_mac,
+                source_ip,
+            } => {
+                assert_eq!(source_mac, "00:11:22:33:44:55");
+                assert_eq!(
+                    source_ip,
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 50))
+                );
+            }
+            _ => panic!("Expected NetworkEvent::Arp"),
+        }
     }
 }
