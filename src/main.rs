@@ -389,6 +389,20 @@ fn start_network_worker(
                                     );
                                 }
                             }
+                            #[cfg(feature = "mdns")]
+                            NetworkEvent::Nbns(packet) => {
+                                if _enable_mdns {
+                                    let updated_count = tracker.update_from_nbns(packet);
+                                    if updated_count > 0 {
+                                        pending_updates += 1;
+                                    }
+                                    print_nbns_packet(
+                                        packet,
+                                        updated_count,
+                                        tracker.device_count(),
+                                    );
+                                }
+                            }
                             #[cfg(feature = "ssdp")]
                             NetworkEvent::Ssdp(packet) => {
                                 if _enable_ssdp {
@@ -401,6 +415,16 @@ fn start_network_worker(
                                         updated_count,
                                         tracker.device_count(),
                                     );
+                                }
+                            }
+                            #[cfg(feature = "ssdp")]
+                            NetworkEvent::Wsd(packet) => {
+                                if _enable_ssdp {
+                                    let updated_count = tracker.update_from_wsd(packet);
+                                    if updated_count > 0 {
+                                        pending_updates += 1;
+                                    }
+                                    print_wsd_packet(packet, updated_count, tracker.device_count());
                                 }
                             }
                             NetworkEvent::Arp {
@@ -607,6 +631,30 @@ fn print_llmnr_packet(packet: &lanwatch::MdnsPacket, updated_count: usize, total
     println!("------------------------------");
 }
 
+#[cfg(feature = "mdns")]
+fn print_nbns_packet(packet: &lanwatch::NbnsPacket, updated_count: usize, total: usize) {
+    println!(
+        "\n[NetBIOS] Name Service from {} (MAC: {})",
+        packet.source_ip, packet.source_mac
+    );
+    println!("  Name: {}", packet.name);
+    let suffix_desc = match packet.suffix {
+        0x00 => "Workstation",
+        0x03 => "Messenger",
+        0x20 => "File Server",
+        _ => "Other",
+    };
+    println!("  Suffix: 0x{:02X} ({})", packet.suffix, suffix_desc);
+
+    if updated_count > 0 {
+        println!(
+            "-> [CSV Updated] {} device(s), Total: {}",
+            updated_count, total
+        );
+    }
+    println!("------------------------------");
+}
+
 #[cfg(feature = "ssdp")]
 fn print_ssdp_packet(packet: &SsdpPacket, updated_count: usize, total: usize) {
     println!(
@@ -629,6 +677,28 @@ fn print_ssdp_packet(packet: &SsdpPacket, updated_count: usize, total: usize) {
     }
     if let Some(location) = packet.header("location") {
         println!("  Location: {}", location);
+    }
+
+    if updated_count > 0 {
+        println!(
+            "-> [CSV Updated] {} device(s), Total: {}",
+            updated_count, total
+        );
+    }
+    println!("------------------------------");
+}
+
+#[cfg(feature = "ssdp")]
+fn print_wsd_packet(packet: &lanwatch::WsdPacket, updated_count: usize, total: usize) {
+    println!(
+        "\n[WS-Discovery] Hello/ProbeMatches from {} (MAC: {})",
+        packet.source_ip, packet.source_mac
+    );
+    if let Some(ref t) = packet.device_type {
+        println!("  Device Type: {}", t);
+    }
+    if let Some(ref v) = packet.vendor {
+        println!("  Vendor: {}", v);
     }
 
     if updated_count > 0 {

@@ -237,6 +237,8 @@ pub struct Dhcpv4Packet {
     pub parameter_request_list: Option<Vec<u8>>,
     /// Vendor class identifier (Option 60, from options)
     pub vendor_class_id: Option<String>,
+    /// Vendor specific info (Option 43, from options)
+    pub vendor_specific_info: Option<String>,
 }
 
 impl Dhcpv4Packet {
@@ -324,9 +326,15 @@ pub enum NetworkEvent {
     /// LLMNR packet
     #[cfg(feature = "mdns")]
     Llmnr(MdnsPacket),
+    /// NetBIOS Name Service packet
+    #[cfg(feature = "mdns")]
+    Nbns(NbnsPacket),
     /// SSDP/UPnP packet
     #[cfg(feature = "ssdp")]
     Ssdp(SsdpPacket),
+    /// WS-Discovery packet
+    #[cfg(feature = "ssdp")]
+    Wsd(WsdPacket),
     /// ARP packet
     Arp {
         source_mac: String,
@@ -407,6 +415,7 @@ pub fn parse_dhcpv4_payload(
     let mut requested_ip = None;
     let mut parameter_request_list = None;
     let mut vendor_class_id = None;
+    let mut vendor_specific_info = None;
 
     // BOOTP/DHCP fixed header fields
     // ciaddr: client IP address (set by client in bound/renewing states)
@@ -461,6 +470,27 @@ pub fn parse_dhcpv4_payload(
                     vendor_class_id = Some(v.to_string());
                 }
             }
+            43 => {
+                // Vendor Specific Info (Option 43)
+                let mut ascii_parts = Vec::new();
+                let mut current = Vec::new();
+                for &b in value {
+                    if (32..=126).contains(&b) {
+                        current.push(b);
+                    } else {
+                        if current.len() >= 4 && let Ok(s) = std::str::from_utf8(&current) {
+                            ascii_parts.push(s.trim().to_string());
+                        }
+                        current.clear();
+                    }
+                }
+                if current.len() >= 4 && let Ok(s) = std::str::from_utf8(&current) {
+                    ascii_parts.push(s.trim().to_string());
+                }
+                if !ascii_parts.is_empty() {
+                    vendor_specific_info = Some(ascii_parts.join(" "));
+                }
+            }
             _ => {}
         }
         index += 2 + len;
@@ -488,6 +518,7 @@ pub fn parse_dhcpv4_payload(
         requested_ip,
         parameter_request_list,
         vendor_class_id,
+        vendor_specific_info,
     })
 }
 
@@ -1747,6 +1778,34 @@ pub enum MdnsRecordData {
     Raw(Vec<u8>),
 }
 
+/// A parsed NetBIOS Name Service (NBNS) packet
+#[cfg(feature = "mdns")]
+#[derive(Debug, Clone)]
+pub struct NbnsPacket {
+    /// Source MAC address
+    pub source_mac: String,
+    /// Source IP address
+    pub source_ip: std::net::IpAddr,
+    /// NetBIOS name parsed from the packet
+    pub name: String,
+    /// NetBIOS name type suffix
+    pub suffix: u8,
+}
+
+/// A parsed WS-Discovery packet
+#[cfg(feature = "ssdp")]
+#[derive(Debug, Clone)]
+pub struct WsdPacket {
+    /// Source MAC address
+    pub source_mac: String,
+    /// Source IP address
+    pub source_ip: std::net::IpAddr,
+    /// Detected device type (if any)
+    pub device_type: Option<String>,
+    /// Detected vendor (if any)
+    pub vendor: Option<String>,
+}
+
 /// A parsed mDNS packet
 #[cfg(feature = "mdns")]
 #[derive(Debug, Clone)]
@@ -2090,6 +2149,128 @@ pub fn is_mdns_ports(src: u16, dest: u16) -> bool {
 #[cfg(feature = "mdns")]
 pub fn is_llmnr_ports(src: u16, dest: u16) -> bool {
     src == LLMNR_PORT || dest == LLMNR_PORT
+}
+
+/// NetBIOS Name Service port
+#[cfg(feature = "mdns")]
+pub const NBNS_PORT: u16 = 137;
+
+/// Checks if a pair of UDP ports corresponds to standard NBNS traffic (137).
+#[cfg(feature = "mdns")]
+pub fn is_nbns_ports(src: u16, dest: u16) -> bool {
+    src == NBNS_PORT || dest == NBNS_PORT
+}
+
+/// Decodes a NetBIOS encoded name from the payload starting at the given offset.
+/// NetBIOS names are encoded as a length byte (usually 32) followed by 32 characters representing 16 bytes.
+/// Returns the decoded String, the 16th byte suffix, and the next offset.
+#[cfg(feature = "mdns")]
+pub fn decode_netbios_name(payload: &[u8], offset: usize) -> Option<(String, u8, usize)> {
+    if offset >= payload.len() {
+        return None;
+    }
+    let len = payload[offset] as usize;
+    if len != 32 || offset + 1 + len > payload.len() {
+        return None;
+    }
+    let encoded = &payload[offset + 1..offset + 1 + len];
+    let mut decoded = Vec::with_capacity(16);
+    for i in 0..16 {
+        let c1 = encoded[i * 2];
+        let c2 = encoded[i * 2 + 1];
+        if !(0x41..=0x50).contains(&c1) || !(0x41..=0x50).contains(&c2) {
+            return None;
+        }
+        let b = ((c1 - 0x41) << 4) | (c2 - 0x41);
+        decoded.push(b);
+    }
+
+    // Suffix is the 16th byte
+    let suffix = decoded[15];
+
+    // Convert the first 15 bytes to a trimmed ASCII string
+    let name_bytes = &decoded[0..15];
+    let name_str = std::str::from_utf8(name_bytes).ok()?;
+    let name = name_str.trim().to_string();
+
+    // Next offset is after the label and the zero terminator
+    let next_offset = offset + 1 + len;
+    if next_offset < payload.len() && payload[next_offset] == 0 {
+        Some((name, suffix, next_offset + 1))
+    } else {
+        Some((name, suffix, next_offset))
+    }
+}
+
+/// Parses a raw NetBIOS (NBNS) UDP payload into a structured `NbnsPacket`.
+#[cfg(feature = "mdns")]
+pub fn parse_nbns_payload(
+    payload: &[u8],
+    source_mac: String,
+    source_ip: std::net::IpAddr,
+) -> Option<NbnsPacket> {
+    if payload.len() < 12 {
+        return None;
+    }
+    let flags = u16::from_be_bytes([payload[2], payload[3]]);
+    let is_response = (flags & 0x8000) != 0;
+    let qd_count = u16::from_be_bytes([payload[4], payload[5]]) as usize;
+    let an_count = u16::from_be_bytes([payload[6], payload[7]]) as usize;
+
+    let mut offset = 12;
+    if !is_response {
+        if qd_count > 0 {
+            let (name, suffix, _) = decode_netbios_name(payload, offset)?;
+            return Some(NbnsPacket {
+                source_mac,
+                source_ip,
+                name,
+                suffix,
+            });
+        }
+    } else {
+        for _ in 0..qd_count {
+            let (_, _, next_offset) = decode_netbios_name(payload, offset)?;
+            if next_offset + 4 <= payload.len() {
+                offset = next_offset + 4; // Skip Type and Class
+            } else {
+                return None;
+            }
+        }
+        if an_count > 0 && offset + 12 <= payload.len() {
+            let (name, suffix, next_offset) = decode_netbios_name(payload, offset)?;
+            offset = next_offset;
+            if offset + 10 <= payload.len() {
+                let rtype = u16::from_be_bytes([payload[offset], payload[offset + 1]]);
+                offset += 4; // Skip Type and Class
+                offset += 4; // Skip TTL
+                let rdlength = u16::from_be_bytes([payload[offset], payload[offset + 1]]) as usize;
+                offset += 2;
+                if rtype == 0x0020 && rdlength >= 6 && offset + rdlength <= payload.len() {
+                    let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+                        payload[offset + 2],
+                        payload[offset + 3],
+                        payload[offset + 4],
+                        payload[offset + 5],
+                    ));
+                    return Some(NbnsPacket {
+                        source_mac,
+                        source_ip: ip,
+                        name,
+                        suffix,
+                    });
+                } else {
+                    return Some(NbnsPacket {
+                        source_mac,
+                        source_ip,
+                        name,
+                        suffix,
+                    });
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Parses a raw mDNS UDP payload into a structured `MdnsPacket`.
@@ -2882,6 +3063,72 @@ pub fn is_ssdp_ports(src: u16, dest: u16) -> bool {
     src == SSDP_PORT || dest == SSDP_PORT
 }
 
+/// WS-Discovery port
+#[cfg(feature = "ssdp")]
+pub const WSD_PORT: u16 = 3702;
+
+/// Checks if a pair of UDP ports corresponds to standard WSD traffic (3702).
+#[cfg(feature = "ssdp")]
+pub fn is_wsd_ports(src: u16, dest: u16) -> bool {
+    src == WSD_PORT || dest == WSD_PORT
+}
+
+/// Parses a raw WS-Discovery UDP payload into a structured `WsdPacket`.
+#[cfg(feature = "ssdp")]
+pub fn parse_wsd_payload(
+    payload: &[u8],
+    source_mac: String,
+    source_ip: std::net::IpAddr,
+) -> Option<WsdPacket> {
+    let max_len = std::cmp::min(payload.len(), 8192);
+    let s = std::str::from_utf8(&payload[..max_len]).ok()?;
+
+    if !s.contains("http://schemas.xmlsoap.org/ws/2005/04/discovery") {
+        return None;
+    }
+
+    let mut device_type = None;
+    let mut vendor = None;
+
+    if s.contains("NetworkVideoTransmitter") {
+        device_type = Some("IP Camera".to_string());
+        vendor = Some("ONVIF".to_string());
+    } else if s.contains("PrintDevice") || s.contains("Printer") {
+        device_type = Some("Printer".to_string());
+    } else if s.contains("Computer") {
+        device_type = Some("PC/Computer".to_string());
+    }
+
+    if let Some(start) = s.find("<pub:ModelName>")
+        && let Some(end) = s[start..].find("</pub:ModelName>")
+    {
+        let model = &s[start + 15..start + end].trim();
+        if !model.is_empty() {
+            let m = model.to_lowercase();
+            if m.contains("canon") {
+                vendor = Some("Canon".to_string());
+            } else if m.contains("hp") {
+                vendor = Some("HP".to_string());
+            } else if m.contains("epson") {
+                vendor = Some("Epson".to_string());
+            } else if m.contains("brother") {
+                vendor = Some("Brother".to_string());
+            }
+        }
+    }
+
+    if device_type.is_some() || vendor.is_some() {
+        Some(WsdPacket {
+            source_mac,
+            source_ip,
+            device_type,
+            vendor,
+        })
+    } else {
+        None
+    }
+}
+
 /// Parses a raw SSDP/UPnP UDP payload into a structured `SsdpPacket`.
 ///
 /// # Arguments
@@ -3058,6 +3305,17 @@ fn process_ipv4_packet_extended(ethernet: &EthernetPacket) -> Option<NetworkEven
         return Some(NetworkEvent::Llmnr(packet));
     }
 
+    #[cfg(feature = "mdns")]
+    if is_nbns_ports(src, dest) {
+        let source_mac = ethernet.get_source().to_string();
+        let packet = parse_nbns_payload(
+            udp.payload(),
+            source_mac,
+            std::net::IpAddr::V4(ipv4.get_source()),
+        )?;
+        return Some(NetworkEvent::Nbns(packet));
+    }
+
     #[cfg(feature = "ssdp")]
     if is_ssdp_ports(src, dest) {
         let source_mac = ethernet.get_source().to_string();
@@ -3068,6 +3326,17 @@ fn process_ipv4_packet_extended(ethernet: &EthernetPacket) -> Option<NetworkEven
             std::net::IpAddr::V4(ipv4.get_destination()),
         )?;
         return Some(NetworkEvent::Ssdp(packet));
+    }
+
+    #[cfg(feature = "ssdp")]
+    if is_wsd_ports(src, dest) {
+        let source_mac = ethernet.get_source().to_string();
+        let packet = parse_wsd_payload(
+            udp.payload(),
+            source_mac,
+            std::net::IpAddr::V4(ipv4.get_source()),
+        )?;
+        return Some(NetworkEvent::Wsd(packet));
     }
 
     // Check for DHCPv4
@@ -3147,6 +3416,17 @@ fn process_ipv6_packet_extended(ethernet: &EthernetPacket) -> Option<NetworkEven
         return Some(NetworkEvent::Llmnr(packet));
     }
 
+    #[cfg(feature = "mdns")]
+    if is_nbns_ports(src, dest) {
+        let source_mac = ethernet.get_source().to_string();
+        let packet = parse_nbns_payload(
+            udp.payload(),
+            source_mac,
+            std::net::IpAddr::V6(ipv6.get_source()),
+        )?;
+        return Some(NetworkEvent::Nbns(packet));
+    }
+
     #[cfg(feature = "ssdp")]
     if is_ssdp_ports(src, dest) {
         let source_mac = ethernet.get_source().to_string();
@@ -3157,6 +3437,17 @@ fn process_ipv6_packet_extended(ethernet: &EthernetPacket) -> Option<NetworkEven
             std::net::IpAddr::V6(ipv6.get_destination()),
         )?;
         return Some(NetworkEvent::Ssdp(packet));
+    }
+
+    #[cfg(feature = "ssdp")]
+    if is_wsd_ports(src, dest) {
+        let source_mac = ethernet.get_source().to_string();
+        let packet = parse_wsd_payload(
+            udp.payload(),
+            source_mac,
+            std::net::IpAddr::V6(ipv6.get_source()),
+        )?;
+        return Some(NetworkEvent::Wsd(packet));
     }
 
     // Check for DHCPv6
@@ -4064,59 +4355,94 @@ impl DeviceTracker {
 
         let mut changed = self.update_device(&mac, ip, packet.hostname.as_deref());
 
-        // Apply Option 55 and Option 60 fingerprints if present
-        let csv_line =
-            if packet.parameter_request_list.is_some() || packet.vendor_class_id.is_some() {
-                if let Some(device) = self.devices.get_mut(&mac) {
-                    let mut opt_vendor = None;
-                    let mut opt_type = None;
+        // Apply Option 55, 60, and 43 fingerprints if present
+        let csv_line = if packet.parameter_request_list.is_some()
+            || packet.vendor_class_id.is_some()
+            || packet.vendor_specific_info.is_some()
+        {
+            if let Some(device) = self.devices.get_mut(&mac) {
+                let mut opt_vendor = None;
+                let mut opt_type = None;
 
-                    if let Some(ref vc) = packet.vendor_class_id {
-                        let (v, t) = Self::detect_device_details_from_dhcp_vendor_class(vc);
-                        opt_vendor = v;
-                        opt_type = t;
-                    }
+                if let Some(ref vc) = packet.vendor_class_id {
+                    let (v, t) = Self::detect_device_details_from_dhcp_vendor_class(vc);
+                    opt_vendor = v;
+                    opt_type = t;
+                }
 
-                    if (opt_vendor.is_none() || opt_type.is_none())
-                        && let Some(ref prl) = packet.parameter_request_list
-                    {
-                        let (v, t) = Self::detect_device_details_from_dhcp_options(prl);
-                        if opt_vendor.is_none() {
-                            opt_vendor = v;
-                        }
-                        if opt_type.is_none() {
-                            opt_type = t;
-                        }
-                    }
-
-                    let mut local_changed = false;
-                    if let Some(v) = opt_vendor
-                        && (device.vendor.is_none()
-                            || (device.vendor.as_deref() != Some(v)
-                                && device
-                                    .vendor
-                                    .as_deref()
-                                    .map(|ov| ov.to_lowercase())
-                                    .as_deref()
-                                    == Some("eero inc.")))
-                    {
-                        device.vendor = Some(v.to_string());
-                        local_changed = true;
-                    }
-                    if let Some(t) = opt_type
-                        && device.device_type.is_none()
-                    {
-                        device.device_type = Some(t.to_string());
-                        local_changed = true;
-                    }
-                    if local_changed {
-                        self.dirty_devices.lock().unwrap().insert(mac.clone());
-                        changed = true;
-                        if self.auto_save {
-                            Some(device.to_csv_line())
+                if let Some(ref vsi) = packet.vendor_specific_info {
+                    let vsi_lower = vsi.to_lowercase();
+                    let inferred_vendor =
+                        if vsi_lower.contains("ubnt") || vsi_lower.contains("unifi") {
+                            Some("Ubiquiti")
+                        } else if vsi_lower.contains("yealink") {
+                            Some("Yealink")
+                        } else if vsi_lower.contains("polycom") {
+                            Some("Polycom")
+                        } else if vsi_lower.contains("cisco") {
+                            Some("Cisco")
+                        } else if vsi_lower.contains("mitel") {
+                            Some("Mitel")
+                        } else if vsi_lower.contains("avaya") {
+                            Some("Avaya")
                         } else {
                             None
+                        };
+                    if let Some(vendor) = inferred_vendor {
+                        if opt_vendor.is_none() {
+                            opt_vendor = Some(vendor);
                         }
+                        if opt_type.is_none() {
+                            if vendor == "Ubiquiti" {
+                                opt_type = Some("Network Device");
+                            } else if vendor == "Yealink"
+                                || vendor == "Polycom"
+                                || vendor == "Mitel"
+                                || vendor == "Avaya"
+                            {
+                                opt_type = Some("IP Phone");
+                            }
+                        }
+                    }
+                }
+
+                if (opt_vendor.is_none() || opt_type.is_none())
+                    && let Some(ref prl) = packet.parameter_request_list
+                {
+                    let (v, t) = Self::detect_device_details_from_dhcp_options(prl);
+                    if opt_vendor.is_none() {
+                        opt_vendor = v;
+                    }
+                    if opt_type.is_none() {
+                        opt_type = t;
+                    }
+                }
+
+                let mut local_changed = false;
+                if let Some(v) = opt_vendor
+                    && (device.vendor.is_none()
+                        || (device.vendor.as_deref() != Some(v)
+                            && device
+                                .vendor
+                                .as_deref()
+                                .map(|ov| ov.to_lowercase())
+                                .as_deref()
+                                == Some("eero inc.")))
+                {
+                    device.vendor = Some(v.to_string());
+                    local_changed = true;
+                }
+                if let Some(t) = opt_type
+                    && device.device_type.is_none()
+                {
+                    device.device_type = Some(t.to_string());
+                    local_changed = true;
+                }
+                if local_changed {
+                    self.dirty_devices.lock().unwrap().insert(mac.clone());
+                    changed = true;
+                    if self.auto_save {
+                        Some(device.to_csv_line())
                     } else {
                         None
                     }
@@ -4125,7 +4451,10 @@ impl DeviceTracker {
                 }
             } else {
                 None
-            };
+            }
+        } else {
+            None
+        };
 
         if let Some(line) = csv_line {
             let _ = self.append_journal_line(&line);
@@ -4191,6 +4520,7 @@ impl DeviceTracker {
         // Collect services advertised by this device
         let mut services: Vec<&str> = Vec::new();
         let mut seen_services: HashSet<&str> = HashSet::new();
+        let mut txt_attrs = HashMap::new();
 
         for record in packet.all_records() {
             match &record.data {
@@ -4233,6 +4563,17 @@ impl DeviceTracker {
                         }
                     }
                 }
+                MdnsRecordDataView::Txt(strings) => {
+                    for s in strings {
+                        if let Some(eq_idx) = s.find('=') {
+                            let key = s[..eq_idx].trim().to_lowercase();
+                            let val = s[eq_idx + 1..].trim();
+                            if !val.is_empty() {
+                                txt_attrs.insert(key, val);
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -4245,12 +4586,58 @@ impl DeviceTracker {
             }
         }
 
+        let mut txt_vendor = None;
+        let mut txt_device_type = None;
+
+        if let Some(model) = txt_attrs
+            .get("model")
+            .or_else(|| txt_attrs.get("md"))
+            .or_else(|| txt_attrs.get("ty"))
+        {
+            let m = model.to_lowercase();
+            if m.contains("appletv") || m.contains("apple tv") {
+                txt_vendor = Some("Apple");
+                txt_device_type = Some("Apple TV");
+            } else if m.contains("macbook")
+                || m.contains("imac")
+                || m.contains("macmini")
+                || m.contains("macpro")
+            {
+                txt_vendor = Some("Apple");
+                txt_device_type = Some("Mac");
+            } else if m.contains("chromecast") {
+                txt_vendor = Some("Google");
+                txt_device_type = Some("Media Player");
+            } else if m.contains("hp ")
+                || m.contains("laserjet")
+                || m.contains("officejet")
+                || m.contains("deskjet")
+            {
+                txt_vendor = Some("HP");
+                txt_device_type = Some("Printer");
+            } else if m.contains("epson") {
+                txt_vendor = Some("Epson");
+                txt_device_type = Some("Printer");
+            } else if m.contains("canon") {
+                txt_vendor = Some("Canon");
+                txt_device_type = Some("Printer");
+            } else if m.contains("brother") {
+                txt_vendor = Some("Brother");
+                txt_device_type = Some("Printer");
+            } else if m.contains("sonos") {
+                txt_vendor = Some("Sonos");
+                txt_device_type = Some("Smart Speaker");
+            }
+        }
+
         // Determine vendor and device type from services and hostname (before borrowing device)
         let vendor = Self::detect_vendor_from_hostname(first_hostname)
             .map(str::to_string)
+            .or_else(|| txt_vendor.map(str::to_string))
             .or_else(|| self.detect_vendor_from_services(&services));
         let device_type = Self::detect_device_type_from_hostname(first_hostname)
             .map(str::to_string)
+            .or_else(|| txt_device_type.map(str::to_string))
             .or_else(|| self.detect_device_type_from_services(&services));
 
         let ipv6_addr = first_ipv6;
@@ -4340,6 +4727,87 @@ impl DeviceTracker {
     #[cfg(feature = "mdns")]
     pub fn update_from_llmnr(&mut self, packet: &MdnsPacket) -> usize {
         self.update_from_mdns(packet)
+    }
+
+    /// Updates the tracker state with information extracted from a NetBIOS Name Service (NBNS) packet.
+    ///
+    /// # Returns
+    /// Number of updated/added devices.
+    #[cfg(feature = "mdns")]
+    pub fn update_from_nbns(&mut self, packet: &NbnsPacket) -> usize {
+        let mac = &packet.source_mac;
+        let mut updated = 0;
+
+        let hostname = Some(packet.name.as_str());
+        let mut vendor = Self::detect_vendor_from_hostname(hostname).map(str::to_string);
+        let mut device_type = Self::detect_device_type_from_hostname(hostname).map(str::to_string);
+
+        // Customize vendor/device type based on NetBIOS specific suffix rules
+        if packet.suffix == 0x20 && device_type.is_none() {
+            device_type = Some("File Server".to_string());
+        }
+        if packet.name.to_lowercase().contains("samba") {
+            if vendor.is_none() {
+                vendor = Some("Linux".to_string());
+            }
+            if device_type.is_none() {
+                device_type = Some("Storage (NAS)".to_string());
+            }
+        }
+
+        let csv_line = {
+            let device = self.devices.entry(mac.to_string()).or_insert_with(|| {
+                updated += 1;
+                DeviceInfo::new(mac.to_string(), packet.source_ip, None)
+            });
+
+            // Update IP if currently unspecified
+            if matches!(device.ip_address, IpAddr::V4(addr) if addr.is_unspecified()) {
+                device.ip_address = packet.source_ip;
+                updated += 1;
+            }
+
+            // Update hostname
+            if device.hostname.is_none() {
+                device.hostname = Some(packet.name.clone());
+                updated += 1;
+            }
+
+            // Update vendor
+            if let Some(ref v) = vendor {
+                let oui_vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(mac));
+                if Self::should_replace_vendor(device.vendor.as_deref(), v, oui_vendor) {
+                    device.vendor = Some(v.clone());
+                    updated += 1;
+                }
+            }
+
+            // Update device type
+            if let Some(ref t) = device_type
+                && Self::should_replace_device_type(device.device_type.as_deref(), t)
+            {
+                device.device_type = Some(t.clone());
+                updated += 1;
+            }
+
+            device.last_seen = SystemTime::now();
+
+            if updated > 0 && self.auto_save {
+                Some(device.to_csv_line())
+            } else {
+                None
+            }
+        };
+
+        if let Some(line) = csv_line {
+            let _ = self.append_journal_line(&line);
+        }
+
+        if updated > 0 {
+            self.dirty_devices.lock().unwrap().insert(mac.clone());
+        }
+
+        updated
     }
 
     /// Detect vendor and device type from DHCP Option 60 (Vendor Class Identifier)
@@ -4477,6 +4945,76 @@ impl DeviceTracker {
             return Some("HP");
         }
 
+        // Newly added signatures
+        if hostname.contains("sonos") {
+            return Some("Sonos");
+        }
+        if hostname.contains("roku") {
+            return Some("Roku");
+        }
+        if hostname.contains("appletv") || hostname.contains("apple-tv") {
+            return Some("Apple");
+        }
+        if hostname.starts_with("esp32-")
+            || hostname.starts_with("esp-")
+            || hostname.starts_with("espressif-")
+            || hostname.contains("_esp32")
+        {
+            return Some("Espressif");
+        }
+        if hostname.starts_with("raspberrypi")
+            || hostname.starts_with("raspberry-pi")
+            || hostname.starts_with("pi-")
+        {
+            return Some("Raspberry Pi");
+        }
+        if hostname.starts_with("synology-")
+            || hostname.contains("synology")
+            || hostname.starts_with("nas-")
+        {
+            return Some("Synology");
+        }
+        if hostname.starts_with("kindle-") {
+            return Some("Amazon");
+        }
+        if hostname.starts_with("nintendo-") {
+            return Some("Nintendo");
+        }
+        if hostname.starts_with("playstation-")
+            || hostname.starts_with("ps4-")
+            || hostname.starts_with("ps5-")
+        {
+            return Some("Sony");
+        }
+        if hostname.starts_with("xbox-") {
+            return Some("Microsoft");
+        }
+        if hostname.starts_with("hp-")
+            || hostname.starts_with("hp_")
+            || hostname.contains("hewlett-packard")
+            || hostname.contains("jetdirect")
+        {
+            return Some("HP");
+        }
+        if hostname.starts_with("canon-") || hostname.contains("canon") {
+            return Some("Canon");
+        }
+        if hostname.starts_with("brother-") || hostname.contains("brother") {
+            return Some("Brother");
+        }
+        if hostname.starts_with("epson-") || hostname.contains("epson") {
+            return Some("Epson");
+        }
+        if hostname.starts_with("ring-") || hostname.contains("ring-doorbell") {
+            return Some("Ring");
+        }
+        if hostname.starts_with("wemo-") {
+            return Some("Belkin");
+        }
+        if hostname.starts_with("philips-hue") || hostname.starts_with("hue-") {
+            return Some("Philips");
+        }
+
         None
     }
 
@@ -4553,6 +5091,76 @@ impl DeviceTracker {
         // Android phones
         if hostname.starts_with("android") || hostname.starts_with("android_") {
             return Some("Android Phone");
+        }
+
+        // Newly added signatures
+        if hostname.contains("sonos") {
+            return Some("Smart Speaker");
+        }
+        if hostname.contains("roku") {
+            return Some("Media Player");
+        }
+        if hostname.contains("chromecast") {
+            return Some("Media Player");
+        }
+        if hostname.contains("appletv") || hostname.contains("apple-tv") {
+            return Some("Apple TV");
+        }
+        if hostname.starts_with("google-home") || hostname.contains("googlehome") {
+            return Some("Smart Speaker");
+        }
+        if hostname.starts_with("ring-") || hostname.contains("ring-doorbell") {
+            return Some("Smart Doorbell");
+        }
+        if hostname.starts_with("wemo-") {
+            return Some("Smart Plug");
+        }
+        if hostname.starts_with("philips-hue") || hostname.starts_with("hue-") {
+            return Some("Smart Light");
+        }
+        if hostname.starts_with("esp32-")
+            || hostname.starts_with("esp-")
+            || hostname.starts_with("espressif-")
+            || hostname.contains("_esp32")
+        {
+            return Some("IoT Device");
+        }
+        if hostname.starts_with("raspberrypi")
+            || hostname.starts_with("raspberry-pi")
+            || hostname.starts_with("pi-")
+        {
+            return Some("Single-board Computer");
+        }
+        if hostname.starts_with("synology-")
+            || hostname.contains("synology")
+            || hostname.starts_with("nas-")
+        {
+            return Some("Storage (NAS)");
+        }
+        if hostname.starts_with("kindle-") {
+            return Some("e-Reader");
+        }
+        if hostname.starts_with("nintendo-") {
+            return Some("Game Console");
+        }
+        if hostname.starts_with("playstation-")
+            || hostname.starts_with("ps4-")
+            || hostname.starts_with("ps5-")
+        {
+            return Some("Game Console");
+        }
+        if hostname.starts_with("xbox-") {
+            return Some("Game Console");
+        }
+        if hostname.starts_with("hp-")
+            || hostname.starts_with("hp_")
+            || hostname.contains("hewlett-packard")
+            || hostname.contains("jetdirect")
+            || hostname.contains("canon")
+            || hostname.contains("brother")
+            || hostname.contains("epson")
+        {
+            return Some("Printer");
         }
 
         None
@@ -4848,6 +5456,64 @@ impl DeviceTracker {
         }
 
         self.dirty_devices.lock().unwrap().insert(mac.to_string());
+
+        updated
+    }
+
+    /// Updates the tracker state with information from a WS-Discovery (WSD) packet.
+    ///
+    /// # Returns
+    /// The count of unique updates applied to the device entry.
+    #[cfg(feature = "ssdp")]
+    pub fn update_from_wsd(&mut self, packet: &WsdPacket) -> usize {
+        let mac = &packet.source_mac;
+        let mut updated = 0;
+
+        let csv_line = {
+            let device = self.devices.entry(mac.to_string()).or_insert_with(|| {
+                updated += 1;
+                DeviceInfo::new(mac.to_string(), packet.source_ip, None)
+            });
+
+            // Update IP if currently unspecified
+            if matches!(device.ip_address, IpAddr::V4(addr) if addr.is_unspecified()) {
+                device.ip_address = packet.source_ip;
+                updated += 1;
+            }
+
+            // Update vendor
+            if let Some(ref v) = packet.vendor {
+                let oui_vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(mac));
+                if Self::should_replace_vendor(device.vendor.as_deref(), v, oui_vendor) {
+                    device.vendor = Some(v.clone());
+                    updated += 1;
+                }
+            }
+
+            // Update device type
+            if let Some(ref t) = packet.device_type
+                && Self::should_replace_device_type(device.device_type.as_deref(), t)
+            {
+                device.device_type = Some(t.clone());
+                updated += 1;
+            }
+
+            device.last_seen = SystemTime::now();
+
+            if updated > 0 && self.auto_save {
+                Some(device.to_csv_line())
+            } else {
+                None
+            }
+        };
+
+        if let Some(line) = csv_line {
+            let _ = self.append_journal_line(&line);
+        }
+
+        if updated > 0 {
+            self.dirty_devices.lock().unwrap().insert(mac.to_string());
+        }
 
         updated
     }
@@ -5731,6 +6397,7 @@ mod tests {
             requested_ip: Some(Ipv4Addr::new(192, 168, 1, 100)),
             parameter_request_list: None,
             vendor_class_id: None,
+            vendor_specific_info: None,
         };
 
         let is_new = tracker.update_from_dhcpv4(&packet);
@@ -5768,6 +6435,7 @@ mod tests {
             requested_ip: None,
             parameter_request_list: None,
             vendor_class_id: None,
+            vendor_specific_info: None,
         };
 
         tracker.update_from_dhcpv4(&packet);
@@ -5863,6 +6531,7 @@ mod tests {
             requested_ip: Some(Ipv4Addr::new(192, 168, 4, 112)),
             parameter_request_list: None,
             vendor_class_id: None,
+            vendor_specific_info: None,
         };
 
         tracker.update_from_dhcpv4(&packet);
@@ -5897,6 +6566,7 @@ mod tests {
             requested_ip: Some(Ipv4Addr::new(192, 168, 4, 36)),
             parameter_request_list: None,
             vendor_class_id: None,
+            vendor_specific_info: None,
         };
 
         tracker.update_from_dhcpv4(&packet);
@@ -5931,6 +6601,7 @@ mod tests {
             requested_ip: Some(Ipv4Addr::new(192, 168, 7, 193)),
             parameter_request_list: None,
             vendor_class_id: None,
+            vendor_specific_info: None,
         };
 
         tracker.update_from_dhcpv4(&packet);
@@ -5962,6 +6633,7 @@ mod tests {
             requested_ip: Some(Ipv4Addr::new(192, 168, 7, 1)),
             parameter_request_list: None,
             vendor_class_id: None,
+            vendor_specific_info: None,
         };
 
         tracker.update_from_dhcpv4(&packet);
@@ -6101,6 +6773,7 @@ mod tests {
                 requested_ip: Some(Ipv4Addr::new(192, 168, 1, 100)),
                 parameter_request_list: None,
                 vendor_class_id: None,
+                vendor_specific_info: None,
             };
             tracker.update_from_dhcpv4(&packet);
             assert_eq!(tracker.device_count(), 1);
@@ -6170,6 +6843,7 @@ mod tests {
             requested_ip: Some(Ipv4Addr::new(192, 168, 1, 1)),
             parameter_request_list: None,
             vendor_class_id: None,
+            vendor_specific_info: None,
         };
         tracker.update_from_dhcpv4(&packet1);
 
@@ -6185,6 +6859,7 @@ mod tests {
             requested_ip: Some(Ipv4Addr::new(192, 168, 1, 2)),
             parameter_request_list: None,
             vendor_class_id: None,
+            vendor_specific_info: None,
         };
         tracker.update_from_dhcpv4(&packet2);
 
@@ -6418,6 +7093,7 @@ mod tests {
             requested_ip: Some(Ipv4Addr::new(192, 168, 1, 100)),
             parameter_request_list: None,
             vendor_class_id: None,
+            vendor_specific_info: None,
         };
         tracker.update_from_dhcpv4(&packet1);
         assert_eq!(tracker.device_count(), 1);
@@ -6435,6 +7111,7 @@ mod tests {
             requested_ip: Some(Ipv4Addr::new(192, 168, 1, 200)),
             parameter_request_list: None,
             vendor_class_id: None,
+            vendor_specific_info: None,
         };
         let changed = tracker.update_from_dhcpv4(&packet2);
         assert!(changed);
@@ -7207,6 +7884,7 @@ mod tests {
             requested_ip: Some(Ipv4Addr::new(192, 168, 1, 101)),
             parameter_request_list: Some(vec![1, 3, 6, 15, 31, 33, 43, 44, 46, 47, 121, 249]),
             vendor_class_id: None,
+            vendor_specific_info: None,
         };
         tracker.update_from_dhcpv4(&packet_win);
         {
@@ -7228,6 +7906,7 @@ mod tests {
             requested_ip: Some(Ipv4Addr::new(192, 168, 1, 102)),
             parameter_request_list: Some(vec![1, 3, 6, 15, 95, 119]),
             vendor_class_id: None,
+            vendor_specific_info: None,
         };
         tracker.update_from_dhcpv4(&packet_apple);
         {
@@ -7249,6 +7928,7 @@ mod tests {
             requested_ip: Some(Ipv4Addr::new(192, 168, 1, 103)),
             parameter_request_list: Some(vec![1, 3, 6, 15, 26, 28, 121]),
             vendor_class_id: None,
+            vendor_specific_info: None,
         };
         tracker.update_from_dhcpv4(&packet_android);
         {
@@ -7270,6 +7950,7 @@ mod tests {
             requested_ip: Some(Ipv4Addr::new(192, 168, 1, 104)),
             parameter_request_list: None,
             vendor_class_id: Some("MSFT 5.0".to_string()),
+            vendor_specific_info: None,
         };
         tracker.update_from_dhcpv4(&packet_win60);
         {
@@ -7291,6 +7972,7 @@ mod tests {
             requested_ip: Some(Ipv4Addr::new(192, 168, 1, 105)),
             parameter_request_list: None,
             vendor_class_id: Some("Hewlett-Packard JetDirect".to_string()),
+            vendor_specific_info: None,
         };
         tracker.update_from_dhcpv4(&packet_hp60);
         {
@@ -7395,5 +8077,283 @@ mod tests {
         let dev = tracker.devices.get("00:11:22:33:44:55").unwrap();
         assert_eq!(dev.hostname.as_deref(), Some("myhost"));
         let _ = std::fs::remove_file(temp_path);
+    }
+
+    #[test]
+    fn test_dhcpv4_option43_parsing() {
+        let mut payload = vec![0u8; 300];
+        payload[0] = 1; // BootRequest
+        payload[28] = 0xAA;
+        payload[29] = 0xBB;
+        payload[30] = 0xCC;
+        payload[31] = 0xDD;
+        payload[32] = 0xEE;
+        payload[33] = 0x11;
+
+        // Option 43 (Vendor Specific Info)
+        payload[240] = 43;
+        payload[241] = 10; // Length
+        payload[242..252].copy_from_slice(b"\x01\x08UniFi-AP");
+
+        payload[252] = 255; // End option
+
+        let result = parse_dhcpv4_payload(
+            &payload,
+            Ipv4Addr::new(0, 0, 0, 0),
+            Ipv4Addr::new(255, 255, 255, 255),
+            68,
+            67,
+        );
+
+        assert!(result.is_some());
+        let packet = result.unwrap();
+        assert_eq!(packet.vendor_specific_info, Some("UniFi-AP".to_string()));
+
+        // Also test how DeviceTracker updates vendor/type from option 43
+        let temp_path = "/tmp/lanwatch_test_opt43_device.csv";
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+        {
+            let mut tracker = DeviceTracker::new(temp_path).unwrap();
+            tracker.update_from_dhcpv4(&packet);
+            let device = tracker.devices.get("aa:bb:cc:dd:ee:11").unwrap();
+            assert_eq!(device.vendor.as_deref(), Some("Ubiquiti"));
+            assert_eq!(device.device_type.as_deref(), Some("Network Device"));
+        }
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+    }
+
+    #[test]
+    fn test_hostname_classifier() {
+        // Test Sonos mapping
+        assert_eq!(
+            DeviceTracker::detect_vendor_from_hostname(Some("sonos-living")),
+            Some("Sonos")
+        );
+        assert_eq!(
+            DeviceTracker::detect_device_type_from_hostname(Some("sonos-living")),
+            Some("Smart Speaker")
+        );
+
+        // Test ESP32 mapping
+        assert_eq!(
+            DeviceTracker::detect_vendor_from_hostname(Some("esp32-weather")),
+            Some("Espressif")
+        );
+        assert_eq!(
+            DeviceTracker::detect_device_type_from_hostname(Some("esp32-weather")),
+            Some("IoT Device")
+        );
+
+        // Test HP printer mapping
+        assert_eq!(
+            DeviceTracker::detect_vendor_from_hostname(Some("hp-printer-12")),
+            Some("HP")
+        );
+        assert_eq!(
+            DeviceTracker::detect_device_type_from_hostname(Some("hp-printer-12")),
+            Some("Printer")
+        );
+
+        // Test Kindle mapping
+        assert_eq!(
+            DeviceTracker::detect_vendor_from_hostname(Some("kindle-reader")),
+            Some("Amazon")
+        );
+        assert_eq!(
+            DeviceTracker::detect_device_type_from_hostname(Some("kindle-reader")),
+            Some("e-Reader")
+        );
+
+        // Test Synology mapping
+        assert_eq!(
+            DeviceTracker::detect_vendor_from_hostname(Some("synology-nas")),
+            Some("Synology")
+        );
+        assert_eq!(
+            DeviceTracker::detect_device_type_from_hostname(Some("synology-nas")),
+            Some("Storage (NAS)")
+        );
+
+        // Test PlayStation mapping
+        assert_eq!(
+            DeviceTracker::detect_vendor_from_hostname(Some("playstation-5")),
+            Some("Sony")
+        );
+        assert_eq!(
+            DeviceTracker::detect_device_type_from_hostname(Some("playstation-5")),
+            Some("Game Console")
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "mdns")]
+    fn test_mdns_txt_record_parsing() {
+        let temp_path = "/tmp/lanwatch_test_mdns_txt.csv";
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+
+        let mut tracker = DeviceTracker::new(temp_path).unwrap();
+
+        // 1. Apple TV TXT record (key: model)
+        let packet_appletv = MdnsPacket {
+            source_mac: "00:11:22:33:44:55".to_string(),
+            source_ip: std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)),
+            dest_ip: std::net::IpAddr::V4(Ipv4Addr::new(224, 0, 0, 251)),
+            transaction_id: 1,
+            is_response: true,
+            questions: vec![],
+            answers: vec![MdnsRecord {
+                name: "Living Room Apple TV.local".to_string(),
+                record_type: MdnsRecordType::Txt,
+                ttl: 120,
+                data: MdnsRecordData::Txt(vec!["model=AppleTV14,1".to_string()]),
+            }],
+            authority: vec![],
+            additional: vec![],
+        };
+        tracker.update_from_mdns(&packet_appletv);
+        {
+            let device = tracker.devices.get("00:11:22:33:44:55").unwrap();
+            assert_eq!(device.vendor.as_deref(), Some("Apple"));
+            assert_eq!(device.device_type.as_deref(), Some("Apple TV"));
+        }
+
+        // 2. Sonos TXT record (key: md)
+        let packet_sonos = MdnsPacket {
+            source_mac: "00:11:22:33:44:66".to_string(),
+            source_ip: std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 1, 51)),
+            dest_ip: std::net::IpAddr::V4(Ipv4Addr::new(224, 0, 0, 251)),
+            transaction_id: 2,
+            is_response: true,
+            questions: vec![],
+            answers: vec![MdnsRecord {
+                name: "Sonos Play.local".to_string(),
+                record_type: MdnsRecordType::Txt,
+                ttl: 120,
+                data: MdnsRecordData::Txt(vec!["md=Sonos Play:1".to_string()]),
+            }],
+            authority: vec![],
+            additional: vec![],
+        };
+        tracker.update_from_mdns(&packet_sonos);
+        {
+            let device = tracker.devices.get("00:11:22:33:44:66").unwrap();
+            assert_eq!(device.vendor.as_deref(), Some("Sonos"));
+            assert_eq!(device.device_type.as_deref(), Some("Smart Speaker"));
+        }
+
+        // 3. Printer TXT record (key: ty)
+        let packet_printer = MdnsPacket {
+            source_mac: "00:11:22:33:44:77".to_string(),
+            source_ip: std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 1, 52)),
+            dest_ip: std::net::IpAddr::V4(Ipv4Addr::new(224, 0, 0, 251)),
+            transaction_id: 3,
+            is_response: true,
+            questions: vec![],
+            answers: vec![MdnsRecord {
+                name: "HP Laserjet.local".to_string(),
+                record_type: MdnsRecordType::Txt,
+                ttl: 120,
+                data: MdnsRecordData::Txt(vec!["ty=HP LaserJet Pro".to_string()]),
+            }],
+            authority: vec![],
+            additional: vec![],
+        };
+        tracker.update_from_mdns(&packet_printer);
+        {
+            let device = tracker.devices.get("00:11:22:33:44:77").unwrap();
+            assert_eq!(device.vendor.as_deref(), Some("HP"));
+            assert_eq!(device.device_type.as_deref(), Some("Printer"));
+        }
+
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+    }
+
+    #[test]
+    #[cfg(feature = "mdns")]
+    fn test_parse_nbns_packet() {
+        let mut payload = vec![0u8; 12];
+        // Transaction ID
+        payload[0..2].copy_from_slice(&[0x12, 0x34]);
+        // Flags (Query, Opcode 0, not response)
+        payload[2..4].copy_from_slice(&[0x00, 0x00]);
+        // QDCount = 1
+        payload[4..6].copy_from_slice(&[0x00, 0x01]);
+
+        // Encoded name: "SAMBA" with suffix 0x20
+        let encoded_name = b"FDEBENECEBCACACACACACACACACACACA";
+        payload.push(32); // length byte
+        payload.extend_from_slice(encoded_name);
+        payload.push(0); // null terminator
+
+        let result = parse_nbns_payload(
+            &payload,
+            "aa:bb:cc:dd:ee:ff".to_string(),
+            std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
+        );
+
+        assert!(result.is_some());
+        let packet = result.unwrap();
+        assert_eq!(packet.name, "SAMBA");
+        assert_eq!(packet.suffix, 0x20);
+
+        // Also test how DeviceTracker handles the update
+        let temp_path = "/tmp/lanwatch_test_nbns_device.csv";
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+        {
+            let mut tracker = DeviceTracker::new(temp_path).unwrap();
+            tracker.update_from_nbns(&packet);
+            let device = tracker.devices.get("aa:bb:cc:dd:ee:ff").unwrap();
+            assert_eq!(device.hostname.as_deref(), Some("SAMBA"));
+            assert_eq!(device.vendor.as_deref(), Some("Linux"));
+            assert_eq!(device.device_type.as_deref(), Some("File Server"));
+        }
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_parse_wsd_packet() {
+        let xml_payload = r#"<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope" xmlns:wsd="http://schemas.xmlsoap.org/ws/2005/04/discovery" xmlns:pub="http://schemas.microsoft.com/windows/pub/2005/07">
+  <soap:Body>
+    <wsd:ProbeMatches>
+      <wsd:ProbeMatch>
+        <wsd:Types>wsd:Device NetworkVideoTransmitter</wsd:Types>
+        <pub:ModelName>Canon IP Camera</pub:ModelName>
+      </wsd:ProbeMatch>
+    </wsd:ProbeMatches>
+  </soap:Body>
+</soap:Envelope>"#;
+
+        let result = parse_wsd_payload(
+            xml_payload.as_bytes(),
+            "00:11:22:33:44:55".to_string(),
+            std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
+        );
+
+        assert!(result.is_some());
+        let packet = result.unwrap();
+        assert_eq!(packet.device_type, Some("IP Camera".to_string()));
+        assert_eq!(packet.vendor, Some("Canon".to_string()));
+
+        // Also test how DeviceTracker updates from WS-Discovery
+        let temp_path = "/tmp/lanwatch_test_wsd_device.csv";
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+        {
+            let mut tracker = DeviceTracker::new(temp_path).unwrap();
+            tracker.update_from_wsd(&packet);
+            let device = tracker.devices.get("00:11:22:33:44:55").unwrap();
+            assert_eq!(device.vendor.as_deref(), Some("Canon"));
+            assert_eq!(device.device_type.as_deref(), Some("IP Camera"));
+        }
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
     }
 }
