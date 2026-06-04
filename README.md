@@ -149,33 +149,28 @@ service descriptions (e.g., "_googlecast._tcp" → "Chromecast").
 
 ### IEEE OUI Database
 
-The tool uses the `oui-data` crate which provides the complete IEEE OUI (Organizationally Unique Identifier) 
-database with **40,000+ vendor entries**. This allows automatic identification of device manufacturers based 
-on the first 3 bytes of their MAC address.
+To prevent the binary from growing bloated and containing stale database listings, LANwatch does not bundle the IEEE OUI database. Instead, you can download the latest official IEEE registry dynamically and load it at runtime.
 
-**Benefits of the oui-data crate:**
-- Complete IEEE OUI registry (40,000+ entries)
-- Regularly updated as new vendors are registered
-- No manual maintenance of vendor lists required
+**How to download and use the latest OUI registry:**
 
-**Built-in coverage includes:**
-- All major manufacturers: Apple, Google, Samsung, Microsoft, Sony, Intel, etc.
-- Network equipment: Cisco, Netgear, TP-Link, Ubiquiti, etc.
-- IoT/Smart home: Philips, Sonos, Ring, Nest, etc.
-- Industrial and enterprise vendors
-- Consumer electronics brands
-- And thousands more...
+1. Download the latest official OUI database file:
+   ```bash
+   sudo cargo run -- --download-oui
+   # This downloads the official list from standards-oui.ieee.org and saves it to `ieee-oui.txt`
+   ```
 
-**Loading additional OUI entries:**
+2. Run LANwatch loading the downloaded OUI database:
+   ```bash
+   sudo cargo run -- en0 --oui ieee-oui.txt
+   ```
 
-You can load custom OUI entries to supplement or override the built-in database:
+**Default OUI location:**
+LANwatch automatically looks for a file named `oui.txt` in the current working directory at startup. If found, it will load it automatically.
 
+You can load any custom OUI file using the `--oui` parameter:
 ```bash
-# Load additional OUI entries
+# Load a custom OUI mapping file
 sudo cargo run -- en0 --oui custom-oui.txt
-
-# Default locations checked automatically:
-# - ./oui.txt (current directory)
 ```
 
 **Supported OUI file formats:**
@@ -491,7 +486,6 @@ cargo test
 ## Dependencies
 
 - [pnet](https://crates.io/crates/pnet) - Low-level networking library for packet capture and parsing
-- [oui-data](https://crates.io/crates/oui-data) - IEEE OUI database for MAC address vendor identification (40,000+ entries)
 - [serde](https://crates.io/crates/serde) - Serialization framework for JSON support (optional, `http-api` feature)
 - [serde_json](https://crates.io/crates/serde_json) - JSON serialization/deserialization (optional, `http-api` feature)
 - [tiny_http](https://crates.io/crates/tiny_http) - Lightweight HTTP server for the REST API (optional, `http-api` feature)
