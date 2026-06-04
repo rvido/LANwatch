@@ -478,13 +478,17 @@ pub fn parse_dhcpv4_payload(
                     if (32..=126).contains(&b) {
                         current.push(b);
                     } else {
-                        if current.len() >= 4 && let Ok(s) = std::str::from_utf8(&current) {
+                        if current.len() >= 4
+                            && let Ok(s) = std::str::from_utf8(&current)
+                        {
                             ascii_parts.push(s.trim().to_string());
                         }
                         current.clear();
                     }
                 }
-                if current.len() >= 4 && let Ok(s) = std::str::from_utf8(&current) {
+                if current.len() >= 4
+                    && let Ok(s) = std::str::from_utf8(&current)
+                {
                     ascii_parts.push(s.trim().to_string());
                 }
                 if !ascii_parts.is_empty() {
@@ -1395,31 +1399,28 @@ impl MdnsServiceRegistry {
 // ============================================================================
 
 /// Registry for IEEE OUI (Organizationally Unique Identifier) database.
-/// Uses the `oui-data` crate which contains ~40,000+ vendor entries from the IEEE registry.
-/// Custom overrides can be loaded from a file to supplement or replace built-in entries.
+/// OUI entries can be loaded from an external file to perform MAC-to-vendor resolution.
 #[derive(Debug, Clone, Default)]
 pub struct OuiRegistry {
-    /// Custom vendor overrides (takes priority over the built-in database)
+    /// Custom vendor overrides
     custom_overrides: HashMap<String, String>,
 }
 
 impl OuiRegistry {
     /// Creates a new empty OUI registry.
-    /// Note: The built-in `oui-data` database is still accessible for lookups.
     pub fn new() -> Self {
         Self {
             custom_overrides: HashMap::new(),
         }
     }
 
-    /// Creates a new OUI registry with the built-in IEEE database initialized.
-    /// This is equivalent to `new()` since oui-data is always available.
+    /// Creates a new OUI registry.
     pub fn with_defaults() -> Self {
         Self::new()
     }
 
-    /// Look up vendor name by MAC address.
-    /// Checks custom overrides first, then falls back to the oui-data crate.
+    /// Look up vendor name by MAC address from the registered database entries.
+    /// Checks loaded overrides first.
     ///
     /// The MAC address can be in various formats:
     /// - Full: "AA:BB:CC:DD:EE:FF" or "AA-BB-CC-DD-EE-FF"
@@ -1476,13 +1477,7 @@ impl OuiRegistry {
             return Some(vendor.as_str());
         }
 
-        // Fall back to oui-data crate (IEEE database with ~40,000 entries)
-        if let Some(oui_entry) = oui_data::lookup(normalized) {
-            // organization() already provides a borrowed string; avoid allocating on every lookup.
-            Some(oui_entry.organization())
-        } else {
-            None
-        }
+        None
     }
 
     /// Load additional OUI entries from a file.
@@ -1523,15 +1518,14 @@ impl OuiRegistry {
         self.custom_overrides.insert(normalized, vendor.to_string());
     }
 
-    /// Returns the total count of OUI entries available (custom plus built-in).
+    /// Returns the total count of OUI entries available.
     pub fn len(&self) -> usize {
-        // oui-data contains the full IEEE OUI database
-        oui_data::OUI_ENTRIES.len() + self.custom_overrides.len()
+        self.custom_overrides.len()
     }
 
     /// Check if registry has no entries
     pub fn is_empty(&self) -> bool {
-        oui_data::OUI_ENTRIES.is_empty() && self.custom_overrides.is_empty()
+        self.custom_overrides.is_empty()
     }
 
     /// Returns the number of custom override entries loaded.
@@ -1541,7 +1535,7 @@ impl OuiRegistry {
 
     /// Returns the number of entries in the built-in IEEE database.
     pub fn builtin_count() -> usize {
-        oui_data::OUI_ENTRIES.len()
+        0
     }
 
     /// Normalize a MAC address to OUI format (first 3 octets, uppercase, colon-separated)
@@ -6552,7 +6546,9 @@ mod tests {
         std::fs::write(temp_path, seeded).unwrap();
 
         let mut tracker = DeviceTracker::new(temp_path).unwrap();
-        tracker.set_oui_registry(OuiRegistry::new());
+        let mut registry = OuiRegistry::new();
+        registry.add("9c:50:d1", "Murata Manufacturing Co., Ltd.");
+        tracker.set_oui_registry(registry);
 
         let packet = Dhcpv4Packet {
             source_ip: Ipv4Addr::new(192, 168, 4, 36),
@@ -6587,7 +6583,9 @@ mod tests {
         std::fs::write(temp_path, seeded).unwrap();
 
         let mut tracker = DeviceTracker::new(temp_path).unwrap();
-        tracker.set_oui_registry(OuiRegistry::new());
+        let mut registry = OuiRegistry::new();
+        registry.add("b0:4a:39", "Beijing Roborock Technology Co., Ltd.");
+        tracker.set_oui_registry(registry);
 
         let packet = Dhcpv4Packet {
             source_ip: Ipv4Addr::new(192, 168, 7, 193),
@@ -6619,7 +6617,9 @@ mod tests {
         let _ = std::fs::remove_file(temp_path);
 
         let mut tracker = DeviceTracker::new(temp_path).unwrap();
-        tracker.set_oui_registry(OuiRegistry::new());
+        let mut registry = OuiRegistry::new();
+        registry.add("dc:69:b5", "eero inc.");
+        tracker.set_oui_registry(registry);
 
         let packet = Dhcpv4Packet {
             source_ip: Ipv4Addr::new(192, 168, 7, 1),
@@ -6652,7 +6652,9 @@ mod tests {
         let _ = std::fs::remove_file(temp_path);
 
         let mut tracker = DeviceTracker::new(temp_path).unwrap();
-        tracker.set_oui_registry(OuiRegistry::new());
+        let mut registry = OuiRegistry::new();
+        registry.add("dc:69:b5", "eero inc.");
+        tracker.set_oui_registry(registry);
 
         let packet = MdnsPacket {
             source_mac: "dc:69:b5:95:58:b2".to_string(),
@@ -6681,7 +6683,9 @@ mod tests {
         let _ = std::fs::remove_file(temp_path);
 
         let mut tracker = DeviceTracker::new(temp_path).unwrap();
-        tracker.set_oui_registry(OuiRegistry::new());
+        let mut registry = OuiRegistry::new();
+        registry.add("dc:69:b5", "eero inc.");
+        tracker.set_oui_registry(registry);
 
         let packet = SsdpPacket {
             source_mac: "dc:69:b5:95:58:b2".to_string(),
@@ -6706,7 +6710,9 @@ mod tests {
         let _ = std::fs::remove_file(temp_path);
 
         let mut tracker = DeviceTracker::new(temp_path).unwrap();
-        tracker.set_oui_registry(OuiRegistry::new());
+        let mut registry = OuiRegistry::new();
+        registry.add("dc:69:b5", "eero inc.");
+        tracker.set_oui_registry(registry);
 
         // 1. Initially seen as Chromecast with an OUI-derived vendor (eero inc.)
         let mut device = DeviceInfo::new(
@@ -7530,44 +7536,36 @@ mod tests {
     #[test]
     fn test_oui_registry_new() {
         let registry = OuiRegistry::new();
-        // The oui-data crate should have entries
-        assert!(!registry.is_empty());
-        assert!(!registry.is_empty());
+        assert!(registry.is_empty());
         assert_eq!(registry.custom_count(), 0);
-        // Built-in IEEE database should have ~40,000+ entries
-        assert!(OuiRegistry::builtin_count() > 30000);
+        assert_eq!(OuiRegistry::builtin_count(), 0);
     }
 
     #[test]
     fn test_oui_registry_with_defaults() {
         let registry = OuiRegistry::with_defaults();
-        // Should be identical to new()
-        assert!(!registry.is_empty());
-        assert!(!registry.is_empty());
+        assert!(registry.is_empty());
     }
 
     #[test]
     fn test_oui_registry_lookup_known_vendor() {
-        let registry = OuiRegistry::new();
+        let mut registry = OuiRegistry::new();
+        registry.add("00:1B:63", "Apple");
+        registry.add("00:1B:21", "Intel");
 
         // Apple's OUI (well-known)
         let vendor = registry.lookup("00:1B:63:00:00:00");
-        assert!(
-            vendor.is_some(),
-            "Apple OUI should be found in IEEE database"
-        );
+        assert_eq!(vendor, Some("Apple"));
 
         // Intel's OUI (well-known)
         let vendor = registry.lookup("00:1B:21:00:00:00");
-        assert!(
-            vendor.is_some(),
-            "Intel OUI should be found in IEEE database"
-        );
+        assert_eq!(vendor, Some("Intel"));
     }
 
     #[test]
     fn test_oui_registry_normalize_mac() {
-        let registry = OuiRegistry::new();
+        let mut registry = OuiRegistry::new();
+        registry.add("00:1B:63", "Apple");
 
         // All these formats should normalize to the same OUI lookup
         let mac_formats = [
@@ -7608,9 +7606,11 @@ mod tests {
     #[test]
     fn test_oui_registry_custom_overrides_builtin() {
         let mut registry = OuiRegistry::new();
+        registry.add("00:1B:63", "Apple");
 
-        // Apple's real OUI - check if it exists and remember if we found one
+        // Apple's OUI - check if it exists and remember if we found one
         let has_original = registry.lookup("00:1B:63:00:00:00").is_some();
+        assert!(has_original);
 
         // Override Apple's OUI with custom vendor
         registry.add("00:1B:63", "Fake Vendor Override");
@@ -7618,12 +7618,6 @@ mod tests {
         // Custom should now take priority
         let vendor = registry.lookup("00:1B:63:AA:BB:CC");
         assert_eq!(vendor, Some("Fake Vendor Override"));
-
-        // If original existed, verify the override hides it
-        if has_original {
-            // The override should be what we set, not the original
-            assert_eq!(vendor, Some("Fake Vendor Override"));
-        }
     }
 
     #[test]
