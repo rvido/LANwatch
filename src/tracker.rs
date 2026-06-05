@@ -375,9 +375,8 @@ impl DeviceTracker {
                             && device
                                 .vendor
                                 .as_deref()
-                                .map(|ov| ov.to_lowercase())
-                                .as_deref()
-                                == Some("eero inc.")))
+                                .map(|ov| ov.eq_ignore_ascii_case("eero inc."))
+                                == Some(true)))
                 {
                     device.vendor = Some(v.to_string());
                     local_changed = true;
@@ -434,7 +433,13 @@ impl DeviceTracker {
         }
 
         for s in data_strings {
-            let lower = s.to_lowercase();
+            let owned;
+            let lower = if s.bytes().any(|b| b.is_ascii_uppercase()) {
+                owned = s.to_ascii_lowercase();
+                owned.as_str()
+            } else {
+                s.as_str()
+            };
             if lower.contains("android") {
                 vendor = Some("Google");
                 device_type = Some("Mobile");
@@ -570,7 +575,13 @@ impl DeviceTracker {
                     local_changed = true;
                 }
 
-                let desc_lower = desc.to_lowercase();
+                let owned_desc;
+                let desc_lower = if desc.bytes().any(|b| b.is_ascii_uppercase()) {
+                    owned_desc = desc.to_ascii_lowercase();
+                    owned_desc.as_str()
+                } else {
+                    desc.as_str()
+                };
                 let inferred_vendor = if desc_lower.contains("cisco") {
                     Some("Cisco")
                 } else if desc_lower.contains("hp") || desc_lower.contains("procurve") {
@@ -653,7 +664,13 @@ impl DeviceTracker {
 
             let mut dtype = "Network Device";
             if let Some(ref plat) = packet.platform {
-                let plat_lower = plat.to_lowercase();
+                let owned_plat;
+                let plat_lower = if plat.bytes().any(|b| b.is_ascii_uppercase()) {
+                    owned_plat = plat.to_ascii_lowercase();
+                    owned_plat.as_str()
+                } else {
+                    plat.as_str()
+                };
                 if plat_lower.contains("ip phone") {
                     dtype = "IP Phone";
                 } else if plat_lower.contains("switch")
@@ -751,7 +768,7 @@ impl DeviceTracker {
                 MdnsRecordDataView::Txt(strings) => {
                     for s in strings {
                         if let Some(eq_idx) = s.find('=') {
-                            let key = s[..eq_idx].trim().to_lowercase();
+                            let key = s[..eq_idx].trim().to_ascii_lowercase();
                             let val = s[eq_idx + 1..].trim();
                             if !val.is_empty() {
                                 txt_attrs.insert(key, val);
@@ -779,7 +796,13 @@ impl DeviceTracker {
             .or_else(|| txt_attrs.get("md"))
             .or_else(|| txt_attrs.get("ty"))
         {
-            let m = model.to_lowercase();
+            let owned_m;
+            let m = if model.bytes().any(|b| b.is_ascii_uppercase()) {
+                owned_m = model.to_ascii_lowercase();
+                owned_m.as_str()
+            } else {
+                model
+            };
             if m.contains("appletv") || m.contains("apple tv") {
                 txt_vendor = Some("Apple");
                 txt_device_type = Some("Apple TV");
@@ -931,7 +954,12 @@ impl DeviceTracker {
         if packet.suffix == 0x20 && device_type.is_none() {
             device_type = Some("File Server".to_string());
         }
-        if packet.name.to_lowercase().contains("samba") {
+        let contains_samba = if packet.name.bytes().any(|b| b.is_ascii_uppercase()) {
+            packet.name.to_ascii_lowercase().contains("samba")
+        } else {
+            packet.name.contains("samba")
+        };
+        if contains_samba {
             if vendor.is_none() {
                 vendor = Some("Linux".to_string());
             }
@@ -1003,7 +1031,13 @@ impl DeviceTracker {
             return (None, None);
         }
 
-        let vc = vendor_class.to_lowercase();
+        let owned_holder;
+        let vc = if vendor_class.bytes().any(|b| b.is_ascii_uppercase()) {
+            owned_holder = vendor_class.to_ascii_lowercase();
+            owned_holder.as_str()
+        } else {
+            vendor_class
+        };
         if vc.contains("msft 5.0") || vc.contains("msft 98") || vc.starts_with("msft") {
             return (Some("Microsoft"), Some("PC/Windows"));
         }
@@ -1069,7 +1103,14 @@ impl DeviceTracker {
 
     /// Detect vendor from hostname patterns
     pub(crate) fn detect_vendor_from_hostname(hostname: Option<&str>) -> Option<&'static str> {
-        let hostname = hostname?.to_lowercase();
+        let hostname_val = hostname?;
+        let owned_holder;
+        let hostname = if hostname_val.bytes().any(|b| b.is_ascii_uppercase()) {
+            owned_holder = hostname_val.to_ascii_lowercase();
+            owned_holder.as_str()
+        } else {
+            hostname_val
+        };
 
         if hostname.contains("roborock") {
             return Some("Roborock");
@@ -1205,7 +1246,14 @@ impl DeviceTracker {
 
     /// Detect device type from hostname patterns
     pub(crate) fn detect_device_type_from_hostname(hostname: Option<&str>) -> Option<&'static str> {
-        let hostname = hostname?.to_lowercase();
+        let hostname_val = hostname?;
+        let owned_holder;
+        let hostname = if hostname_val.bytes().any(|b| b.is_ascii_uppercase()) {
+            owned_holder = hostname_val.to_ascii_lowercase();
+            owned_holder.as_str()
+        } else {
+            hostname_val
+        };
 
         if hostname.contains("roborock") {
             return Some("Smart Cleaning Device");
@@ -1358,7 +1406,13 @@ impl DeviceTracker {
         let mut has_scanner_services = false;
 
         for service in services {
-            let s = service.to_lowercase();
+            let owned;
+            let s = if service.bytes().any(|b| b.is_ascii_uppercase()) {
+                owned = service.to_ascii_lowercase();
+                owned.as_str()
+            } else {
+                service
+            };
             if s.contains("_printer")
                 || s.contains("_ipp")
                 || s.contains("_pdl-datastream")
@@ -1385,7 +1439,13 @@ impl DeviceTracker {
         }
 
         for service in services {
-            let s = service.to_lowercase();
+            let owned;
+            let s = if service.bytes().any(|b| b.is_ascii_uppercase()) {
+                owned = service.to_ascii_lowercase();
+                owned.as_str()
+            } else {
+                service
+            };
             if s.contains("googlecast") || s.contains("googlezone") || s.contains("androidtvremote")
             {
                 return Some("Google".to_string());
@@ -1462,7 +1522,13 @@ impl DeviceTracker {
     #[cfg(feature = "mdns")]
     fn detect_device_type_from_services(&self, services: &[&str]) -> Option<String> {
         for service in services {
-            let s = service.to_lowercase();
+            let owned;
+            let s = if service.bytes().any(|b| b.is_ascii_uppercase()) {
+                owned = service.to_ascii_lowercase();
+                owned.as_str()
+            } else {
+                service
+            };
             if s.contains("googlecast") || s.contains("googlezone") {
                 return Some("Chromecast".to_string());
             }
@@ -1499,7 +1565,13 @@ impl DeviceTracker {
         }
 
         for service in services {
-            let s = service.to_lowercase();
+            let owned;
+            let s = if service.bytes().any(|b| b.is_ascii_uppercase()) {
+                owned = service.to_ascii_lowercase();
+                owned.as_str()
+            } else {
+                service
+            };
             if s.contains("_smb") || s.contains("_afpovertcp") || s.contains("_nfs") {
                 return Some("NAS".to_string());
             }
@@ -1676,7 +1748,13 @@ impl DeviceTracker {
 
     /// Detect device type from vendor name
     fn detect_device_type_from_vendor(vendor: &str) -> Option<&'static str> {
-        let v = vendor.to_lowercase();
+        let owned_holder;
+        let v = if vendor.bytes().any(|b| b.is_ascii_uppercase()) {
+            owned_holder = vendor.to_ascii_lowercase();
+            owned_holder.as_str()
+        } else {
+            vendor
+        };
 
         if v.contains("lenovo") {
             return Some("Laptop");
@@ -1869,6 +1947,23 @@ impl DeviceTracker {
 
     /// Returns a reference to a device by its MAC address.
     pub fn get_device(&self, mac: &str) -> Option<&DeviceInfo> {
+        // Zero-allocation fast-path for already normalized MACs
+        let is_normalized = mac.len() == 17
+            && mac.as_bytes().iter().enumerate().all(|(idx, &b)| {
+                if idx == 2 || idx == 5 || idx == 8 || idx == 11 || idx == 14 {
+                    b == b':'
+                } else {
+                    b.is_ascii_hexdigit() && !b.is_ascii_uppercase()
+                }
+            });
+
+        if is_normalized {
+            let res = self.devices.get(mac);
+            if res.is_some() {
+                return res;
+            }
+        }
+
         if let Some(device) = self.devices.get(&mac.to_lowercase()) {
             return Some(device);
         }

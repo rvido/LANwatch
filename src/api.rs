@@ -6,17 +6,26 @@
 #![cfg(feature = "http-api")]
 
 use serde::Serialize;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
+use std::time::{Duration, Instant};
 use tiny_http::{Response, Server};
 
 use crate::device::DeviceInfo;
 use crate::tracker::DeviceTracker;
 
+/// Cache representation for sorted device lists to reduce database locking under high traffic.
+struct SortedDevicesCache {
+    devices: Arc<Vec<DeviceInfo>>,
+    cached_at: Instant,
+}
+
 /// HTTP API server for exposing device data
+#[derive(Clone)]
 pub struct ApiServer {
-    server: Server,
+    server: Arc<Server>,
     tracker: Arc<RwLock<DeviceTracker>>,
+    cache: Arc<Mutex<Option<SortedDevicesCache>>>,
 }
 
 /// API response structure
@@ -42,24 +51,55 @@ impl ApiServer {
     /// * `tracker` - An `Arc<RwLock<DeviceTracker>>` for safe sharing of device data.
     pub fn new(addr: &str, tracker: Arc<RwLock<DeviceTracker>>) -> std::io::Result<Self> {
         let server = Server::http(addr).map_err(|e| std::io::Error::other(e.to_string()))?;
-        Ok(Self { server, tracker })
+        Ok(Self {
+            server: Arc::new(server),
+            tracker,
+            cache: Arc::new(Mutex::new(None)),
+        })
     }
 
-    /// Starts the API server request handling loop (blocks the current thread).
+    /// Starts the API server request handling loop using a thread pool.
     pub fn run(&self) {
         println!(
             "API server listening on http://{}",
             self.server.server_addr()
         );
         println!("Endpoints:");
-        println!("  GET /devices     - List all devices (JSON)");
+        println!(
+            "  GET /devices     - List all devices (JSON, pagination supported: ?limit=50&offset=0)"
+        );
         println!("  GET /devices/count - Get device count");
         println!("  GET /health      - Health check");
         println!();
 
-        for request in self.server.incoming_requests() {
-            let response = self.handle_request(&request);
-            let _ = request.respond(response);
+        // Dynamically determine optimal thread count based on hardware or environment override
+        let thread_count = std::env::var("LANWATCH_API_THREADS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .or_else(|| std::thread::available_parallelism().map(|n| n.get()).ok())
+            .unwrap_or(4);
+
+        println!(
+            "Starting API server with {} worker threads...",
+            thread_count
+        );
+
+        let mut workers = Vec::with_capacity(thread_count);
+        for _ in 0..thread_count {
+            let server = Arc::clone(&self.server);
+            let self_clone = self.clone();
+
+            let handle = thread::spawn(move || {
+                for request in server.incoming_requests() {
+                    let response = self_clone.handle_request(&request);
+                    let _ = request.respond(response);
+                }
+            });
+            workers.push(handle);
+        }
+
+        for worker in workers {
+            let _ = worker.join();
         }
     }
 
@@ -69,74 +109,192 @@ impl ApiServer {
         let method = request.method();
 
         match (method.as_str(), path) {
-            ("GET", "/devices") => self.handle_devices(),
             ("GET", "/devices/count") => self.handle_device_count(),
             ("GET", "/health") => self.handle_health(),
             ("GET", "/") => self.handle_root(),
+            ("GET", p) if p == "/devices" || p.starts_with("/devices?") => {
+                let (limit, offset) = Self::parse_query_params(p);
+                self.handle_devices_paginated(limit, offset)
+            }
             ("GET", p) if p.starts_with("/devices/") => {
                 let mac = &p[9..];
-                self.handle_device_by_mac(mac)
+                let mac_clean = if let Some(pos) = mac.find('?') {
+                    &mac[..pos]
+                } else {
+                    mac
+                };
+                self.handle_device_by_mac(mac_clean)
             }
             _ => self.handle_not_found(),
         }
     }
 
-    fn handle_devices(&self) -> Response<std::io::Cursor<Vec<u8>>> {
-        match self.tracker.read() {
-            Ok(tracker) => {
-                let mut devices: Vec<&DeviceInfo> = tracker.devices().values().collect();
-                devices.sort_by_key(|device| std::cmp::Reverse(device.last_seen));
-
-                let response = ApiResponse {
-                    success: true,
-                    count: devices.len(),
-                    data: devices,
-                };
-
-                let json = serde_json::to_string(&response).unwrap_or_default();
-                Response::from_string(json).with_header(
-                    tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap(),
-                )
+    /// Helper to extract limit & offset from URL query params
+    fn parse_query_params(path: &str) -> (Option<usize>, usize) {
+        let mut limit = None;
+        let mut offset = 0;
+        if let Some(pos) = path.find('?') {
+            let query = &path[pos + 1..];
+            for part in query.split('&') {
+                let mut kv = part.split('=');
+                if let (Some(k), Some(v)) = (kv.next(), kv.next()) {
+                    match k {
+                        "limit" => limit = v.parse::<usize>().ok(),
+                        "offset" => offset = v.parse::<usize>().unwrap_or(0),
+                        _ => {}
+                    }
+                }
             }
-            Err(_) => self.handle_error("Failed to read device data"),
+        }
+        (limit, offset)
+    }
+
+    /// Retrieves devices from cache if valid (<= 500ms), otherwise updates cache from tracker
+    fn get_or_update_cache(&self) -> Result<Arc<Vec<DeviceInfo>>, &'static str> {
+        let now = Instant::now();
+
+        // 1. Try reading with cache lock first
+        if let Ok(guard) = self.cache.lock() {
+            let entry = guard.as_ref().filter(|cache_entry| {
+                now.duration_since(cache_entry.cached_at) < Duration::from_millis(500)
+            });
+            if let Some(cache_entry) = entry {
+                return Ok(Arc::clone(&cache_entry.devices));
+            }
+        }
+
+        // 2. Cache is expired or uninitialized: acquire lock to update
+        if let Ok(mut guard) = self.cache.lock() {
+            // Double-check pattern
+            let entry = guard.as_ref().filter(|cache_entry| {
+                now.duration_since(cache_entry.cached_at) < Duration::from_millis(500)
+            });
+            if let Some(cache_entry) = entry {
+                return Ok(Arc::clone(&cache_entry.devices));
+            }
+
+            // Rebuild sorted device list from the tracker
+            if let Ok(tracker) = self.tracker.read() {
+                let mut devices: Vec<DeviceInfo> = tracker.devices().values().cloned().collect();
+                devices.sort_by_key(|device| std::cmp::Reverse(device.last_seen));
+                let devices_arc = Arc::new(devices);
+                *guard = Some(SortedDevicesCache {
+                    devices: Arc::clone(&devices_arc),
+                    cached_at: now,
+                });
+                Ok(devices_arc)
+            } else {
+                Err("Failed to read device data")
+            }
+        } else {
+            Err("Lock acquisition failed")
         }
     }
 
-    fn handle_device_by_mac(&self, mac: &str) -> Response<std::io::Cursor<Vec<u8>>> {
-        match self.tracker.read() {
-            Ok(tracker) => {
-                if let Some(device) = tracker.get_device(mac) {
-                    let response = ApiResponse {
-                        success: true,
-                        count: 1,
-                        data: device,
-                    };
+    fn handle_devices_paginated(
+        &self,
+        limit: Option<usize>,
+        offset: usize,
+    ) -> Response<std::io::Cursor<Vec<u8>>> {
+        let devices_arc = match self.get_or_update_cache() {
+            Ok(arc) => arc,
+            Err(e) => return self.handle_error(e),
+        };
+        let total_count = devices_arc.len();
 
-                    let json = serde_json::to_string(&response).unwrap_or_default();
-                    Response::from_string(json).with_header(
-                        tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap(),
-                    )
-                } else {
-                    self.handle_not_found()
-                }
+        let slice = if offset >= total_count {
+            &[]
+        } else {
+            let end = if let Some(l) = limit {
+                std::cmp::min(offset + l, total_count)
+            } else {
+                total_count
+            };
+            &devices_arc[offset..end]
+        };
+
+        let response = ApiResponse {
+            success: true,
+            count: total_count,
+            data: slice,
+        };
+
+        let json = serde_json::to_string(&response).unwrap_or_default();
+        Response::from_string(json)
+            .with_header(tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap())
+    }
+
+    fn handle_device_by_mac(&self, mac: &str) -> Response<std::io::Cursor<Vec<u8>>> {
+        // Look up in cache first to avoid locking tracker
+        let cache_val = {
+            if let Ok(guard) = self.cache.lock() {
+                let entry = guard.as_ref().filter(|cache_entry| {
+                    Instant::now().duration_since(cache_entry.cached_at)
+                        < Duration::from_millis(500)
+                });
+                entry.and_then(|cache_entry| {
+                    cache_entry
+                        .devices
+                        .iter()
+                        .find(|d| d.mac_address == mac)
+                        .cloned()
+                })
+            } else {
+                None
             }
-            Err(_) => self.handle_error("Failed to read device data"),
+        };
+
+        let device = match cache_val {
+            Some(d) => Some(d),
+            None => match self.tracker.read() {
+                Ok(tracker) => tracker.get_device(mac).cloned(),
+                Err(_) => None,
+            },
+        };
+
+        if let Some(dev) = device {
+            let response = ApiResponse {
+                success: true,
+                count: 1,
+                data: dev,
+            };
+
+            let json = serde_json::to_string(&response).unwrap_or_default();
+            Response::from_string(json).with_header(
+                tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap(),
+            )
+        } else {
+            self.handle_not_found()
         }
     }
 
     fn handle_device_count(&self) -> Response<std::io::Cursor<Vec<u8>>> {
-        match self.tracker.read() {
-            Ok(tracker) => {
-                let json = serde_json::json!({
-                    "success": true,
-                    "count": tracker.device_count()
+        let count = {
+            if let Ok(guard) = self.cache.lock() {
+                let entry = guard.as_ref().filter(|cache_entry| {
+                    Instant::now().duration_since(cache_entry.cached_at)
+                        < Duration::from_millis(500)
                 });
-                Response::from_string(json.to_string()).with_header(
-                    tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap(),
-                )
+                entry.map(|cache_entry| cache_entry.devices.len())
+            } else {
+                None
             }
-            Err(_) => self.handle_error("Failed to read device count"),
-        }
+        };
+
+        let final_count = match count {
+            Some(c) => c,
+            None => match self.tracker.read() {
+                Ok(tracker) => tracker.device_count(),
+                Err(_) => 0,
+            },
+        };
+
+        let json = serde_json::json!({
+            "success": true,
+            "count": final_count
+        });
+        Response::from_string(json.to_string())
+            .with_header(tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap())
     }
 
     fn handle_health(&self) -> Response<std::io::Cursor<Vec<u8>>> {
@@ -153,7 +311,7 @@ impl ApiServer {
             "service": "lanwatch",
             "version": env!("CARGO_PKG_VERSION"),
             "endpoints": {
-                "/devices": "GET - List all detected devices",
+                "/devices": "GET - List detected devices (supports: ?limit=50&offset=0)",
                 "/devices/{mac}": "GET - Get a specific device by MAC address",
                 "/devices/count": "GET - Get device count",
                 "/health": "GET - Health check"
