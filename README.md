@@ -102,20 +102,22 @@ cargo run -- --help
 The tool saves detected devices to a CSV file with the following columns:
 
 ```csv
-first_seen,last_seen,mac_address,ip_address,ipv6_address,hostname,device_type,vendor,services
-2026-01-16T10:25:00Z,2026-01-16T10:30:45Z,AA:BB:CC:DD:EE:FF,192.168.1.100,"fe80::1","mydevice","Chromecast","Google","_googlecast._tcp"
-2026-01-16T10:28:30Z,2026-01-16T10:28:30Z,11:22:33:44:55:66,192.168.1.101,"","","AirPlay Device","Apple","_airplay._tcp"
+first_seen,last_seen,mac_address,ip_address,ipv6_address,hostname,device_type,vendor,services,system_description
+2026-01-16T10:25:00Z,2026-01-16T10:30:45Z,AA:BB:CC:DD:EE:FF,192.168.1.100,"fe80::1","mydevice","Chromecast","Google","_googlecast._tcp",""
+2026-01-16T10:28:30Z,2026-01-16T10:28:30Z,11:22:33:44:55:66,192.168.1.101,"","","AirPlay Device","Apple","_airplay._tcp",""
+2026-06-04T21:40:00Z,2026-06-04T21:45:10Z,DC:69:B5:A5:8C:A0,fe80::de69:b5ff:fea5:8cb2,"fe80::de69:b5ff:fea5:8cb2","eero","Router","eero inc.","","eero Pro 6E GGB1UD22435506MW"
 ```
 
 - **first_seen**: ISO 8601 timestamp of first detection
-- **last_seen**: ISO 8601 timestamp of last DHCP/mDNS activity
+- **last_seen**: ISO 8601 timestamp of last DHCP/mDNS/LLDP activity
 - **mac_address**: Device MAC address (for DHCPv6, extracted from DUID-LL/LLT when available; otherwise stored as `duid:...`)
 - **ip_address**: IPv4 address (requested or assigned)
-- **ipv6_address**: IPv6 address if available (from mDNS AAAA records)
+- **ipv6_address**: IPv6 address if available (from mDNS AAAA records or link-local management addresses)
 - **hostname**: Device hostname if available (empty if not)
-- **device_type**: Device type inferred from mDNS services (e.g., "Chromecast", "Apple TV", "Printer", "NAS")
-- **vendor**: Detected vendor based on mDNS services (e.g., "Apple", "Google", "Amazon")
+- **device_type**: Device type inferred from discovery info (e.g., "Chromecast", "Apple TV", "Router", "Switch")
+- **vendor**: Detected vendor based on OUI registry, hostnames, or hardware descriptors
 - **services**: Semicolon-separated list of mDNS services (requires `mdns` feature)
+- **system_description**: Detailed hardware or system description parsed from link-layer protocols (e.g., LLDP system descriptions or CDP software versions)
 
 The CSV file is flushed in short batches for performance as devices are detected or updated.
 
