@@ -125,6 +125,15 @@ fn main() {
                         Dhcpv6Option::ClientFqdn(fqdn) => {
                             println!("Client FQDN: {}", fqdn);
                         }
+                        Dhcpv6Option::UserClass(classes) => {
+                            println!("User Class: {:?}", classes);
+                        }
+                        Dhcpv6Option::VendorClass {
+                            enterprise_number,
+                            data,
+                        } => {
+                            println!("Vendor Class (Ent {}): {:?}", enterprise_number, data);
+                        }
                         Dhcpv6Option::Other { code, data } => {
                             println!("Option {}: {} bytes", code, data.len());
                         }

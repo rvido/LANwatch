@@ -268,7 +268,15 @@ pub enum Dhcpv6Option {
     ServerId(Vec<u8>),
     IaNa,
     ClientFqdn(String),
-    Other { code: u16, data: Vec<u8> },
+    UserClass(Vec<String>),
+    VendorClass {
+        enterprise_number: u32,
+        data: Vec<String>,
+    },
+    Other {
+        code: u16,
+        data: Vec<u8>,
+    },
 }
 
 /// Parsed DHCPv6 packet information
@@ -312,6 +320,29 @@ pub enum DhcpEvent {
     V6(Dhcpv6Packet),
 }
 
+#[cfg(feature = "ssdp")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "http-api", derive(Serialize, Deserialize))]
+pub struct LldpPacket {
+    pub source_mac: String,
+    pub system_name: Option<String>,
+    pub system_description: Option<String>,
+    pub port_id: Option<String>,
+    pub management_address: Option<IpAddr>,
+}
+
+#[cfg(feature = "ssdp")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "http-api", derive(Serialize, Deserialize))]
+pub struct CdpPacket {
+    pub source_mac: String,
+    pub device_id: Option<String>,
+    pub software_version: Option<String>,
+    pub port_id: Option<String>,
+    pub platform: Option<String>,
+    pub management_address: Option<IpAddr>,
+}
+
 /// Network event - DHCP, mDNS, or SSDP packet
 #[cfg(any(feature = "mdns", feature = "ssdp"))]
 #[derive(Debug, Clone)]
@@ -340,6 +371,17 @@ pub enum NetworkEvent {
         source_mac: String,
         source_ip: std::net::IpAddr,
     },
+    /// NDP packet (IPv6 Neighbor Discovery Protocol)
+    Ndp {
+        source_mac: String,
+        source_ip: std::net::IpAddr,
+    },
+    /// LLDP packet (Link Layer Discovery Protocol)
+    #[cfg(feature = "ssdp")]
+    Lldp(LldpPacket),
+    /// CDP packet (Cisco Discovery Protocol)
+    #[cfg(feature = "ssdp")]
+    Cdp(CdpPacket),
 }
 
 #[cfg(any(feature = "mdns", feature = "ssdp"))]
@@ -573,6 +615,55 @@ pub fn parse_dhcpv6_payload(
             1 => Dhcpv6Option::ClientId(value.to_vec()),
             2 => Dhcpv6Option::ServerId(value.to_vec()),
             3 => Dhcpv6Option::IaNa,
+            15 => {
+                let mut user_classes = Vec::new();
+                let mut offset = 0;
+                let mut loops = 0;
+                while offset + 2 <= value.len() && loops < 100 {
+                    loops += 1;
+                    let len = u16::from_be_bytes([value[offset], value[offset + 1]]) as usize;
+                    if offset + 2 + len > value.len() {
+                        break;
+                    }
+                    let data = &value[offset + 2..offset + 2 + len];
+                    let s = String::from_utf8_lossy(data).trim().to_string();
+                    if !s.is_empty() {
+                        user_classes.push(s);
+                    }
+                    offset += 2 + len;
+                }
+                Dhcpv6Option::UserClass(user_classes)
+            }
+            16 => {
+                if value.len() >= 4 {
+                    let ent_num = u32::from_be_bytes([value[0], value[1], value[2], value[3]]);
+                    let mut vendor_classes = Vec::new();
+                    let mut offset = 4;
+                    let mut loops = 0;
+                    while offset + 2 <= value.len() && loops < 100 {
+                        loops += 1;
+                        let len = u16::from_be_bytes([value[offset], value[offset + 1]]) as usize;
+                        if offset + 2 + len > value.len() {
+                            break;
+                        }
+                        let data = &value[offset + 2..offset + 2 + len];
+                        let s = String::from_utf8_lossy(data).trim().to_string();
+                        if !s.is_empty() {
+                            vendor_classes.push(s);
+                        }
+                        offset += 2 + len;
+                    }
+                    Dhcpv6Option::VendorClass {
+                        enterprise_number: ent_num,
+                        data: vendor_classes,
+                    }
+                } else {
+                    Dhcpv6Option::Other {
+                        code: opt_code,
+                        data: value.to_vec(),
+                    }
+                }
+            }
             39 => {
                 if let Some(fqdn) = parse_dhcpv6_client_fqdn(value) {
                     Dhcpv6Option::ClientFqdn(fqdn)
@@ -3214,6 +3305,37 @@ pub fn process_ethernet_frame(frame: &[u8]) -> Option<DhcpEvent> {
 #[cfg(any(feature = "mdns", feature = "ssdp"))]
 pub fn process_ethernet_frame_extended(frame: &[u8]) -> Option<NetworkEvent> {
     let ethernet = EthernetPacket::new(frame)?;
+    let ethertype = ethernet.get_ethertype().0;
+
+    if ethertype == 0x88cc {
+        #[cfg(feature = "ssdp")]
+        {
+            let source_mac = ethernet.get_source().to_string();
+            return parse_lldp_payload(ethernet.payload(), source_mac).map(NetworkEvent::Lldp);
+        }
+        #[cfg(not(feature = "ssdp"))]
+        return None;
+    }
+
+    if ethertype <= 1500 {
+        #[cfg(feature = "ssdp")]
+        {
+            let payload = ethernet.payload();
+            if payload.len() >= 8 {
+                // LLC Header: DSAP=0xAA, SSAP=0xAA, Control=0x03
+                // SNAP Header: OUI=00:00:0C, Protocol ID=0x2000 (CDP)
+                if payload[0] == 0xAA && payload[1] == 0xAA && payload[2] == 0x03 {
+                    let oui = [payload[3], payload[4], payload[5]];
+                    let protocol_id = u16::from_be_bytes([payload[6], payload[7]]);
+                    if oui == [0x00, 0x00, 0x0C] && protocol_id == 0x2000 {
+                        let source_mac = ethernet.get_source().to_string();
+                        return parse_cdp_payload(&payload[8..], source_mac).map(NetworkEvent::Cdp);
+                    }
+                }
+            }
+        }
+        return None;
+    }
 
     match ethernet.get_ethertype() {
         EtherTypes::Ipv4 => process_ipv4_packet_extended(&ethernet),
@@ -3235,6 +3357,237 @@ pub fn process_ethernet_frame_extended(frame: &[u8]) -> Option<NetworkEvent> {
         }
         _ => None,
     }
+}
+
+#[cfg(feature = "ssdp")]
+pub fn parse_lldp_payload(payload: &[u8], source_mac: String) -> Option<LldpPacket> {
+    let mut system_name = None;
+    let mut system_description = None;
+    let mut port_id = None;
+    let mut management_address = None;
+
+    let mut offset = 0;
+    let mut loops = 0;
+
+    while offset + 2 <= payload.len() && loops < 100 {
+        loops += 1;
+        let header = u16::from_be_bytes([payload[offset], payload[offset + 1]]);
+        let tlv_type = (header >> 9) as u8;
+        let tlv_len = (header & 0x01FF) as usize;
+
+        offset += 2;
+        if offset + tlv_len > payload.len() {
+            break;
+        }
+
+        let value = &payload[offset..offset + tlv_len];
+        offset += tlv_len;
+
+        match tlv_type {
+            0 => {
+                // End of LLDPDU
+                break;
+            }
+            2 => {
+                // Port ID.
+                if value.len() > 1 {
+                    let subtype = value[0];
+                    let port_bytes = &value[1..];
+                    let p_id = match subtype {
+                        3 if port_bytes.len() == 6 => {
+                            format!(
+                                "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                                port_bytes[0],
+                                port_bytes[1],
+                                port_bytes[2],
+                                port_bytes[3],
+                                port_bytes[4],
+                                port_bytes[5]
+                            )
+                        }
+                        _ => String::from_utf8_lossy(port_bytes).trim().to_string(),
+                    };
+                    if !p_id.is_empty() {
+                        port_id = Some(p_id);
+                    }
+                }
+            }
+            5 => {
+                // System Name
+                let name = String::from_utf8_lossy(value).trim().to_string();
+                if !name.is_empty() {
+                    system_name = Some(name);
+                }
+            }
+            6 => {
+                // System Description
+                let desc = String::from_utf8_lossy(value).trim().to_string();
+                if !desc.is_empty() {
+                    system_description = Some(desc);
+                }
+            }
+            8 if value.len() >= 2 => {
+                // Management Address
+                let addr_str_len = value[0] as usize;
+                if addr_str_len >= 1 && addr_str_len <= value.len() {
+                    let subtype = value[1];
+                    if 2 + (addr_str_len - 1) <= value.len() {
+                        let addr_bytes = &value[2..2 + (addr_str_len - 1)];
+                        if subtype == 1 && addr_bytes.len() == 4 {
+                            management_address = Some(IpAddr::V4(Ipv4Addr::new(
+                                addr_bytes[0],
+                                addr_bytes[1],
+                                addr_bytes[2],
+                                addr_bytes[3],
+                            )));
+                        } else if subtype == 2 && addr_bytes.len() == 16 {
+                            let mut ipv6_bytes = [0u8; 16];
+                            ipv6_bytes.copy_from_slice(addr_bytes);
+                            management_address = Some(IpAddr::V6(Ipv6Addr::from(ipv6_bytes)));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Some(LldpPacket {
+        source_mac,
+        system_name,
+        system_description,
+        port_id,
+        management_address,
+    })
+}
+
+#[cfg(feature = "ssdp")]
+pub fn parse_cdp_payload(payload: &[u8], source_mac: String) -> Option<CdpPacket> {
+    if payload.len() < 4 {
+        return None;
+    }
+
+    let mut device_id = None;
+    let mut software_version = None;
+    let mut port_id = None;
+    let mut platform = None;
+    let mut management_address = None;
+
+    let mut offset = 4;
+    let mut loops = 0;
+
+    while offset + 4 <= payload.len() && loops < 100 {
+        loops += 1;
+        let tlv_type = u16::from_be_bytes([payload[offset], payload[offset + 1]]);
+        let tlv_len = u16::from_be_bytes([payload[offset + 2], payload[offset + 3]]) as usize;
+
+        if tlv_len < 4 {
+            break;
+        }
+
+        if offset + tlv_len > payload.len() {
+            break;
+        }
+
+        let value = &payload[offset + 4..offset + tlv_len];
+        offset += tlv_len;
+
+        match tlv_type {
+            1 => {
+                // Device ID
+                let d_id = String::from_utf8_lossy(value).trim().to_string();
+                if !d_id.is_empty() {
+                    device_id = Some(d_id);
+                }
+            }
+            2 => {
+                // Address
+                if value.len() >= 4 {
+                    let num_addresses =
+                        u32::from_be_bytes([value[0], value[1], value[2], value[3]]) as usize;
+                    let mut addr_offset = 4;
+                    let mut address_loops = 0;
+                    while addr_offset < value.len()
+                        && address_loops < num_addresses
+                        && address_loops < 100
+                    {
+                        address_loops += 1;
+                        if addr_offset + 1 > value.len() {
+                            break;
+                        }
+                        let pt_len = value[addr_offset] as usize;
+                        addr_offset += 1;
+
+                        if addr_offset + pt_len > value.len() {
+                            break;
+                        }
+                        let pt = &value[addr_offset..addr_offset + pt_len];
+                        addr_offset += pt_len;
+
+                        if addr_offset + 2 > value.len() {
+                            break;
+                        }
+                        let addr_len =
+                            u16::from_be_bytes([value[addr_offset], value[addr_offset + 1]])
+                                as usize;
+                        addr_offset += 2;
+
+                        if addr_offset + addr_len > value.len() {
+                            break;
+                        }
+                        let addr_bytes = &value[addr_offset..addr_offset + addr_len];
+                        addr_offset += addr_len;
+
+                        if pt_len == 1 && (pt[0] == 0xcc || pt[0] == 0x01) && addr_len == 4 {
+                            management_address = Some(IpAddr::V4(Ipv4Addr::new(
+                                addr_bytes[0],
+                                addr_bytes[1],
+                                addr_bytes[2],
+                                addr_bytes[3],
+                            )));
+                            break;
+                        } else if pt_len == 1 && pt[0] == 0x8e && addr_len == 16 {
+                            let mut ipv6_bytes = [0u8; 16];
+                            ipv6_bytes.copy_from_slice(addr_bytes);
+                            management_address = Some(IpAddr::V6(Ipv6Addr::from(ipv6_bytes)));
+                            break;
+                        }
+                    }
+                }
+            }
+            3 => {
+                // Port ID
+                let p_id = String::from_utf8_lossy(value).trim().to_string();
+                if !p_id.is_empty() {
+                    port_id = Some(p_id);
+                }
+            }
+            5 => {
+                // Software Version
+                let ver = String::from_utf8_lossy(value).trim().to_string();
+                if !ver.is_empty() {
+                    software_version = Some(ver);
+                }
+            }
+            6 => {
+                // Platform
+                let plat = String::from_utf8_lossy(value).trim().to_string();
+                if !plat.is_empty() {
+                    platform = Some(plat);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Some(CdpPacket {
+        source_mac,
+        device_id,
+        software_version,
+        port_id,
+        platform,
+        management_address,
+    })
 }
 
 fn process_ipv4_packet(ethernet: &EthernetPacket) -> Option<DhcpEvent> {
@@ -3377,8 +3730,27 @@ fn process_ipv6_packet(ethernet: &EthernetPacket) -> Option<DhcpEvent> {
 #[cfg(any(feature = "mdns", feature = "ssdp"))]
 fn process_ipv6_packet_extended(ethernet: &EthernetPacket) -> Option<NetworkEvent> {
     let ipv6 = Ipv6Packet::new(ethernet.payload())?;
+    let next_header = ipv6.get_next_header();
 
-    if ipv6.get_next_header() != IpNextHeaderProtocols::Udp {
+    if next_header == IpNextHeaderProtocols::Icmpv6 {
+        let payload = ipv6.payload();
+        if payload.len() >= 8 {
+            let icmpv6_type = payload[0];
+            if icmpv6_type == 135 || icmpv6_type == 136 {
+                let source_ip = ipv6.get_source();
+                if !source_ip.is_unspecified() {
+                    let source_mac = ethernet.get_source().to_string();
+                    return Some(NetworkEvent::Ndp {
+                        source_mac,
+                        source_ip: IpAddr::V6(source_ip),
+                    });
+                }
+            }
+        }
+        return None;
+    }
+
+    if next_header != IpNextHeaderProtocols::Udp {
         return None;
     }
 
@@ -3627,6 +3999,8 @@ pub struct DeviceInfo {
     pub ipv6_address: Option<IpAddr>,
     /// Hostname if available
     pub hostname: Option<String>,
+    /// System description if available (e.g., from LLDP or CDP)
+    pub system_description: Option<String>,
     /// Detected mDNS services (e.g., "_http._tcp", "_airplay._tcp")
     pub services: Vec<String>,
     /// Vendor hint based on services or MAC OUI (e.g., "Apple", "Google")
@@ -3657,11 +4031,16 @@ impl DeviceInfo {
     /// Creates a new `DeviceInfo` instance with timestamps initialized to now.
     pub fn new(mac_address: String, ip_address: IpAddr, hostname: Option<String>) -> Self {
         let timestamp = SystemTime::now();
+        let ipv6_address = match ip_address {
+            IpAddr::V6(ipv6) => Some(IpAddr::V6(ipv6)),
+            _ => None,
+        };
         Self {
             mac_address,
             ip_address,
-            ipv6_address: None,
+            ipv6_address,
             hostname,
+            system_description: None,
             services: Vec::new(),
             vendor: None,
             device_type: None,
@@ -3678,9 +4057,25 @@ impl DeviceInfo {
         let mut changed = false;
         let timestamp = SystemTime::now();
 
-        if self.ip_address != ip_address {
-            self.ip_address = ip_address;
-            changed = true;
+        match ip_address {
+            IpAddr::V4(_) => {
+                if self.ip_address != ip_address {
+                    if let IpAddr::V6(old_v6) = self.ip_address {
+                        self.set_ipv6_address(old_v6);
+                    }
+                    self.ip_address = ip_address;
+                    changed = true;
+                }
+            }
+            IpAddr::V6(ipv6) => {
+                if self.set_ipv6_address(ipv6) {
+                    changed = true;
+                }
+                if self.ip_address.is_unspecified() {
+                    self.ip_address = ip_address;
+                    changed = true;
+                }
+            }
         }
 
         let new_hostname = hostname.map(|s| s.to_string());
@@ -3754,11 +4149,11 @@ impl DeviceInfo {
     /// Serializes the device information into a CSV string.
     ///
     /// # Format
-    /// `first_seen,last_seen,mac_address,ip_address,"ipv6_address","hostname","device_type","vendor","services"`
+    /// `first_seen,last_seen,mac_address,ip_address,"ipv6_address","hostname","device_type","vendor","services","system_description"`
     pub fn to_csv_line(&self) -> String {
         let services_str = self.services.join(";");
         format!(
-            "{},{},{},{},\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"",
+            "{},{},{},{},\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"",
             format_timestamp(self.first_seen),
             format_timestamp(self.last_seen),
             self.mac_address,
@@ -3769,7 +4164,8 @@ impl DeviceInfo {
             self.hostname.as_deref().unwrap_or(""),
             self.device_type.as_deref().unwrap_or(""),
             self.vendor.as_deref().unwrap_or(""),
-            services_str
+            services_str,
+            self.system_description.as_deref().unwrap_or("")
         )
     }
 
@@ -3842,12 +4238,23 @@ impl DeviceInfo {
         } else {
             Vec::new()
         };
+        let system_description = if parts.len() > 9 {
+            let desc = parts[9].trim_matches('"');
+            if desc.is_empty() {
+                None
+            } else {
+                Some(desc.to_string())
+            }
+        } else {
+            None
+        };
 
         Some(Self {
             mac_address,
             ip_address,
             ipv6_address,
             hostname,
+            system_description,
             services,
             vendor,
             device_type,
@@ -4099,6 +4506,8 @@ pub struct DeviceTracker {
     service_registry: Option<MdnsServiceRegistry>,
     /// Track updated MAC addresses for incremental journal flushes
     dirty_devices: Mutex<HashSet<String>>,
+    /// Track last time compaction occurred to avoid constant rewrites
+    last_compaction: Mutex<std::time::Instant>,
 }
 
 impl DeviceTracker {
@@ -4116,6 +4525,7 @@ impl DeviceTracker {
             #[cfg(feature = "mdns")]
             service_registry: None,
             dirty_devices: Mutex::new(HashSet::new()),
+            last_compaction: Mutex::new(std::time::Instant::now()),
         };
 
         // Load existing data if file exists
@@ -4220,7 +4630,7 @@ impl DeviceTracker {
         // Write header
         writeln!(
             file,
-            "first_seen,last_seen,mac_address,ip_address,ipv6_address,hostname,device_type,vendor,services"
+            "first_seen,last_seen,mac_address,ip_address,ipv6_address,hostname,device_type,vendor,services,system_description"
         )?;
 
         // Write devices sorted by last_seen (use unstable sort for speed)
@@ -4259,9 +4669,9 @@ impl DeviceTracker {
         let mut file = OpenOptions::new().create(true).append(true).open(&jpath)?;
         writeln!(file, "{}", device.to_csv_line())?;
 
-        // Lightweight compaction trigger: when journal exceeds 1MB, perform full rewrite.
+        // Lightweight compaction trigger: when journal exceeds 10KB, perform full rewrite.
         if let Ok(meta) = file.metadata() {
-            const COMPACT_SIZE: u64 = 1_000_000;
+            const COMPACT_SIZE: u64 = 10_000;
             if meta.len() > COMPACT_SIZE {
                 let _ = self.save_to_csv();
             }
@@ -4280,7 +4690,7 @@ impl DeviceTracker {
         writeln!(file, "{}", line)?;
         // Optionally check compact size
         if let Ok(meta) = file.metadata() {
-            const COMPACT_SIZE: u64 = 1_000_000;
+            const COMPACT_SIZE: u64 = 10_000;
             if meta.len() > COMPACT_SIZE {
                 let _ = self.save_to_csv();
             }
@@ -4296,7 +4706,7 @@ impl DeviceTracker {
 
     /// Explicitly flushes the current in-memory device state to the CSV file.
     /// If the main CSV exists, it appends updated devices incrementally to the journal
-    /// to avoid rewriting the entire file, triggering compaction when the journal exceeds 1MB.
+    /// to avoid rewriting the entire file, triggering compaction periodically or when the journal exceeds 10KB.
     pub fn flush_to_csv(&self) -> std::io::Result<()> {
         let dirty = {
             let mut guard = self.dirty_devices.lock().unwrap();
@@ -4316,6 +4726,19 @@ impl DeviceTracker {
                 if let Some(device) = self.devices.get(mac) {
                     self.append_device_journal(device)?;
                 }
+            }
+
+            // Periodically compact the journal (e.g. every 10 seconds)
+            let mut compact = false;
+            if let Ok(mut last) = self.last_compaction.lock() {
+                let elapsed = last.elapsed().as_secs();
+                if elapsed >= 10 {
+                    compact = true;
+                    *last = std::time::Instant::now();
+                }
+            }
+            if compact {
+                let _ = self.save_to_csv();
             }
         }
         Ok(())
@@ -4461,11 +4884,57 @@ impl DeviceTracker {
     ///
     /// # Returns
     /// `true` if a new device was detected or an existing device was updated.
+    fn fingerprint_dhcpv6(
+        enterprise_number: Option<u32>,
+        data_strings: &[String],
+    ) -> (Option<&'static str>, Option<&'static str>) {
+        let mut vendor = None;
+        let mut device_type = None;
+
+        if let Some(ent) = enterprise_number {
+            match ent {
+                311 => vendor = Some("Microsoft"),
+                9 => {
+                    vendor = Some("Cisco");
+                    device_type = Some("Network Device");
+                }
+                93 | 3247 => vendor = Some("Apple"),
+                _ => {}
+            }
+        }
+
+        for s in data_strings {
+            let lower = s.to_lowercase();
+            if lower.contains("android") {
+                vendor = Some("Google");
+                device_type = Some("Mobile");
+            } else if lower.contains("apple") {
+                vendor = Some("Apple");
+            } else if lower.contains("sonos") {
+                vendor = Some("Sonos");
+                device_type = Some("Audio Device");
+            } else if lower.contains("msft") || lower.contains("microsoft") {
+                vendor = Some("Microsoft");
+            } else if lower.contains("cisco") {
+                vendor = Some("Cisco");
+                device_type = Some("Network Device");
+            }
+        }
+
+        (vendor, device_type)
+    }
+
+    /// Updates the tracker state with information extracted from a DHCPv6 packet.
+    ///
+    /// # Returns
+    /// `true` if a new device was detected or an existing device was updated.
     pub fn update_from_dhcpv6(&mut self, packet: &Dhcpv6Packet) -> bool {
         // For DHCPv6, use Ethernet MAC from DUID-LL/LLT when available.
         // Fall back to a prefixed DUID identifier for non-Ethernet DUID types.
         let mut client_id = None;
         let mut fqdn = None;
+        let mut user_class = None;
+        let mut vendor_class = None;
 
         for option in &packet.options {
             match option {
@@ -4474,6 +4943,15 @@ impl DeviceTracker {
                 }
                 Dhcpv6Option::ClientFqdn(name) => {
                     fqdn = Some(name.as_str());
+                }
+                Dhcpv6Option::UserClass(classes) => {
+                    user_class = Some(classes);
+                }
+                Dhcpv6Option::VendorClass {
+                    enterprise_number,
+                    data,
+                } => {
+                    vendor_class = Some((*enterprise_number, data));
                 }
                 _ => {}
             }
@@ -4488,7 +4966,193 @@ impl DeviceTracker {
         };
 
         let ip = IpAddr::V6(packet.source_ip);
-        self.update_device(&mac, ip, fqdn)
+        let mut changed = self.update_device(&mac, ip, fqdn);
+
+        // Apply Option 15 and 16 fingerprints if present
+        let mut opt_vendor = None;
+        let mut opt_type = None;
+
+        if let Some((ent, data)) = vendor_class {
+            let (v, t) = Self::fingerprint_dhcpv6(Some(ent), data);
+            if opt_vendor.is_none() {
+                opt_vendor = v;
+            }
+            if opt_type.is_none() {
+                opt_type = t;
+            }
+        }
+
+        if let Some(data) = user_class {
+            let (v, t) = Self::fingerprint_dhcpv6(None, data);
+            if opt_vendor.is_none() {
+                opt_vendor = v;
+            }
+            if opt_type.is_none() {
+                opt_type = t;
+            }
+        }
+
+        if (opt_vendor.is_some() || opt_type.is_some())
+            && let Some(device) = self.devices.get_mut(&mac)
+        {
+            let mut local_changed = false;
+            if let Some(v) = opt_vendor
+                && (device.vendor.is_none() || device.vendor.as_deref() != Some(v))
+            {
+                device.vendor = Some(v.to_string());
+                local_changed = true;
+            }
+            if let Some(t) = opt_type
+                && (device.device_type.is_none() || device.device_type.as_deref() != Some(t))
+            {
+                device.device_type = Some(t.to_string());
+                local_changed = true;
+            }
+            if local_changed {
+                self.dirty_devices.lock().unwrap().insert(mac.clone());
+                changed = true;
+                if self.auto_save {
+                    let line = device.to_csv_line();
+                    let _ = self.append_journal_line(&line);
+                }
+            }
+        }
+
+        changed
+    }
+
+    #[cfg(feature = "ssdp")]
+    pub fn update_from_lldp(&mut self, packet: &LldpPacket) -> bool {
+        let mac = &packet.source_mac;
+        let mut ip = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        if let Some(m_addr) = packet.management_address {
+            ip = m_addr;
+        }
+
+        let mut changed = self.update_device(mac, ip, packet.system_name.as_deref());
+
+        if let Some(device) = self.devices.get_mut(mac) {
+            let mut local_changed = false;
+
+            if let Some(ref desc) = packet.system_description {
+                if device.system_description.as_ref() != Some(desc) {
+                    device.system_description = Some(desc.clone());
+                    local_changed = true;
+                }
+
+                let desc_lower = desc.to_lowercase();
+                let inferred_vendor = if desc_lower.contains("cisco") {
+                    Some("Cisco")
+                } else if desc_lower.contains("hp") || desc_lower.contains("procurve") {
+                    Some("HP")
+                } else if desc_lower.contains("juniper") {
+                    Some("Juniper")
+                } else if desc_lower.contains("ubiquiti") || desc_lower.contains("unifi") {
+                    Some("Ubiquiti")
+                } else if desc_lower.contains("eero") {
+                    Some("eero inc.")
+                } else {
+                    None
+                };
+
+                if let Some(vendor) = inferred_vendor {
+                    if device.vendor.as_deref() != Some(vendor) {
+                        device.vendor = Some(vendor.to_string());
+                        local_changed = true;
+                    }
+
+                    let dtype = if vendor == "eero inc." {
+                        "Router"
+                    } else {
+                        "Network Device"
+                    };
+
+                    if device.device_type.as_deref() != Some("Switch")
+                        && device.device_type.as_deref() != Some("Router")
+                    {
+                        device.device_type = Some(dtype.to_string());
+                        local_changed = true;
+                    }
+                }
+            }
+
+            if device.device_type.is_none() {
+                device.device_type = Some("Network Device".to_string());
+                local_changed = true;
+            }
+
+            if local_changed {
+                self.dirty_devices.lock().unwrap().insert(mac.clone());
+                changed = true;
+                if self.auto_save {
+                    let line = device.to_csv_line();
+                    let _ = self.append_journal_line(&line);
+                }
+            }
+        }
+
+        changed
+    }
+
+    #[cfg(feature = "ssdp")]
+    pub fn update_from_cdp(&mut self, packet: &CdpPacket) -> bool {
+        let mac = &packet.source_mac;
+        let mut ip = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        if let Some(m_addr) = packet.management_address {
+            ip = m_addr;
+        }
+
+        let hostname = packet.device_id.as_deref();
+        let mut changed = self.update_device(mac, ip, hostname);
+
+        if let Some(device) = self.devices.get_mut(mac) {
+            let mut local_changed = false;
+
+            if let Some(ref soft) = packet.software_version {
+                let current_desc = device.system_description.as_ref();
+                if current_desc != Some(soft) {
+                    device.system_description = Some(soft.clone());
+                    local_changed = true;
+                }
+            }
+
+            if device.vendor.as_deref() != Some("Cisco") {
+                device.vendor = Some("Cisco".to_string());
+                local_changed = true;
+            }
+
+            let mut dtype = "Network Device";
+            if let Some(ref plat) = packet.platform {
+                let plat_lower = plat.to_lowercase();
+                if plat_lower.contains("ip phone") {
+                    dtype = "IP Phone";
+                } else if plat_lower.contains("switch")
+                    || plat_lower.contains("ws-c")
+                    || plat_lower.contains("catalyst")
+                    || plat_lower.contains("nexus")
+                {
+                    dtype = "Switch";
+                } else if plat_lower.contains("router") {
+                    dtype = "Router";
+                }
+            }
+
+            if device.device_type.as_deref() != Some(dtype) {
+                device.device_type = Some(dtype.to_string());
+                local_changed = true;
+            }
+
+            if local_changed {
+                self.dirty_devices.lock().unwrap().insert(mac.clone());
+                changed = true;
+                if self.auto_save {
+                    let line = device.to_csv_line();
+                    let _ = self.append_journal_line(&line);
+                }
+            }
+        }
+
+        changed
     }
 
     /// Updates the tracker state with hostnames, IP addresses, and services from an mDNS packet.
@@ -5753,6 +6417,13 @@ impl DeviceTracker {
     }
 }
 
+impl Drop for DeviceTracker {
+    fn drop(&mut self) {
+        // Perform a final compaction on drop to make sure all journaled data is fully merged
+        let _ = self.save_to_csv();
+    }
+}
+
 // ============================================================================
 // HTTP API Server
 // ============================================================================
@@ -6275,6 +6946,7 @@ mod tests {
             ip_address: Ipv4Addr::new(192, 168, 1, 100).into(),
             ipv6_address: Some("fe80::1".parse().unwrap()),
             hostname: Some("testhost".to_string()),
+            system_description: Some("My LLDP Device Description".to_string()),
             services: vec!["_http._tcp".to_string(), "_ssh._tcp".to_string()],
             vendor: Some("TestVendor".to_string()),
             device_type: Some("Server".to_string()),
@@ -6289,6 +6961,7 @@ mod tests {
         assert_eq!(parsed.ip_address, device.ip_address);
         assert_eq!(parsed.ipv6_address, device.ipv6_address);
         assert_eq!(parsed.hostname, device.hostname);
+        assert_eq!(parsed.system_description, device.system_description);
         assert_eq!(parsed.services, device.services);
         assert_eq!(parsed.vendor, device.vendor);
         assert_eq!(parsed.device_type, device.device_type);
@@ -6312,6 +6985,7 @@ mod tests {
             ip_address: Ipv4Addr::new(192, 168, 1, 100).into(),
             ipv6_address: None,
             hostname: None,
+            system_description: None,
             services: Vec::new(),
             vendor: None,
             device_type: None,
@@ -6332,6 +7006,7 @@ mod tests {
             ip_address: Ipv4Addr::new(192, 168, 1, 100).into(),
             ipv6_address: None,
             hostname: None,
+            system_description: None,
             services: Vec::new(),
             vendor: None,
             device_type: None,
@@ -6807,6 +7482,7 @@ mod tests {
             ip_address: Ipv4Addr::new(192, 168, 1, 100).into(),
             ipv6_address: Some("fe80::abcd:1234".parse().unwrap()),
             hostname: Some("jsonhost".to_string()),
+            system_description: None,
             services: vec!["_airplay._tcp".to_string()],
             vendor: Some("Apple".to_string()),
             device_type: Some("AirPlay Device".to_string()),
@@ -8347,6 +9023,383 @@ mod tests {
             assert_eq!(device.vendor.as_deref(), Some("Canon"));
             assert_eq!(device.device_type.as_deref(), Some("IP Camera"));
         }
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+    }
+
+    #[test]
+    #[cfg(any(feature = "mdns", feature = "ssdp"))]
+    fn test_parse_ndp_packet() {
+        // NDP solicitation or advertisement is captured over ICMPv6.
+        // We will construct a raw Ethernet + IPv6 + ICMPv6 packet and run process_ethernet_frame_extended.
+        let mut frame = vec![0u8; 14 + 40 + 8]; // Ethernet (14) + IPv6 (40) + ICMPv6 header (8)
+        // Set EtherType: 0x86DD (IPv6)
+        frame[12] = 0x86;
+        frame[13] = 0xDD;
+        // Source MAC: 00:11:22:33:44:55
+        frame[6..12].copy_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+
+        // IPv6 Header fields
+        frame[14] = 0x60; // Version = 6
+        // Payload Length = 8
+        frame[18] = 0x00;
+        frame[19] = 0x08;
+
+        // IPv6 Source Address: fe80::1
+        let source_ip = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
+        frame[14 + 8..14 + 24].copy_from_slice(&source_ip.octets());
+        // Next header: ICMPv6 (58)
+        frame[14 + 6] = 58;
+
+        // ICMPv6 type: 136 (Neighbor Advertisement)
+        frame[14 + 40] = 136;
+
+        let event = process_ethernet_frame_extended(&frame);
+        assert!(event.is_some());
+        match event.unwrap() {
+            NetworkEvent::Ndp {
+                source_mac,
+                source_ip: ip,
+            } => {
+                assert_eq!(source_mac, "00:11:22:33:44:55");
+                assert_eq!(ip, IpAddr::V6(source_ip));
+            }
+            _ => panic!("Expected NetworkEvent::Ndp"),
+        }
+
+        // Test updating DeviceTracker from NDP
+        let temp_path = "/tmp/lanwatch_test_ndp_device.csv";
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+        {
+            let mut tracker = DeviceTracker::new(temp_path).unwrap();
+            let is_new = tracker.update_device("00:11:22:33:44:55", IpAddr::V6(source_ip), None);
+            assert!(is_new);
+            let device = tracker.devices.get("00:11:22:33:44:55").unwrap();
+            assert_eq!(device.ipv6_address, Some(IpAddr::V6(source_ip)));
+        }
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_parse_lldp_packet() {
+        // Construct a mock LLDP payload
+        let mut payload = Vec::new();
+        // TLV 1: Chassis ID (subtype 4 = MAC)
+        payload.extend_from_slice(&[0x02, 0x07, 0x04, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+        // TLV 2: Port ID (subtype 5 = Interface name) (type 2 << 9 | 5 = 1029 = 0x0405)
+        payload.extend_from_slice(&[0x04, 0x05, 0x05, b'e', b't', b'h', b'0']);
+        // TLV 5: System Name (type 5 << 9 | 12 = 2572 = 0x0a0c)
+        payload.extend_from_slice(&[
+            0x0a, 0x0c, b'M', b'y', b'S', b'w', b'i', b't', b'c', b'h', b'.', b'n', b'e', b't',
+        ]);
+        // TLV 6: System Description (type 6 << 9 | 19 = 3091 = 0x0c13)
+        payload.extend_from_slice(&[
+            0x0c, 0x13, b'C', b'i', b's', b'c', b'o', b' ', b'S', b'g', b'3', b'5', b'0', b' ',
+            b'2', b'4', b'-', b'P', b'o', b'r', b't',
+        ]);
+        // TLV 8: Management Address (Address length 5, Subtype 1 = IPv4, IP: 192.168.1.254, Interface Subtype 1, Number 1, OID length 0)
+        payload.extend_from_slice(&[
+            0x10, 0x0c, 0x05, 0x01, 192, 168, 1, 254, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00,
+        ]);
+        // TLV 0: End
+        payload.extend_from_slice(&[0x00, 0x00]);
+
+        let packet = parse_lldp_payload(&payload, "00:11:22:33:44:55".to_string()).unwrap();
+        assert_eq!(packet.system_name.as_deref(), Some("MySwitch.net"));
+        assert_eq!(packet.port_id.as_deref(), Some("eth0"));
+        assert_eq!(
+            packet.management_address,
+            Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 254)))
+        );
+
+        // Update DeviceTracker
+        let temp_path = "/tmp/lanwatch_test_lldp_device.csv";
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+        {
+            let mut tracker = DeviceTracker::new(temp_path).unwrap();
+            let is_new = tracker.update_from_lldp(&packet);
+            assert!(is_new);
+            let device = tracker.devices.get("00:11:22:33:44:55").unwrap();
+            assert_eq!(device.hostname.as_deref(), Some("MySwitch.net"));
+            assert_eq!(device.vendor.as_deref(), Some("Cisco"));
+            assert_eq!(device.device_type.as_deref(), Some("Network Device"));
+        }
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_parse_cdp_packet() {
+        // Construct a mock CDP payload (LLC/SNAP already stripped, so payload starts with CDP version/TTL/checksum)
+        let mut payload = vec![
+            0x02, // Version 2
+            180,  // TTL
+            0x00, 0x00, // Checksum placeholder
+        ];
+
+        // TLV 1: Device ID
+        let dev_id = b"Cisco-Switch-3560";
+        payload.extend_from_slice(&[0x00, 0x01]); // Type
+        payload.extend_from_slice(&((dev_id.len() + 4) as u16).to_be_bytes()); // Length
+        payload.extend_from_slice(dev_id);
+
+        // TLV 2: Address
+        // Number of addresses = 1
+        // Protocol type length = 1, type = 0xcc (IPv4 NLPID)
+        // Address length = 4, address = 10.0.0.1
+        let addr_value = vec![
+            0x00, 0x00, 0x00, 0x01, // Num addresses
+            0x01, // Proto type len
+            0xcc, // Proto (NLPID IPv4)
+            0x00, 0x04, // Address len
+            10, 0, 0, 1, // Address
+        ];
+        payload.extend_from_slice(&[0x00, 0x02]);
+        payload.extend_from_slice(&((addr_value.len() + 4) as u16).to_be_bytes());
+        payload.extend_from_slice(&addr_value);
+
+        // TLV 3: Port ID
+        let port_id = b"GigabitEthernet0/1";
+        payload.extend_from_slice(&[0x00, 0x03]);
+        payload.extend_from_slice(&((port_id.len() + 4) as u16).to_be_bytes());
+        payload.extend_from_slice(port_id);
+
+        // TLV 6: Platform
+        let platform = b"cisco WS-C3560G-24TS";
+        payload.extend_from_slice(&[0x00, 0x06]);
+        payload.extend_from_slice(&((platform.len() + 4) as u16).to_be_bytes());
+        payload.extend_from_slice(platform);
+
+        let packet = parse_cdp_payload(&payload, "00:aa:bb:cc:dd:ee".to_string()).unwrap();
+        assert_eq!(packet.device_id.as_deref(), Some("Cisco-Switch-3560"));
+        assert_eq!(packet.port_id.as_deref(), Some("GigabitEthernet0/1"));
+        assert_eq!(packet.platform.as_deref(), Some("cisco WS-C3560G-24TS"));
+        assert_eq!(
+            packet.management_address,
+            Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))
+        );
+
+        // Update DeviceTracker
+        let temp_path = "/tmp/lanwatch_test_cdp_device.csv";
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+        {
+            let mut tracker = DeviceTracker::new(temp_path).unwrap();
+            let is_new = tracker.update_from_cdp(&packet);
+            assert!(is_new);
+            let device = tracker.devices.get("00:aa:bb:cc:dd:ee").unwrap();
+            assert_eq!(device.hostname.as_deref(), Some("Cisco-Switch-3560"));
+            assert_eq!(device.vendor.as_deref(), Some("Cisco"));
+            assert_eq!(device.device_type.as_deref(), Some("Switch"));
+        }
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+    }
+
+    #[test]
+    fn test_dhcpv6_fingerprinting() {
+        // Test Option 15: User Class ("Android")
+        let mut user_class_payload = vec![
+            0x00, 0x07, // Length of Android user class (7)
+        ];
+        user_class_payload.extend_from_slice(b"Android");
+
+        let mut opt15_data = vec![
+            0x01, // Message type: SOLICIT
+            0x12,
+            0x34,
+            0x56, // Transaction ID
+            0x00,
+            0x0f, // Option code: 15 (User Class)
+            0x00,
+            (user_class_payload.len()) as u8, // Option len
+        ];
+        opt15_data.extend_from_slice(&user_class_payload);
+
+        let result = parse_dhcpv6_payload(
+            &opt15_data,
+            Ipv6Addr::LOCALHOST,
+            Ipv6Addr::LOCALHOST,
+            546,
+            547,
+        )
+        .unwrap();
+        assert_eq!(result.options.len(), 1);
+        match &result.options[0] {
+            Dhcpv6Option::UserClass(classes) => {
+                assert_eq!(classes.len(), 1);
+                assert_eq!(classes[0], "Android");
+            }
+            _ => panic!("Expected UserClass option"),
+        }
+
+        // Test Option 16: Vendor Class (Enterprise 311 for MSFT)
+        let mut vendor_class_payload = vec![
+            0x00, 0x00, 0x01, 0x37, // Enterprise Number 311
+            0x00, 0x04, // Sub-option length 4
+        ];
+        vendor_class_payload.extend_from_slice(b"MSFT");
+
+        let mut opt16_data = vec![
+            0x01, // Message type
+            0x12,
+            0x34,
+            0x56, // Transaction ID
+            0x00,
+            0x10, // Option 16
+            0x00,
+            (vendor_class_payload.len()) as u8, // Option len
+        ];
+        opt16_data.extend_from_slice(&vendor_class_payload);
+
+        let result2 = parse_dhcpv6_payload(
+            &opt16_data,
+            Ipv6Addr::LOCALHOST,
+            Ipv6Addr::LOCALHOST,
+            546,
+            547,
+        )
+        .unwrap();
+        assert_eq!(result2.options.len(), 1);
+        match &result2.options[0] {
+            Dhcpv6Option::VendorClass {
+                enterprise_number,
+                data,
+            } => {
+                assert_eq!(*enterprise_number, 311);
+                assert_eq!(data.len(), 1);
+                assert_eq!(data[0], "MSFT");
+            }
+            _ => panic!("Expected VendorClass option"),
+        }
+
+        // Test device tracker fingerprinting updates
+        let temp_path = "/tmp/lanwatch_test_dhcpv6_fingerprint.csv";
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+        {
+            let mut tracker = DeviceTracker::new(temp_path).unwrap();
+
+            // Setup a fake Dhcpv6Packet with client ID and VendorClass
+            let packet = Dhcpv6Packet {
+                source_ip: Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 2),
+                dest_ip: Ipv6Addr::LOCALHOST,
+                source_port: 546,
+                dest_port: 547,
+                message_type: Dhcpv6MessageType::Solicit,
+                transaction_id: [1, 2, 3],
+                options: vec![
+                    Dhcpv6Option::ClientId(vec![
+                        0x00, 0x03, 0x00, 0x01, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
+                    ]), // MAC: 00:11:22:33:44:55
+                    Dhcpv6Option::VendorClass {
+                        enterprise_number: 311,
+                        data: vec!["MSFT".to_string()],
+                    },
+                ],
+            };
+
+            let is_new = tracker.update_from_dhcpv6(&packet);
+            assert!(is_new);
+            let device = tracker.devices.get("00:11:22:33:44:55").unwrap();
+            assert_eq!(device.vendor.as_deref(), Some("Microsoft"));
+        }
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+    }
+
+    #[test]
+    fn test_device_tracker_flush_and_compaction() {
+        let temp_path = "/tmp/lanwatch_test_flush_compaction.csv";
+        let journal_path = format!("{}.journal", temp_path);
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(&journal_path);
+
+        // Scope 1: Create tracker, save once to create the main CSV, then write an update via journal.
+        {
+            let mut tracker = DeviceTracker::new(temp_path).unwrap();
+
+            // Insert initial device and save so the file exists
+            tracker.update_device(
+                "00:11:22:33:44:55",
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
+                None,
+            );
+            tracker.save_to_csv().unwrap();
+            assert!(Path::new(temp_path).exists());
+            assert!(!Path::new(&journal_path).exists());
+
+            // Disable auto_save to test flush/journal logic
+            tracker.set_auto_save(false);
+
+            // Update the device (IP changes)
+            tracker.update_device(
+                "00:11:22:33:44:55",
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 101)),
+                None,
+            );
+
+            // Flush to CSV should write to the journal (since CSV exists and compaction is not yet due/triggered)
+            tracker.flush_to_csv().unwrap();
+
+            // Check that the journal was created
+            assert!(Path::new(&journal_path).exists());
+
+            // Read the main CSV to verify the old IP is still there (since compaction hasn't run yet)
+            let csv_content = std::fs::read_to_string(temp_path).unwrap();
+            assert!(csv_content.contains("192.168.1.100"));
+            assert!(!csv_content.contains("192.168.1.101"));
+
+            // Read journal content to verify the new IP is in the journal
+            let journal_content = std::fs::read_to_string(&journal_path).unwrap();
+            assert!(journal_content.contains("192.168.1.101"));
+        } // tracker is dropped here! Drop should trigger final compaction, merging journal into main CSV.
+
+        // Verify that after dropping, the journal is gone and the main CSV has the updated IP
+        assert!(!Path::new(&journal_path).exists());
+        let csv_content = std::fs::read_to_string(temp_path).unwrap();
+        assert!(csv_content.contains("192.168.1.101"));
+        assert!(!csv_content.contains("192.168.1.100"));
+
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(&journal_path);
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_device_tracker_lldp_system_description_and_eero_classification() {
+        let temp_path = "/tmp/lanwatch_test_lldp_desc.csv";
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+
+        {
+            let mut tracker = DeviceTracker::new(temp_path).unwrap();
+            let packet = LldpPacket {
+                source_mac: "dc:69:b5:a5:8c:a0".to_string(),
+                system_name: Some("eero".to_string()),
+                system_description: Some("eero Pro 6E GGB1UD22435506MW".to_string()),
+                port_id: Some("2".to_string()),
+                management_address: Some("fe80::de69:b5ff:fea5:8cb2".parse().unwrap()),
+            };
+
+            let is_new = tracker.update_from_lldp(&packet);
+            assert!(is_new);
+
+            let device = tracker.devices.get("dc:69:b5:a5:8c:a0").unwrap();
+            assert_eq!(
+                device.system_description.as_deref(),
+                Some("eero Pro 6E GGB1UD22435506MW")
+            );
+            assert_eq!(device.vendor.as_deref(), Some("eero inc."));
+            assert_eq!(device.device_type.as_deref(), Some("Router"));
+            assert_eq!(device.hostname.as_deref(), Some("eero"));
+        }
+
         let _ = std::fs::remove_file(temp_path);
         let _ = std::fs::remove_file(format!("{}.journal", temp_path));
     }

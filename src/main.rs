@@ -443,6 +443,50 @@ fn start_network_worker(
                                     tracker.device_count(),
                                 );
                             }
+                            NetworkEvent::Ndp {
+                                source_mac,
+                                source_ip,
+                            } => {
+                                let is_new_or_updated =
+                                    tracker.update_device(source_mac, *source_ip, None);
+                                if is_new_or_updated {
+                                    pending_updates += 1;
+                                }
+                                print_ndp_packet(
+                                    source_mac,
+                                    source_ip,
+                                    is_new_or_updated,
+                                    tracker.device_count(),
+                                );
+                            }
+                            #[cfg(feature = "ssdp")]
+                            NetworkEvent::Lldp(packet) => {
+                                if _enable_ssdp {
+                                    let is_new_or_updated = tracker.update_from_lldp(packet);
+                                    if is_new_or_updated {
+                                        pending_updates += 1;
+                                    }
+                                    print_lldp_packet(
+                                        packet,
+                                        is_new_or_updated,
+                                        tracker.device_count(),
+                                    );
+                                }
+                            }
+                            #[cfg(feature = "ssdp")]
+                            NetworkEvent::Cdp(packet) => {
+                                if _enable_ssdp {
+                                    let is_new_or_updated = tracker.update_from_cdp(packet);
+                                    if is_new_or_updated {
+                                        pending_updates += 1;
+                                    }
+                                    print_cdp_packet(
+                                        packet,
+                                        is_new_or_updated,
+                                        tracker.device_count(),
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -483,6 +527,61 @@ fn flush_tracker(tracker: &Arc<RwLock<DeviceTracker>>, pending_updates: usize) {
             tracker.device_count()
         );
     }
+}
+
+#[cfg(any(feature = "mdns", feature = "ssdp"))]
+fn print_ndp_packet(mac: &str, ip: &std::net::IpAddr, is_new_or_updated: bool, total: usize) {
+    println!("\n[NDP] Neighbor Discovery Packet Detected");
+    println!("Sender MAC: {}", mac);
+    println!("Sender IP:  {}", ip);
+    if is_new_or_updated {
+        println!("-> [CSV Updated] Total devices: {}", total);
+    }
+    println!("------------------------------");
+}
+
+#[cfg(feature = "ssdp")]
+fn print_lldp_packet(packet: &lanwatch::LldpPacket, is_new_or_updated: bool, total: usize) {
+    println!("\n[LLDP] Link Layer Discovery Packet Detected");
+    println!("Source MAC: {}", packet.source_mac);
+    if let Some(ref name) = packet.system_name {
+        println!("System Name: {}", name);
+    }
+    if let Some(ref desc) = packet.system_description {
+        println!("System Desc: {}", desc);
+    }
+    if let Some(ref port) = packet.port_id {
+        println!("Port ID:     {}", port);
+    }
+    if let Some(ref ip) = packet.management_address {
+        println!("Mgmt IP:     {}", ip);
+    }
+    if is_new_or_updated {
+        println!("-> [CSV Updated] Total devices: {}", total);
+    }
+    println!("------------------------------");
+}
+
+#[cfg(feature = "ssdp")]
+fn print_cdp_packet(packet: &lanwatch::CdpPacket, is_new_or_updated: bool, total: usize) {
+    println!("\n[CDP] Cisco Discovery Packet Detected");
+    println!("Source MAC: {}", packet.source_mac);
+    if let Some(ref dev_id) = packet.device_id {
+        println!("Device ID:   {}", dev_id);
+    }
+    if let Some(ref plat) = packet.platform {
+        println!("Platform:    {}", plat);
+    }
+    if let Some(ref port) = packet.port_id {
+        println!("Port ID:     {}", port);
+    }
+    if let Some(ref ip) = packet.management_address {
+        println!("Mgmt IP:     {}", ip);
+    }
+    if is_new_or_updated {
+        println!("-> [CSV Updated] Total devices: {}", total);
+    }
+    println!("------------------------------");
 }
 
 #[cfg(any(feature = "mdns", feature = "ssdp"))]
@@ -536,6 +635,15 @@ fn print_dhcpv6_packet(packet: &lanwatch::Dhcpv6Packet, is_new_or_updated: bool,
             }
             Dhcpv6Option::ClientFqdn(fqdn) => {
                 println!("-> Client FQDN: {}", fqdn);
+            }
+            Dhcpv6Option::UserClass(classes) => {
+                println!("-> User Class: {:?}", classes);
+            }
+            Dhcpv6Option::VendorClass {
+                enterprise_number,
+                data,
+            } => {
+                println!("-> Vendor Class (Ent {}): {:?}", enterprise_number, data);
             }
             Dhcpv6Option::Other { .. } => {}
         }
@@ -903,7 +1011,7 @@ fn print_usage() {
     );
     println!();
     println!(
-        "CSV Format: first_seen,last_seen,mac_address,ip_address,ipv6_address,hostname,device_type,vendor,services"
+        "CSV Format: first_seen,last_seen,mac_address,ip_address,ipv6_address,hostname,device_type,vendor,services,system_description"
     );
     println!();
     println!("OUI Database:");
