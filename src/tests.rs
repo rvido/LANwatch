@@ -2703,11 +2703,9 @@ mod tests {
     #[test]
     fn test_device_tracker_flush_and_compaction() {
         let temp_path = "/tmp/lanwatch_test_flush_compaction.csv";
-        let journal_path = format!("{}.journal", temp_path);
         let _ = std::fs::remove_file(temp_path);
-        let _ = std::fs::remove_file(&journal_path);
 
-        // Scope 1: Create tracker, save once to create the main CSV, then write an update via journal.
+        // Scope 1: Create tracker, save once to create the main file, then write an update with auto_save = false.
         {
             let mut tracker = DeviceTracker::new(temp_path).unwrap();
 
@@ -2719,9 +2717,8 @@ mod tests {
             );
             tracker.save_to_csv().unwrap();
             assert!(Path::new(temp_path).exists());
-            assert!(!Path::new(&journal_path).exists());
 
-            // Disable auto_save to test flush/journal logic
+            // Disable auto_save to test flush logic
             tracker.set_auto_save(false);
 
             // Update the device (IP changes)
@@ -2731,30 +2728,23 @@ mod tests {
                 None,
             );
 
-            // Flush to CSV should write to the journal (since CSV exists and compaction is not yet due/triggered)
+            // Read the main file to verify the old IP is still there in the saved file (since we haven't flushed yet)
+            let saved_bytes = std::fs::read(temp_path).unwrap();
+            let saved_devices: std::collections::HashMap<String, DeviceInfo> = postcard::from_bytes(&saved_bytes).unwrap();
+            let saved_device = saved_devices.get("00:11:22:33:44:55").unwrap();
+            assert_eq!(saved_device.ip_address, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)));
+
+            // Flush to save the updated state
             tracker.flush_to_csv().unwrap();
 
-            // Check that the journal was created
-            assert!(Path::new(&journal_path).exists());
-
-            // Read the main CSV to verify the old IP is still there (since compaction hasn't run yet)
-            let csv_content = std::fs::read_to_string(temp_path).unwrap();
-            assert!(csv_content.contains("192.168.1.100"));
-            assert!(!csv_content.contains("192.168.1.101"));
-
-            // Read journal content to verify the new IP is in the journal
-            let journal_content = std::fs::read_to_string(&journal_path).unwrap();
-            assert!(journal_content.contains("192.168.1.101"));
-        } // tracker is dropped here! Drop should trigger final compaction, merging journal into main CSV.
-
-        // Verify that after dropping, the journal is gone and the main CSV has the updated IP
-        assert!(!Path::new(&journal_path).exists());
-        let csv_content = std::fs::read_to_string(temp_path).unwrap();
-        assert!(csv_content.contains("192.168.1.101"));
-        assert!(!csv_content.contains("192.168.1.100"));
+            // Verify that after flushing, the file has the updated IP
+            let saved_bytes2 = std::fs::read(temp_path).unwrap();
+            let saved_devices2: std::collections::HashMap<String, DeviceInfo> = postcard::from_bytes(&saved_bytes2).unwrap();
+            let saved_device2 = saved_devices2.get("00:11:22:33:44:55").unwrap();
+            assert_eq!(saved_device2.ip_address, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 101)));
+        }
 
         let _ = std::fs::remove_file(temp_path);
-        let _ = std::fs::remove_file(&journal_path);
     }
 
     #[test]

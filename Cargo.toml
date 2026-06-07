@@ -12,16 +12,17 @@ keywords = ["network", "discovery", "dhcp", "mdns", "device-tracking"]
 categories = ["network-programming", "parsing"]
 
 [features]
-# Keep default minimal; enable API explicitly to avoid pulling serde/tiny_http.
+# Keep default minimal; enable API explicitly to avoid pulling serde_json/tiny_http.
 default = []
-http-api = ["dep:serde", "dep:serde_json", "dep:tiny_http"]
+http-api = ["dep:serde_json", "dep:tiny_http"]
 mdns = []
 ssdp = []
 
 [dependencies]
 pnet_datalink = "0.35"
 pnet_packet = "0.35"
-serde = { version = "1.0", features = ["derive"], optional = true }
+postcard = { version = "1.1", features = ["use-std"] }
+serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", optional = true }
 tiny_http = { version = "0.12", optional = true }
 
