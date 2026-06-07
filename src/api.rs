@@ -109,15 +109,16 @@ impl ApiServer {
         let method = request.method();
 
         match (method.as_str(), path) {
-            ("GET", "/devices/count") => self.handle_device_count(),
+            ("GET", "/devices/count") | ("GET", "/device/count") => self.handle_device_count(),
             ("GET", "/health") => self.handle_health(),
             ("GET", "/") => self.handle_root(),
-            ("GET", p) if p == "/devices" || p.starts_with("/devices?") => {
+            ("GET", p) if p == "/devices" || p.starts_with("/devices?") || p == "/device" || p.starts_with("/device?") => {
                 let (limit, offset) = Self::parse_query_params(p);
                 self.handle_devices_paginated(limit, offset)
             }
-            ("GET", p) if p.starts_with("/devices/") => {
-                let mac = &p[9..];
+            ("GET", p) if p.starts_with("/devices/") || p.starts_with("/device/") => {
+                let prefix_len = if p.starts_with("/devices/") { 9 } else { 8 };
+                let mac = &p[prefix_len..];
                 let mac_clean = if let Some(pos) = mac.find('?') {
                     &mac[..pos]
                 } else {

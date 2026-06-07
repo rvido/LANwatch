@@ -22,7 +22,7 @@ use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const DEFAULT_CSV_PATH: &str = "devices.csv";
+const DEFAULT_DB_PATH: &str = "devices.bin";
 #[cfg(feature = "http-api")]
 const DEFAULT_API_ADDR: &str = "127.0.0.1:8080";
 const DEFAULT_OUI_DOWNLOAD_PATH: &str = "ieee-oui.txt";
@@ -56,10 +56,10 @@ fn main() {
     if config.enable_ssdp {
         println!("SSDP/UPnP sniffing: enabled");
     }
-    println!("Saving device info to: {}", config.csv_path);
+    println!("Saving device info to: {}", config.db_path);
 
     #[allow(unused_mut)]
-    let mut tracker = DeviceTracker::new(&config.csv_path).unwrap_or_else(|e| {
+    let mut tracker = DeviceTracker::new(&config.db_path).unwrap_or_else(|e| {
         eprintln!("Error creating device tracker: {}", e);
         std::process::exit(1);
     });
@@ -821,7 +821,7 @@ fn print_wsd_packet(packet: &lanwatch::WsdPacket, updated_count: usize, total: u
 /// Configuration parsed from command line arguments
 struct Config {
     interface_name: String,
-    csv_path: String,
+    db_path: String,
     #[cfg(feature = "http-api")]
     api_addr: Option<String>,
     #[cfg(feature = "mdns")]
@@ -839,7 +839,7 @@ struct Config {
 
 fn parse_args(args: &[String]) -> Config {
     let mut interface_name = None;
-    let mut csv_path = DEFAULT_CSV_PATH.to_string();
+    let mut db_path = DEFAULT_DB_PATH.to_string();
     #[cfg(feature = "http-api")]
     let mut api_addr: Option<String> = None;
     #[cfg(feature = "mdns")]
@@ -859,7 +859,7 @@ fn parse_args(args: &[String]) -> Config {
         match args[i].as_str() {
             "-o" | "--output" => {
                 if i + 1 < args.len() {
-                    csv_path = args[i + 1].clone();
+                    db_path = args[i + 1].clone();
                     i += 2;
                 } else {
                     eprintln!("Error: --output requires a file path");
@@ -961,7 +961,7 @@ fn parse_args(args: &[String]) -> Config {
 
     Config {
         interface_name,
-        csv_path,
+        db_path,
         #[cfg(feature = "http-api")]
         api_addr,
         #[cfg(feature = "mdns")]
@@ -982,7 +982,7 @@ fn print_usage() {
     println!("Usage: lanwatch <interface_name> [OPTIONS]");
     println!();
     println!("Options:");
-    println!("  -o, --output <FILE>    Output CSV file path (default: devices.csv)");
+    println!("  -o, --output <FILE>    Output database file path (default: devices.bin)");
     println!("  -u, --oui <FILE>       Load IEEE OUI database for vendor identification");
     #[cfg(feature = "http-api")]
     {

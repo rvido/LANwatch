@@ -6,31 +6,23 @@
 use std::net::{IpAddr, Ipv6Addr};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-#[cfg(feature = "http-api")]
 use serde::{Deserialize, Serialize};
 
 /// Information about a detected DHCP device
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "http-api", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceInfo {
     /// MAC address of the device
     pub mac_address: String,
     /// IPv4 address
-    #[cfg_attr(
-        feature = "http-api",
-        serde(
-            serialize_with = "serialize_ip_addr",
-            deserialize_with = "deserialize_ip_addr"
-        )
+    #[serde(
+        serialize_with = "serialize_ip_addr",
+        deserialize_with = "deserialize_ip_addr"
     )]
     pub ip_address: IpAddr,
     /// IPv6 address if available
-    #[cfg_attr(
-        feature = "http-api",
-        serde(
-            serialize_with = "serialize_opt_ip_addr",
-            deserialize_with = "deserialize_opt_ip_addr"
-        )
+    #[serde(
+        serialize_with = "serialize_opt_ip_addr",
+        deserialize_with = "deserialize_opt_ip_addr"
     )]
     pub ipv6_address: Option<IpAddr>,
     /// Hostname if available
@@ -44,21 +36,15 @@ pub struct DeviceInfo {
     /// Device type based on mDNS services (e.g., "Chromecast", "Apple TV", "Printer")
     pub device_type: Option<String>,
     /// First seen timestamp (ISO 8601 format)
-    #[cfg_attr(
-        feature = "http-api",
-        serde(
-            serialize_with = "serialize_system_time",
-            deserialize_with = "deserialize_system_time"
-        )
+    #[serde(
+        serialize_with = "serialize_system_time",
+        deserialize_with = "deserialize_system_time"
     )]
     pub first_seen: SystemTime,
     /// Last seen timestamp (ISO 8601 format)
-    #[cfg_attr(
-        feature = "http-api",
-        serde(
-            serialize_with = "serialize_system_time",
-            deserialize_with = "deserialize_system_time"
-        )
+    #[serde(
+        serialize_with = "serialize_system_time",
+        deserialize_with = "deserialize_system_time"
     )]
     pub last_seen: SystemTime,
 }
@@ -385,7 +371,6 @@ pub fn parse_timestamp(value: &str) -> Option<SystemTime> {
     Some(UNIX_EPOCH + Duration::from_secs(seconds))
 }
 
-#[cfg(feature = "http-api")]
 fn serialize_system_time<S>(value: &SystemTime, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
@@ -393,7 +378,6 @@ where
     serializer.serialize_str(&format_timestamp(*value))
 }
 
-#[cfg(feature = "http-api")]
 fn deserialize_system_time<'de, D>(deserializer: D) -> Result<SystemTime, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -402,7 +386,6 @@ where
     parse_timestamp(&value).ok_or_else(|| serde::de::Error::custom("invalid timestamp"))
 }
 
-#[cfg(feature = "http-api")]
 fn serialize_ip_addr<S>(value: &IpAddr, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
@@ -410,7 +393,6 @@ where
     serializer.serialize_str(&value.to_string())
 }
 
-#[cfg(feature = "http-api")]
 fn deserialize_ip_addr<'de, D>(deserializer: D) -> Result<IpAddr, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -419,7 +401,6 @@ where
     value.parse().map_err(serde::de::Error::custom)
 }
 
-#[cfg(feature = "http-api")]
 fn serialize_opt_ip_addr<S>(value: &Option<IpAddr>, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
@@ -430,7 +411,6 @@ where
     }
 }
 
-#[cfg(feature = "http-api")]
 fn deserialize_opt_ip_addr<'de, D>(deserializer: D) -> Result<Option<IpAddr>, D::Error>
 where
     D: serde::Deserializer<'de>,

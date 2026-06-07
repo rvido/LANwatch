@@ -16,8 +16,8 @@ A Rust library and CLI tool for network device discovery and tracking via DHCP, 
 - **mDNS TXT Record Parsing**: Extracts model, md, and ty metadata from DNS-SD records to identify specific hardware devices (Apple TV, Chromecast, Sonos speakers, and printer models)
 - **Device Classification**: Expanded classification engine mapping hostnames, mDNS TXT metadata, and service fingerprints to specific device types and vendors (Roku, Sonos, Apple TV, Google Chromecast, ESP32 IoT, Raspberry Pi, Synology NAS, Playstation, Xbox, Nintendo, smart plugs, printers, etc.)
 - **IEEE OUI Database**: Built-in vendor identification from MAC addresses using IEEE OUI (Organizationally Unique Identifier) prefixes (40,000+ entries)
-- **Device Tracking**: Automatically track detected devices and save to CSV file
-- **CSV Export**: Export device information with timestamps, MAC addresses, IP addresses, and hostnames
+- **Device Tracking**: Automatically track detected devices and persist them using the fast, compact, and transactional-ready Postcard binary serialization format.
+- **Legacy CSV Migration**: Auto-detects legacy CSV format databases on startup and seamlessly migrates them to the new Postcard format.
 - **HTTP API** (optional): Opt-in REST API server to query devices as JSON. (Requires the `http-api` feature.)
 - **Library API**: Use as a library in your own Rust projects
 - **CLI Tool**: Run as a standalone command-line tool
@@ -97,9 +97,11 @@ cargo run -- --help
 
 **Note:** Root/sudo privileges are typically required for packet capture.
 
-### CSV Output Format
+### Database Persistence Format
 
-The tool saves detected devices to a CSV file with the following columns:
+The tool saves detected devices to a high-performance binary database file using the **Postcard** serialization format. 
+
+For compatibility, it automatically detects legacy CSV database files (with the format below) on startup, parses and migrates them to the new binary format, and deletes any old journal files:
 
 ```csv
 first_seen,last_seen,mac_address,ip_address,ipv6_address,hostname,device_type,vendor,services,system_description
@@ -119,7 +121,7 @@ first_seen,last_seen,mac_address,ip_address,ipv6_address,hostname,device_type,ve
 - **services**: Semicolon-separated list of mDNS services (requires `mdns` feature)
 - **system_description**: Detailed hardware or system description parsed from link-layer protocols (e.g., LLDP system descriptions or CDP software versions)
 
-The CSV file is flushed in short batches for performance as devices are detected or updated.
+The database is written atomically using a temporary file and renamed on successful write to prevent data corruption.
 
 ### mDNS Service Identification
 
@@ -342,7 +344,7 @@ cargo run --example parse_payload
 - `MdnsQuerier` - Active mDNS query sender (requires `mdns` feature)
 - `SsdpPacket` - Parsed SSDP packet (requires `ssdp` feature)
 - `SsdpQuerier` - Active SSDP M-SEARCH sender (requires `ssdp` feature)
-- `DeviceTracker` - Track detected devices and save to CSV
+- `DeviceTracker` - Track detected devices and persist to a binary database using Postcard
 - `DeviceInfo` - Information about a detected device
 - `OuiRegistry` - IEEE OUI database for MAC-to-vendor lookups
 - `DhcpError` - Error types for sniffer operations
