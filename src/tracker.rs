@@ -122,7 +122,14 @@ impl DeviceTracker {
         } else {
             // Read as Postcard binary
             match postcard::from_bytes::<HashMap<String, DeviceInfo>>(&bytes) {
-                Ok(devices) => {
+                Ok(mut devices) => {
+                    for device in devices.values_mut() {
+                        if device.ipv6_addresses.is_empty()
+                            && let Some(IpAddr::V6(v6)) = device.ipv6_address
+                        {
+                            device.ipv6_addresses.push(v6);
+                        }
+                    }
                     self.devices = devices;
                 }
                 Err(e) => {

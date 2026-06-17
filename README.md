@@ -104,17 +104,18 @@ The tool saves detected devices to a high-performance binary database file using
 For compatibility, it automatically detects legacy CSV database files (with the format below) on startup, parses and migrates them to the new binary format, and deletes any old journal files:
 
 ```csv
-first_seen,last_seen,mac_address,ip_address,ipv6_address,hostname,device_type,vendor,services,system_description
-2026-01-16T10:25:00Z,2026-01-16T10:30:45Z,AA:BB:CC:DD:EE:FF,192.168.1.100,"fe80::1","mydevice","Chromecast","Google","_googlecast._tcp",""
-2026-01-16T10:28:30Z,2026-01-16T10:28:30Z,11:22:33:44:55:66,192.168.1.101,"","","AirPlay Device","Apple","_airplay._tcp",""
-2026-06-04T21:40:00Z,2026-06-04T21:45:10Z,DC:69:B5:A5:8C:A0,fe80::de69:b5ff:fea5:8cb2,"fe80::de69:b5ff:fea5:8cb2","eero","Router","eero inc.","","eero Pro 6E GGB1UD22435506MW"
+first_seen,last_seen,mac_address,ip_address,ipv6_address,hostname,device_type,vendor,services,system_description,ipv6_addresses
+2026-01-16T10:25:00Z,2026-01-16T10:30:45Z,AA:BB:CC:DD:EE:FF,192.168.1.100,"fe80::1","mydevice","Chromecast","Google","_googlecast._tcp","","fe80::1"
+2026-01-16T10:28:30Z,2026-01-16T10:28:30Z,11:22:33:44:55:66,192.168.1.101,"","","AirPlay Device","Apple","_airplay._tcp","",""
+2026-06-04T21:40:00Z,2026-06-04T21:45:10Z,DC:69:B5:A5:8C:A0,fe80::de69:b5ff:fea5:8cb2,"fe80::de69:b5ff:fea5:8cb2","eero","Router","eero inc.","","eero Pro 6E GGB1UD22435506MW","fe80::de69:b5ff:fea5:8cb2"
 ```
 
 - **first_seen**: ISO 8601 timestamp of first detection
 - **last_seen**: ISO 8601 timestamp of last DHCP/mDNS/LLDP activity
 - **mac_address**: Device MAC address (for DHCPv6, extracted from DUID-LL/LLT when available; otherwise stored as `duid:...`)
 - **ip_address**: IPv4 address (requested or assigned)
-- **ipv6_address**: IPv6 address if available (from mDNS AAAA records or link-local management addresses)
+- **ipv6_address**: Primary IPv6 address selected based on preference (Global Unicast (GUA) > Unique Local (ULA) > Link-Local (LLA))
+- **ipv6_addresses**: Semicolon-separated list of all detected IPv6 addresses for this device
 - **hostname**: Device hostname if available (empty if not)
 - **device_type**: Device type inferred from discovery info (e.g., "Chromecast", "Apple TV", "Router", "Switch")
 - **vendor**: Detected vendor based on OUI registry, hostnames, or hardware descriptors

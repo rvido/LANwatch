@@ -25,6 +25,9 @@ pub struct DeviceInfo {
         deserialize_with = "deserialize_opt_ip_addr"
     )]
     pub ipv6_address: Option<IpAddr>,
+    /// List of all detected IPv6 addresses for this device
+    #[serde(default)]
+    pub ipv6_addresses: Vec<Ipv6Addr>,
     /// Hostname if available
     pub hostname: Option<String>,
     /// System description if available (e.g., from LLDP or CDP)
@@ -53,14 +56,19 @@ impl DeviceInfo {
     /// Creates a new `DeviceInfo` instance with timestamps initialized to now.
     pub fn new(mac_address: String, ip_address: IpAddr, hostname: Option<String>) -> Self {
         let timestamp = SystemTime::now();
+        let mut ipv6_addresses = Vec::new();
         let ipv6_address = match ip_address {
-            IpAddr::V6(ipv6) => Some(IpAddr::V6(ipv6)),
+            IpAddr::V6(ipv6) => {
+                ipv6_addresses.push(ipv6);
+                Some(IpAddr::V6(ipv6))
+            }
             _ => None,
         };
         Self {
             mac_address,
             ip_address,
             ipv6_address,
+            ipv6_addresses,
             hostname,
             system_description: None,
             services: Vec::new(),
@@ -157,15 +165,33 @@ impl DeviceInfo {
     /// Sets or updates the device's IPv6 address.
     ///
     /// # Returns
-    /// `true` if the address was changed or set, `false` if it was already identical.
+    /// `true` if the address list or primary address was changed or set, `false` if it was already identical.
     pub fn set_ipv6_address(&mut self, ipv6: Ipv6Addr) -> bool {
-        let new_ipv6 = Some(IpAddr::V6(ipv6));
-        if self.ipv6_address != new_ipv6 {
-            self.ipv6_address = new_ipv6;
-            true
-        } else {
-            false
+        let mut changed = false;
+        if !self.ipv6_addresses.contains(&ipv6) {
+            self.ipv6_addresses.push(ipv6);
+            changed = true;
         }
+
+        let current_pref = self
+            .ipv6_address
+            .and_then(|ip| match ip {
+                IpAddr::V6(v6) => Some(ipv6_preference_score(&v6)),
+                _ => None,
+            })
+            .unwrap_or(0);
+
+        let new_pref = ipv6_preference_score(&ipv6);
+
+        // If the new address has a higher preference score, or if there is no primary IPv6 address set yet
+        if self.ipv6_address.is_none() || new_pref > current_pref {
+            let new_ipv6 = Some(IpAddr::V6(ipv6));
+            if self.ipv6_address != new_ipv6 {
+                self.ipv6_address = new_ipv6;
+                changed = true;
+            }
+        }
+        changed
     }
 
     /// Serializes the device information into a CSV string.
@@ -174,8 +200,14 @@ impl DeviceInfo {
     /// `first_seen,last_seen,mac_address,ip_address,"ipv6_address","hostname","device_type","vendor","services","system_description"`
     pub fn to_csv_line(&self) -> String {
         let services_str = self.services.join(";");
+        let v6_addresses_str = self
+            .ipv6_addresses
+            .iter()
+            .map(|ip| ip.to_string())
+            .collect::<Vec<String>>()
+            .join(";");
         format!(
-            "{},{},{},{},\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"",
+            "{},{},{},{},\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"",
             format_timestamp(self.first_seen),
             format_timestamp(self.last_seen),
             self.mac_address,
@@ -187,7 +219,8 @@ impl DeviceInfo {
             self.device_type.as_deref().unwrap_or(""),
             self.vendor.as_deref().unwrap_or(""),
             services_str,
-            self.system_description.as_deref().unwrap_or("")
+            self.system_description.as_deref().unwrap_or(""),
+            v6_addresses_str
         )
     }
 
@@ -269,10 +302,32 @@ impl DeviceInfo {
             None
         };
 
+        let ipv6_addresses = if parts.len() > 10 {
+            let v6s = parts[10].trim_matches('"');
+            if v6s.is_empty() {
+                let mut list = Vec::new();
+                if let Some(IpAddr::V6(v6)) = ipv6_address {
+                    list.push(v6);
+                }
+                list
+            } else {
+                v6s.split(';')
+                    .filter_map(|s| s.parse::<Ipv6Addr>().ok())
+                    .collect()
+            }
+        } else {
+            let mut list = Vec::new();
+            if let Some(IpAddr::V6(v6)) = ipv6_address {
+                list.push(v6);
+            }
+            list
+        };
+
         Some(Self {
             mac_address,
             ip_address,
             ipv6_address,
+            ipv6_addresses,
             hostname,
             system_description,
             services,
@@ -523,5 +578,26 @@ pub(crate) fn sanitize_hostname(input: &str) -> Option<String> {
         None
     } else {
         Some(cleaned)
+    }
+}
+
+/// Helper function to rank preference of different IPv6 address types:
+/// - Global Unicast Address (GUA): 3
+/// - Unique Local Address (ULA): 2
+/// - Link-Local Address (LLA): 1
+/// - Unspecified/Multicast/Loopback: 0
+fn ipv6_preference_score(ip: &Ipv6Addr) -> u8 {
+    if ip.is_multicast() || ip.is_loopback() || ip.is_unspecified() {
+        return 0;
+    }
+    let first_word = ip.segments()[0];
+    if (first_word & 0xffc0) == 0xfe80 {
+        1 // Link-Local
+    } else if (first_word & 0xfe00) == 0xfc00 {
+        2 // Unique-Local
+    } else if (first_word & 0xe000) == 0x2000 {
+        3 // Global Unicast (GUA)
+    } else {
+        1 // Other unicast
     }
 }
