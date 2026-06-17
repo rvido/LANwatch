@@ -332,6 +332,7 @@ mod tests {
             mac_address: "aa:bb:cc:dd:ee:ff".to_string(),
             ip_address: Ipv4Addr::new(192, 168, 1, 100).into(),
             ipv6_address: Some("fe80::1".parse().unwrap()),
+            ipv6_addresses: vec!["fe80::1".parse().unwrap()],
             hostname: Some("testhost".to_string()),
             system_description: Some("My LLDP Device Description".to_string()),
             services: vec!["_http._tcp".to_string(), "_ssh._tcp".to_string()],
@@ -371,6 +372,7 @@ mod tests {
             mac_address: "aa:bb:cc:dd:ee:ff".to_string(),
             ip_address: Ipv4Addr::new(192, 168, 1, 100).into(),
             ipv6_address: None,
+            ipv6_addresses: Vec::new(),
             hostname: None,
             system_description: None,
             services: Vec::new(),
@@ -392,6 +394,7 @@ mod tests {
             mac_address: "aa:bb:cc:dd:ee:ff".to_string(),
             ip_address: Ipv4Addr::new(192, 168, 1, 100).into(),
             ipv6_address: None,
+            ipv6_addresses: Vec::new(),
             hostname: None,
             system_description: None,
             services: Vec::new(),
@@ -868,6 +871,7 @@ mod tests {
             mac_address: "AA:BB:CC:DD:EE:FF".to_string(),
             ip_address: Ipv4Addr::new(192, 168, 1, 100).into(),
             ipv6_address: Some("fe80::abcd:1234".parse().unwrap()),
+            ipv6_addresses: vec!["fe80::abcd:1234".parse().unwrap()],
             hostname: Some("jsonhost".to_string()),
             system_description: None,
             services: vec!["_airplay._tcp".to_string()],
@@ -2779,5 +2783,43 @@ mod tests {
 
         let _ = std::fs::remove_file(temp_path);
         let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+    }
+
+    #[test]
+    fn test_device_info_multiple_ipv6_addresses() {
+        let mut device = DeviceInfo::new(
+            "aa:bb:cc:dd:ee:ff".to_string(),
+            Ipv4Addr::new(192, 168, 1, 100).into(),
+            None,
+        );
+
+        // Add a link-local address
+        let lla: Ipv6Addr = "fe80::1".parse().unwrap();
+        assert!(device.set_ipv6_address(lla));
+        assert_eq!(device.ipv6_address, Some(IpAddr::V6(lla)));
+        assert_eq!(device.ipv6_addresses, vec![lla]);
+
+        // Add a unique local address (should override link-local)
+        let ula: Ipv6Addr = "fd00::1".parse().unwrap();
+        assert!(device.set_ipv6_address(ula));
+        assert_eq!(device.ipv6_address, Some(IpAddr::V6(ula)));
+        assert_eq!(device.ipv6_addresses, vec![lla, ula]);
+
+        // Add a global unicast address (should override unique local)
+        let gua: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        assert!(device.set_ipv6_address(gua));
+        assert_eq!(device.ipv6_address, Some(IpAddr::V6(gua)));
+        assert_eq!(device.ipv6_addresses, vec![lla, ula, gua]);
+
+        // Add the link-local address again (should do nothing, return false)
+        assert!(!device.set_ipv6_address(lla));
+        assert_eq!(device.ipv6_address, Some(IpAddr::V6(gua)));
+        assert_eq!(device.ipv6_addresses, vec![lla, ula, gua]);
+
+        // Test CSV roundtrip with multiple IPv6 addresses
+        let csv = device.to_csv_line();
+        let parsed = DeviceInfo::from_csv_line(&csv).unwrap();
+        assert_eq!(parsed.ipv6_address, Some(IpAddr::V6(gua)));
+        assert_eq!(parsed.ipv6_addresses, vec![lla, ula, gua]);
     }
 }

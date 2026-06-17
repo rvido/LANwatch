@@ -112,7 +112,12 @@ impl ApiServer {
             ("GET", "/devices/count") | ("GET", "/device/count") => self.handle_device_count(),
             ("GET", "/health") => self.handle_health(),
             ("GET", "/") => self.handle_root(),
-            ("GET", p) if p == "/devices" || p.starts_with("/devices?") || p == "/device" || p.starts_with("/device?") => {
+            ("GET", p)
+                if p == "/devices"
+                    || p.starts_with("/devices?")
+                    || p == "/device"
+                    || p.starts_with("/device?") =>
+            {
                 let (limit, offset) = Self::parse_query_params(p);
                 self.handle_devices_paginated(limit, offset)
             }
