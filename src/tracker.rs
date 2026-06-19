@@ -464,6 +464,9 @@ impl DeviceTracker {
         changed
     }
 
+    /// Updates or inserts a device in the tracker using information from an LLDP packet.
+    ///
+    /// Returns `true` if the device's information was updated or if a new device was added.
     #[cfg(feature = "ssdp")]
     pub fn update_from_lldp(&mut self, packet: &LldpPacket) -> bool {
         let mac = &packet.source_mac;
@@ -542,6 +545,9 @@ impl DeviceTracker {
         changed
     }
 
+    /// Updates or inserts a device in the tracker using information from a CDP packet.
+    ///
+    /// Returns `true` if the device's information was updated or if a new device was added.
     #[cfg(feature = "ssdp")]
     pub fn update_from_cdp(&mut self, packet: &CdpPacket) -> bool {
         let mac = &packet.source_mac;

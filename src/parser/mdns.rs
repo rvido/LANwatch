@@ -104,9 +104,13 @@ pub enum MdnsRecordData {
     Ptr(String),
     /// Service record: priority, weight, port, target
     Srv {
+        /// Priority of the target host
         priority: u16,
+        /// Weight for entries with the same priority
         weight: u16,
+        /// Port on the target host for this service
         port: u16,
+        /// Target host domain name
         target: String,
     },
     /// Text record (key=value pairs or raw strings)
@@ -180,9 +184,13 @@ pub enum MdnsRecordDataView<'a> {
     Ptr(&'a str),
     /// Service record: priority, weight, port, target
     Srv {
+        /// Priority of the target host
         priority: u16,
+        /// Weight for entries with the same priority
         weight: u16,
+        /// Port on the target host for this service
         port: u16,
+        /// Target host domain name
         target: &'a str,
     },
     /// Text record (key=value pairs or raw strings)

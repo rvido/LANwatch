@@ -91,7 +91,7 @@ impl OuiRegistry {
     }
 
     /// Load additional OUI entries from a file.
-    /// File format: MAC_PREFIX<whitespace>VENDOR_NAME
+    /// File format: `MAC_PREFIX<whitespace>VENDOR_NAME`
     /// Example:
     ///   AA:BB:CC  Acme Corporation
     ///   DD-EE-FF  Another Vendor
@@ -256,7 +256,9 @@ impl OuiRegistry {
 
 /// IEEE OUI database URLs
 pub const IEEE_OUI_URL: &str = "https://standards-oui.ieee.org/oui/oui.txt";
+/// IEEE OUI-28 (Medium Authority MAC) registry URL.
 pub const IEEE_OUI28_URL: &str = "https://standards-oui.ieee.org/oui28/mam.txt";
+/// IEEE OUI-36 (Individual Address Block) registry URL.
 pub const IEEE_OUI36_URL: &str = "https://standards-oui.ieee.org/oui36/oui36.txt";
 
 /// Download the IEEE OUI database to a file using curl.

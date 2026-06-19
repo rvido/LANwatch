@@ -368,6 +368,9 @@ fn parse_csv_line(line: &str) -> Vec<&str> {
     fields
 }
 
+/// Parses an ISO 8601 UTC timestamp format (YYYY-MM-DDTHH:MM:SSZ) into a `SystemTime`.
+///
+/// Returns `None` if the format is invalid or cannot be parsed.
 pub fn parse_timestamp(value: &str) -> Option<SystemTime> {
     let value = value.trim();
     if value.len() != 20 || !value.ends_with('Z') {
@@ -476,6 +479,7 @@ where
         .transpose()
 }
 
+/// Formats a `SystemTime` as an ISO 8601 UTC timestamp string (YYYY-MM-DDTHH:MM:SSZ).
 pub fn format_timestamp(time: SystemTime) -> String {
     let duration = time
         .duration_since(SystemTime::UNIX_EPOCH)
