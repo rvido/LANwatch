@@ -2,6 +2,8 @@
 
 A Rust library and CLI tool for network device discovery and tracking via DHCP, mDNS, SSDP/UPnP, and IEEE-OUI identification.
 
+![LANwatch System Architecture](assets/lanwatch_architecture.jpg)
+
 ## Features
 
 - **DHCPv4 Support**: Capture and parse DHCP DISCOVER, OFFER, REQUEST, ACK, NAK, RELEASE, and INFORM messages
@@ -416,6 +418,10 @@ cargo build --release --all-features
 cargo build --release --no-default-features
 ```
 
+## Network Discovery Flow (Passive vs Active)
+
+![Passive vs Active Network Discovery](assets/lanwatch_discovery_flow.jpg)
+
 ### mDNS Discovery
 
 When the `mdns` feature is enabled, the tool can capture mDNS traffic to discover:
@@ -460,6 +466,8 @@ The tool extracts vendor information and device types from SSDP server headers a
 When raw network sniffing is enabled (via the `mdns` or `ssdp` features), LANwatch automatically captures Layer 2 ARP frames (both Request and Reply operations). This allows LANwatch to discover silent devices on the local network link that do not transmit DHCP, mDNS, or SSDP/UPnP traffic, expanding discovery coverage significantly.
 
 ### DHCP Option 55, 60 & 43 OS/Vendor Fingerprinting
+
+![DHCP Option Fingerprinting and Classification](assets/lanwatch_fingerprint_logic.jpg)
 
 When parsing DHCPv4 payloads, LANwatch extracts:
 - **Option 55 (Parameter Request List)**: Matches common signature sequences (such as Option 249 for Microsoft Windows, Option 95 for Apple, and Options 26 & 28 for Android/Linux) to identify the operating system.
