@@ -7,16 +7,20 @@ RUSTDOCFLAGS = -D missing-docs
 
 all: build test doc clippy
 
+## update: Update dependencies list
+update:
+	$(CARGO) update
+
 ## build: Build the project with all features enabled
-build:
+build: update
 	$(CARGO) build --all-features
 
 ## build-minimal: Build the project with minimal default features
-build-minimal:
+build-minimal: update
 	$(CARGO) build --no-default-features
 
 ## release: Build the project in release mode with all features enabled
-release:
+release: update
 	$(CARGO) build --release --all-features
 
 ## test: Run unit tests with all features enabled
