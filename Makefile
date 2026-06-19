@@ -1,0 +1,53 @@
+# Makefile for LANwatch
+
+CARGO = cargo
+RUSTDOCFLAGS = -D missing-docs
+
+.PHONY: all build build-minimal release test doc clean fmt fmt-check clippy check Help
+
+all: build test doc clippy
+
+## build: Build the project with all features enabled
+build:
+	$(CARGO) build --all-features
+
+## build-minimal: Build the project with minimal default features
+build-minimal:
+	$(CARGO) build --no-default-features
+
+## release: Build the project in release mode with all features enabled
+release:
+	$(CARGO) build --release --all-features
+
+## test: Run unit tests with all features enabled
+test:
+	$(CARGO) test --all-features
+
+## doc: Generate crate documentation with strict missing doc checks
+doc:
+	RUSTDOCFLAGS="$(RUSTDOCFLAGS)" $(CARGO) doc --no-deps --all-features
+
+## clean: Clean the target directory
+clean:
+	$(CARGO) clean
+
+## fmt: Format the codebase using rustfmt
+fmt:
+	$(CARGO) fmt --all
+
+## fmt-check: Check if codebase is formatted
+fmt-check:
+	$(CARGO) fmt --all -- --check
+
+## clippy: Lint the project with clippy with warnings treated as errors
+clippy:
+	$(CARGO) clippy --all-targets --all-features -- -D warnings
+
+## check: Check codebase quickly
+check:
+	$(CARGO) check --all-features
+
+## help: Show this help message
+help:
+	@echo "Available Makefile targets:"
+	@grep -h "##" $(MAKEFILE_LIST) | grep -v grep | sed -e 's/## //'
