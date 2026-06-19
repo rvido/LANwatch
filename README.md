@@ -31,10 +31,10 @@ Add to your `Cargo.toml`. The `http-api` feature is opt-in to keep binary size s
 ```toml
 [dependencies]
 # Smallest binary footprint, core DHCP & MAC tracking only
-lanwatch = "0.1"
+lanwatch = "0.6"
 
 # With HTTP API server and active discovery protocols
-lanwatch = { version = "0.1", features = ["http-api", "mdns", "ssdp"] }
+lanwatch = { version = "0.6", features = ["http-api", "mdns", "ssdp"] }
 ```
 
 Or clone and build from source. Release builds are automatically optimized for size (`opt-level = "z"`, `strip = true`, `panic = "abort"`):
