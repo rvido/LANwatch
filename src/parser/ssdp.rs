@@ -553,6 +553,9 @@ fn starts_with_ascii_case_insensitive(value: &str, prefix: &str) -> bool {
         .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix))
 }
 
+/// Parses an LLDP (Link Layer Discovery Protocol) Ethernet payload.
+///
+/// Returns a parsed `LldpPacket` on success, or `None` if parsing fails or crucial TLVs are missing.
 pub fn parse_lldp_payload(payload: &[u8], source_mac: String) -> Option<LldpPacket> {
     let mut system_name = None;
     let mut system_description = None;
@@ -654,6 +657,9 @@ pub fn parse_lldp_payload(payload: &[u8], source_mac: String) -> Option<LldpPack
     })
 }
 
+/// Parses a CDP (Cisco Discovery Protocol) Ethernet payload.
+///
+/// Returns a parsed `CdpPacket` on success, or `None` if parsing fails or crucial fields are missing.
 pub fn parse_cdp_payload(payload: &[u8], source_mac: String) -> Option<CdpPacket> {
     if payload.len() < 4 {
         return None;

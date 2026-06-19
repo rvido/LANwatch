@@ -1,16 +1,22 @@
+//! Packet parsing modules for DHCP, mDNS, SSDP, and other network discovery protocols.
+
 // Copyright (c) 2026 Richard Vidal-Dorsch
 // SPDX-License-Identifier: MIT
 //
 // LANwatch - Network device discovery and tracking
 
+/// DHCP packet parser.
 pub mod dhcp;
 
+/// mDNS packet parser.
 #[cfg(feature = "mdns")]
 pub mod mdns;
 
+/// SSDP/UPnP/LLDP/CDP packet parser.
 #[cfg(feature = "ssdp")]
 pub mod ssdp;
 
+/// General network packet parsers (ARP, NDP, etc.).
 pub mod network;
 
 // Re-export the main parsing entry points and types

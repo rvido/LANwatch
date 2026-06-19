@@ -48,14 +48,23 @@ impl std::error::Error for DhcpError {}
 /// DHCPv4 message types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dhcpv4MessageType {
+    /// DHCPDISCOVER message
     Discover,
+    /// DHCPOFFER message
     Offer,
+    /// DHCPREQUEST message
     Request,
+    /// DHCPDECLINE message
     Decline,
+    /// DHCPACK message
     Ack,
+    /// DHCPNAK message
     Nak,
+    /// DHCPRELEASE message
     Release,
+    /// DHCPINFORM message
     Inform,
+    /// Unknown or custom DHCP message type
     Unknown(u8),
 }
 
@@ -94,8 +103,11 @@ impl std::fmt::Display for Dhcpv4MessageType {
 /// DHCPv4 operation type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dhcpv4Operation {
+    /// Message is a request from a client (BOOTREQUEST, value 1)
     BootRequest,
+    /// Message is a reply from a server (BOOTREPLY, value 2)
     BootReply,
+    /// Unknown or unsupported operation code
     Unknown(u8),
 }
 
@@ -122,17 +134,29 @@ impl std::fmt::Display for Dhcpv4Operation {
 /// DHCPv6 message types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dhcpv6MessageType {
+    /// SOLICIT message (value 1)
     Solicit,
+    /// ADVERTISE message (value 2)
     Advertise,
+    /// REQUEST message (value 3)
     Request,
+    /// CONFIRM message (value 4)
     Confirm,
+    /// RENEW message (value 5)
     Renew,
+    /// REBIND message (value 6)
     Rebind,
+    /// REPLY message (value 7)
     Reply,
+    /// RELEASE message (value 8)
     Release,
+    /// DECLINE message (value 9)
     Decline,
+    /// RECONFIGURE message (value 10)
     Reconfigure,
+    /// INFORMATION-REQUEST message (value 11)
     InfoRequest,
+    /// Unknown DHCPv6 message type
     Unknown(u8),
 }
 
@@ -226,17 +250,28 @@ impl Dhcpv4Packet {
 /// DHCPv6 option
 #[derive(Debug, Clone)]
 pub enum Dhcpv6Option {
+    /// Client Identifier Option (Option 1)
     ClientId(Vec<u8>),
+    /// Server Identifier Option (Option 2)
     ServerId(Vec<u8>),
+    /// Identity Association for Non-temporary Addresses Option (Option 3)
     IaNa,
+    /// Client Fully Qualified Domain Name Option (Option 39)
     ClientFqdn(String),
+    /// User Class Option (Option 15)
     UserClass(Vec<String>),
+    /// Vendor-performing Vendor Class Option (Option 16)
     VendorClass {
+        /// Enterprise number identifying the vendor
         enterprise_number: u32,
+        /// Vendor class data fields
         data: Vec<String>,
     },
+    /// Any other DHCPv6 option that is not parsed specifically
     Other {
+        /// The raw option code
         code: u16,
+        /// The raw option data bytes
         data: Vec<u8>,
     },
 }
@@ -278,30 +313,45 @@ impl Dhcpv6Packet {
 /// DHCP event - either v4 or v6 packet
 #[derive(Debug, Clone)]
 pub enum DhcpEvent {
+    /// A parsed DHCPv4 packet event
     V4(Dhcpv4Packet),
+    /// A parsed DHCPv6 packet event
     V6(Dhcpv6Packet),
 }
 
 #[cfg(feature = "ssdp")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "http-api", derive(serde::Serialize, serde::Deserialize))]
+/// Parsed LLDP packet containing system identity and capabilities.
 pub struct LldpPacket {
+    /// The source MAC address of the device transmitting the LLDP frame.
     pub source_mac: String,
+    /// System name assigned to the transmitting device.
     pub system_name: Option<String>,
+    /// Detailed system description of the transmitting device.
     pub system_description: Option<String>,
+    /// The port identifier from which the packet was sent.
     pub port_id: Option<String>,
+    /// The management IP address of the device, if advertised.
     pub management_address: Option<IpAddr>,
 }
 
 #[cfg(feature = "ssdp")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "http-api", derive(serde::Serialize, serde::Deserialize))]
+/// Parsed CDP packet containing Cisco device identifier, software version, platform and details.
 pub struct CdpPacket {
+    /// The source MAC address of the device transmitting the CDP frame.
     pub source_mac: String,
+    /// The configured device ID (usually hostname) of the transmitting device.
     pub device_id: Option<String>,
+    /// The software version string running on the transmitting device.
     pub software_version: Option<String>,
+    /// The physical port name/identifier from which the packet was sent.
     pub port_id: Option<String>,
+    /// The hardware platform of the transmitting device.
     pub platform: Option<String>,
+    /// The management IP address of the device, if advertised.
     pub management_address: Option<IpAddr>,
 }
 
@@ -338,12 +388,16 @@ pub enum NetworkEvent {
     Wsd(WsdPacket),
     /// ARP packet
     Arp {
+        /// Source MAC address from the ARP packet
         source_mac: String,
+        /// Source IP address from the ARP packet
         source_ip: std::net::IpAddr,
     },
     /// NDP packet (IPv6 Neighbor Discovery Protocol)
     Ndp {
+        /// Source MAC address from the NDP packet
         source_mac: String,
+        /// Source IP address from the NDP packet
         source_ip: std::net::IpAddr,
     },
     /// LLDP packet (Link Layer Discovery Protocol)
