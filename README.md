@@ -482,11 +482,52 @@ Under the `ssdp` feature gate, LANwatch passively listens to UDP port 3702 WS-Di
 
 When processing mDNS traffic under the `mdns` feature gate, LANwatch extracts key-value parameters from TXT records (such as `model`, `md`, or `ty`). These hardware and model descriptors (e.g., `AppleTV14,1`, `Sonos Play:1`, or printer models) are cross-referenced to determine exact manufacturer and device classifications.
 
-## Testing
+## Development and Build Automation
 
-```bash
-cargo test
-```
+A `Makefile` is provided to simplify common development, testing, linting, and documentation tasks.
+
+### Available Makefile Targets:
+
+*   **Build with all features:**
+    ```bash
+    make build
+    ```
+*   **Build with minimal default features:**
+    ```bash
+    make build-minimal
+    ```
+*   **Build in optimized release mode with all features:**
+    ```bash
+    make release
+    ```
+*   **Run all unit tests:**
+    ```bash
+    make test
+    ```
+*   **Generate crate documentation (enforcing 100% doc coverage):**
+    ```bash
+    make doc
+    ```
+*   **Lint the codebase with Clippy (warnings treated as errors):**
+    ```bash
+    make clippy
+    ```
+*   **Format the codebase:**
+    ```bash
+    make fmt
+    ```
+*   **Verify code formatting:**
+    ```bash
+    make fmt-check
+    ```
+*   **Quickly typecheck code:**
+    ```bash
+    make check
+    ```
+*   **List all available make targets:**
+    ```bash
+    make help
+    ```
 
 ## Dependencies
 
