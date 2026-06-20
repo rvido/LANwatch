@@ -1821,6 +1821,76 @@ impl DeviceTracker {
         updated
     }
 
+    /// Updates the tracker state with information from a CCTV/IP Camera packet.
+    ///
+    /// # Returns
+    /// The count of unique updates applied to the device entry.
+    #[cfg(feature = "ssdp")]
+    pub fn update_from_cctv(&mut self, packet: &crate::parser::cctv::CctvPacket) -> usize {
+        let mac = &packet.source_mac;
+        let mut updated = 0;
+
+        let device = self.devices.entry(mac.to_string()).or_insert_with(|| {
+            updated += 1;
+            DeviceInfo::new(mac.to_string(), packet.source_ip, None)
+        });
+
+        // Update IP if currently unspecified
+        if matches!(device.ip_address, IpAddr::V4(addr) if addr.is_unspecified()) {
+            device.ip_address = packet.source_ip;
+            updated += 1;
+        }
+
+        // Set vendor if appropriate
+        let oui_vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(mac));
+        if Self::should_replace_vendor(device.vendor.as_deref(), &packet.vendor, oui_vendor) {
+            device.vendor = Some(packet.vendor.clone());
+            updated += 1;
+        }
+
+        // Set device type to "IP Camera"
+        if Self::should_replace_device_type(device.device_type.as_deref(), "IP Camera") {
+            device.device_type = Some("IP Camera".to_string());
+            updated += 1;
+        }
+
+        // Hostname / Model
+        if let Some(ref model) = packet.model
+            && device.hostname.as_ref() != Some(model)
+        {
+            device.hostname = Some(model.clone());
+            updated += 1;
+        }
+
+        // System Description with serial / protocol
+        let desc = match (&packet.model, &packet.serial_number) {
+            (Some(model), Some(serial)) => format!(
+                "IP Camera ({} Serial: {}) via {}",
+                model, serial, packet.protocol
+            ),
+            (_, Some(serial)) => format!("IP Camera (Serial: {}) via {}", serial, packet.protocol),
+            (Some(model), _) => format!("IP Camera ({}) via {}", model, packet.protocol),
+            _ => format!("IP Camera via {}", packet.protocol),
+        };
+
+        if device.system_description.as_ref() != Some(&desc) {
+            device.system_description = Some(desc);
+            updated += 1;
+        }
+
+        device.last_seen = SystemTime::now();
+
+        if updated > 0 && self.auto_save {
+            let _ = self.save_to_csv();
+        }
+
+        if updated > 0 {
+            self.dirty_devices.lock().unwrap().insert(mac.to_string());
+        }
+
+        updated
+    }
+
     /// Detect device type from vendor name
     fn detect_device_type_from_vendor(vendor: &str) -> Option<&'static str> {
         let owned_holder;
