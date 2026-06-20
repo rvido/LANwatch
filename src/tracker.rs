@@ -1696,6 +1696,131 @@ impl DeviceTracker {
         updated
     }
 
+    /// Updates the tracker state with information from a CoAP packet.
+    ///
+    /// # Returns
+    /// The count of unique updates applied to the device entry.
+    #[cfg(feature = "ssdp")]
+    pub fn update_from_coap(&mut self, packet: &crate::parser::iot::CoapPacket) -> usize {
+        let mac = &packet.source_mac;
+        let mut updated = 0;
+
+        let device = self.devices.entry(mac.to_string()).or_insert_with(|| {
+            updated += 1;
+            DeviceInfo::new(mac.to_string(), packet.source_ip, None)
+        });
+
+        // Update IP if currently unspecified
+        if matches!(device.ip_address, IpAddr::V4(addr) if addr.is_unspecified()) {
+            device.ip_address = packet.source_ip;
+            updated += 1;
+        }
+
+        let mut dev_type = "IoT Device";
+
+        // Parse payload to infer device type / details if available
+        if let Some(ref payload) = packet.payload {
+            if device.system_description.as_ref() != Some(payload) {
+                device.system_description = Some(payload.clone());
+                updated += 1;
+            }
+
+            let payload_lower = payload.to_lowercase();
+            // Basic inference from CoAP CoRE Link Format
+            if payload_lower.contains("temp") || payload_lower.contains("therm") {
+                dev_type = "Sensor";
+            } else if payload_lower.contains("light") || payload_lower.contains("lamp") {
+                dev_type = "Lightbulb";
+            } else if payload_lower.contains("plug") || payload_lower.contains("outlet") {
+                dev_type = "Outlet";
+            }
+        }
+
+        // Set the final device type
+        if Self::should_replace_device_type(device.device_type.as_deref(), dev_type) {
+            device.device_type = Some(dev_type.to_string());
+            updated += 1;
+        }
+
+        device.last_seen = SystemTime::now();
+
+        if updated > 0 && self.auto_save {
+            let _ = self.save_to_csv();
+        }
+
+        if updated > 0 {
+            self.dirty_devices.lock().unwrap().insert(mac.to_string());
+        }
+
+        updated
+    }
+
+    /// Updates the tracker state with information from a KNXnet/IP packet.
+    ///
+    /// # Returns
+    /// The count of unique updates applied to the device entry.
+    #[cfg(feature = "ssdp")]
+    pub fn update_from_knx(&mut self, packet: &crate::parser::iot::KnxPacket) -> usize {
+        let mac = &packet.source_mac;
+        let mut updated = 0;
+
+        let device = self.devices.entry(mac.to_string()).or_insert_with(|| {
+            updated += 1;
+            DeviceInfo::new(mac.to_string(), packet.source_ip, None)
+        });
+
+        // Update IP if currently unspecified
+        if matches!(device.ip_address, IpAddr::V4(addr) if addr.is_unspecified()) {
+            device.ip_address = packet.source_ip;
+            updated += 1;
+        }
+
+        // Set vendor if friendly name or serial number suggests one, otherwise generic KNX
+        let oui_vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(mac));
+        if Self::should_replace_vendor(device.vendor.as_deref(), "KNX Device", oui_vendor) {
+            device.vendor = Some("KNX".to_string());
+            updated += 1;
+        }
+
+        // Set device type if not set
+        if Self::should_replace_device_type(device.device_type.as_deref(), "Home Automation") {
+            device.device_type = Some("Home Automation".to_string());
+            updated += 1;
+        }
+
+        // Use friendly name as hostname
+        if let Some(ref name) = packet.friendly_name
+            && device.hostname.as_ref() != Some(name)
+        {
+            device.hostname = Some(name.clone());
+            updated += 1;
+        }
+
+        // Description with serial / service type
+        let desc = match (&packet.friendly_name, &packet.serial_number) {
+            (Some(name), Some(serial)) => format!("KNX Device ({} Serial: {})", name, serial),
+            (_, Some(serial)) => format!("KNX Device (Serial: {})", serial),
+            _ => format!("KNXnet/IP Service 0x{:04x}", packet.service_type),
+        };
+
+        if device.system_description.as_ref() != Some(&desc) {
+            device.system_description = Some(desc);
+            updated += 1;
+        }
+
+        device.last_seen = SystemTime::now();
+
+        if updated > 0 && self.auto_save {
+            let _ = self.save_to_csv();
+        }
+
+        if updated > 0 {
+            self.dirty_devices.lock().unwrap().insert(mac.to_string());
+        }
+
+        updated
+    }
+
     /// Detect device type from vendor name
     fn detect_device_type_from_vendor(vendor: &str) -> Option<&'static str> {
         let owned_holder;

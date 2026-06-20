@@ -2925,4 +2925,149 @@ mod tests {
         let _ = std::fs::remove_file(temp_path);
         let _ = std::fs::remove_file(format!("{}.journal", temp_path));
     }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_is_coap_port() {
+        use crate::parser::iot::is_coap_port;
+        assert!(is_coap_port(5683));
+        assert!(!is_coap_port(80));
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_is_knx_port() {
+        use crate::parser::iot::is_knx_port;
+        assert!(is_knx_port(3671));
+        assert!(!is_knx_port(80));
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_parse_coap_payload() {
+        use crate::parser::iot::parse_coap_payload;
+
+        // CoAP header is 4 bytes minimum
+        // Ver=1, Type=0, TKL=0 => Byte 0 = 0x40
+        // Code=1 (GET) => Byte 1 = 0x01
+        // MessageID=0x1234 => Bytes 2-3 = [0x12, 0x34]
+        // Payload marker = 0xFF
+        // Payload = "temp"
+        let mut payload = vec![0x40, 0x01, 0x12, 0x34, 0xFF];
+        payload.extend_from_slice(b"temp");
+
+        let source_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10));
+        let result = parse_coap_payload(&payload, "11:22:33:44:55:66".to_string(), source_ip);
+        assert!(result.is_some());
+        let packet = result.unwrap();
+        assert_eq!(packet.source_mac, "11:22:33:44:55:66");
+        assert_eq!(packet.code, 1);
+        assert_eq!(packet.message_id, 0x1234);
+        assert_eq!(packet.payload.as_deref(), Some("temp"));
+        assert_eq!(packet.source_ip, source_ip);
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_parse_knx_payload() {
+        use crate::parser::iot::parse_knx_payload;
+
+        // KNXnet/IP Search Response (0x0202)
+        // Header length = 6 => payload[0] = 6
+        // Version = 0x10 => payload[1] = 0x10
+        // Service type = 0x0202 => payload[2-3] = [0x02, 0x02]
+        // Total length = 6 + 54 = 60 => payload[4-5] = [0, 60]
+        let mut payload = vec![6, 0x10, 0x02, 0x02, 0, 60];
+
+        // Device Info DIB (DIB structure starting at byte index 6)
+        // DIB length = 54 => DIB[0] = 54
+        // DIB type = 0x01 (Device Info) => DIB[1] = 0x01
+        let mut dib = vec![0u8; 54];
+        dib[0] = 54;
+        dib[1] = 0x01;
+        // Serial number (6 bytes starting at index 12 in DIB, i.e., indices 12-17)
+        dib[12] = 0x00; dib[13] = 0x11; dib[14] = 0x22;
+        dib[15] = 0x33; dib[16] = 0x44; dib[17] = 0x55;
+        // Friendly name (30 bytes starting at index 22 in DIB, i.e., indices 22-51)
+        let name_bytes = b"KNX Thermostat";
+        for (i, &b) in name_bytes.iter().enumerate() {
+            dib[22 + i] = b;
+        }
+
+        payload.extend_from_slice(&dib);
+
+        let source_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10));
+        let result = parse_knx_payload(&payload, "11:22:33:44:55:66".to_string(), source_ip);
+        assert!(result.is_some());
+        let packet = result.unwrap();
+        assert_eq!(packet.source_mac, "11:22:33:44:55:66");
+        assert_eq!(packet.service_type, 0x0202);
+        assert_eq!(packet.friendly_name.as_deref(), Some("KNX Thermostat"));
+        assert_eq!(packet.serial_number.as_deref(), Some("001122334455"));
+        assert_eq!(packet.source_ip, source_ip);
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_device_tracker_update_from_coap() {
+        let temp_path = "/tmp/lanwatch_test_coap.csv";
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+
+        {
+            let mut tracker = DeviceTracker::new(temp_path).unwrap();
+            let packet = crate::parser::iot::CoapPacket {
+                source_mac: "11:22:33:44:55:66".to_string(),
+                source_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 55)),
+                code: 69,
+                message_id: 1234,
+                payload: Some("temp sensor".to_string()),
+            };
+
+            let updates = tracker.update_from_coap(&packet);
+            assert!(updates > 0);
+
+            let device = tracker.devices.get("11:22:33:44:55:66").unwrap();
+            assert_eq!(device.device_type.as_deref(), Some("Sensor"));
+            assert_eq!(device.ip_address, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 55)));
+            assert_eq!(device.system_description.as_deref(), Some("temp sensor"));
+        }
+
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_device_tracker_update_from_knx() {
+        let temp_path = "/tmp/lanwatch_test_knx.csv";
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+
+        {
+            let mut tracker = DeviceTracker::new(temp_path).unwrap();
+            let packet = crate::parser::iot::KnxPacket {
+                source_mac: "11:22:33:44:55:66".to_string(),
+                source_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 55)),
+                service_type: 0x0202,
+                friendly_name: Some("KNX Light".to_string()),
+                serial_number: Some("001122334455".to_string()),
+            };
+
+            let updates = tracker.update_from_knx(&packet);
+            assert!(updates > 0);
+
+            let device = tracker.devices.get("11:22:33:44:55:66").unwrap();
+            assert_eq!(device.vendor.as_deref(), Some("KNX"));
+            assert_eq!(device.device_type.as_deref(), Some("Home Automation"));
+            assert_eq!(device.hostname.as_deref(), Some("KNX Light"));
+            assert_eq!(
+                device.system_description.as_deref(),
+                Some("KNX Device (KNX Light Serial: 001122334455)")
+            );
+        }
+
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+    }
 }

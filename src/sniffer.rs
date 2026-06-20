@@ -248,6 +248,28 @@ fn process_ipv4_packet_extended(ethernet: &EthernetPacket) -> Option<NetworkEven
         return Some(NetworkEvent::Lifx(packet));
     }
 
+    #[cfg(feature = "ssdp")]
+    if crate::parser::iot::is_coap_port(src) || crate::parser::iot::is_coap_port(dest) {
+        let source_mac = ethernet.get_source().to_string();
+        let packet = crate::parser::iot::parse_coap_payload(
+            udp.payload(),
+            source_mac,
+            std::net::IpAddr::V4(ipv4.get_source()),
+        )?;
+        return Some(NetworkEvent::Coap(packet));
+    }
+
+    #[cfg(feature = "ssdp")]
+    if crate::parser::iot::is_knx_port(src) || crate::parser::iot::is_knx_port(dest) {
+        let source_mac = ethernet.get_source().to_string();
+        let packet = crate::parser::iot::parse_knx_payload(
+            udp.payload(),
+            source_mac,
+            std::net::IpAddr::V4(ipv4.get_source()),
+        )?;
+        return Some(NetworkEvent::Knx(packet));
+    }
+
     // Check for DHCPv4
     if is_dhcpv4_ports(src, dest) {
         let packet = parse_dhcpv4_payload(
@@ -387,6 +409,28 @@ fn process_ipv6_packet_extended(ethernet: &EthernetPacket) -> Option<NetworkEven
             std::net::IpAddr::V6(ipv6.get_source()),
         )?;
         return Some(NetworkEvent::Lifx(packet));
+    }
+
+    #[cfg(feature = "ssdp")]
+    if crate::parser::iot::is_coap_port(src) || crate::parser::iot::is_coap_port(dest) {
+        let source_mac = ethernet.get_source().to_string();
+        let packet = crate::parser::iot::parse_coap_payload(
+            udp.payload(),
+            source_mac,
+            std::net::IpAddr::V6(ipv6.get_source()),
+        )?;
+        return Some(NetworkEvent::Coap(packet));
+    }
+
+    #[cfg(feature = "ssdp")]
+    if crate::parser::iot::is_knx_port(src) || crate::parser::iot::is_knx_port(dest) {
+        let source_mac = ethernet.get_source().to_string();
+        let packet = crate::parser::iot::parse_knx_payload(
+            udp.payload(),
+            source_mac,
+            std::net::IpAddr::V6(ipv6.get_source()),
+        )?;
+        return Some(NetworkEvent::Knx(packet));
     }
 
     // Check for DHCPv6

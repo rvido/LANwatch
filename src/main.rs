@@ -497,6 +497,26 @@ fn start_network_worker(
                                     print_lifx_packet(packet, updates > 0, tracker.device_count());
                                 }
                             }
+                            #[cfg(feature = "ssdp")]
+                            NetworkEvent::Coap(packet) => {
+                                if _enable_ssdp {
+                                    let updates = tracker.update_from_coap(packet);
+                                    if updates > 0 {
+                                        pending_updates += updates;
+                                    }
+                                    print_coap_packet(packet, updates > 0, tracker.device_count());
+                                }
+                            }
+                            #[cfg(feature = "ssdp")]
+                            NetworkEvent::Knx(packet) => {
+                                if _enable_ssdp {
+                                    let updates = tracker.update_from_knx(packet);
+                                    if updates > 0 {
+                                        pending_updates += updates;
+                                    }
+                                    print_knx_packet(packet, updates > 0, tracker.device_count());
+                                }
+                            }
                         }
                     }
                 }
@@ -579,6 +599,40 @@ fn print_lifx_packet(packet: &lanwatch::LifxPacket, is_new_or_updated: bool, tot
     println!("Source IP:  {}", packet.source_ip);
     println!("Target MAC: {}", packet.target_mac);
     println!("Msg Type:   {}", packet.msg_type);
+    if is_new_or_updated {
+        println!("-> [CSV Updated] Total devices: {}", total);
+    }
+    println!("------------------------------");
+}
+
+#[cfg(feature = "ssdp")]
+fn print_coap_packet(packet: &lanwatch::CoapPacket, is_new_or_updated: bool, total: usize) {
+    println!("\n[CoAP] Constrained Device Packet Detected");
+    println!("Source MAC: {}", packet.source_mac);
+    println!("Source IP:  {}", packet.source_ip);
+    println!("Code:       {}", packet.code);
+    println!("Message ID: {}", packet.message_id);
+    if let Some(ref payload) = packet.payload {
+        println!("Payload:    {}", payload);
+    }
+    if is_new_or_updated {
+        println!("-> [CSV Updated] Total devices: {}", total);
+    }
+    println!("------------------------------");
+}
+
+#[cfg(feature = "ssdp")]
+fn print_knx_packet(packet: &lanwatch::KnxPacket, is_new_or_updated: bool, total: usize) {
+    println!("\n[KNX] Building Automation Packet Detected");
+    println!("Source MAC: {}", packet.source_mac);
+    println!("Source IP:  {}", packet.source_ip);
+    println!("Service:    0x{:04x}", packet.service_type);
+    if let Some(ref name) = packet.friendly_name {
+        println!("Name:       {}", name);
+    }
+    if let Some(ref serial) = packet.serial_number {
+        println!("Serial:     {}", serial);
+    }
     if is_new_or_updated {
         println!("-> [CSV Updated] Total devices: {}", total);
     }

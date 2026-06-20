@@ -26,7 +26,10 @@ pub mod iot;
 // Re-export the main parsing entry points and types
 pub use dhcp::{is_dhcpv4_ports, is_dhcpv6_ports, parse_dhcpv4_payload, parse_dhcpv6_payload};
 #[cfg(any(feature = "mdns", feature = "ssdp"))]
-pub use iot::{IotMetadata, LifxPacket, extract_iot_metadata, is_lifx_port, parse_lifx_payload};
+pub use iot::{
+    CoapPacket, IotMetadata, KnxPacket, LifxPacket, extract_iot_metadata, is_coap_port,
+    is_knx_port, is_lifx_port, parse_coap_payload, parse_knx_payload, parse_lifx_payload,
+};
 pub use network::{parse_arp_packet, parse_ndp_packet};
 
 #[cfg(feature = "mdns")]

@@ -220,3 +220,230 @@ pub fn extract_iot_metadata(services: &[&str], txt_attrs: &HashMap<String, &str>
 
     meta
 }
+
+/// CoAP UDP port
+pub const COAP_PORT: u16 = 5683;
+
+/// Checks if the port matches the CoAP discovery port.
+pub fn is_coap_port(port: u16) -> bool {
+    port == COAP_PORT
+}
+
+/// Parsed CoAP protocol packet
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "http-api", derive(serde::Serialize, serde::Deserialize))]
+pub struct CoapPacket {
+    /// Source MAC address
+    pub source_mac: String,
+    /// Source IP address
+    pub source_ip: std::net::IpAddr,
+    /// CoAP message code (class and detail)
+    pub code: u8,
+    /// Message ID
+    pub message_id: u16,
+    /// Optional CoAP payload string (e.g. CoRE Link Format)
+    pub payload: Option<String>,
+}
+
+/// Parses a CoAP packet from UDP payload bytes.
+pub fn parse_coap_payload(
+    payload: &[u8],
+    source_mac: String,
+    source_ip: std::net::IpAddr,
+) -> Option<CoapPacket> {
+    if payload.len() < 4 {
+        return None;
+    }
+    // Verify version (must be 1 in the first 2 bits of byte 0)
+    let version = (payload[0] >> 6) & 0x03;
+    if version != 1 {
+        return None;
+    }
+    let token_len = (payload[0] & 0x0F) as usize;
+    let code = payload[1];
+    let message_id = u16::from_be_bytes([payload[2], payload[3]]);
+
+    let header_and_token_len = 4usize.checked_add(token_len)?;
+    if payload.len() < header_and_token_len {
+        return None;
+    }
+
+    // Skip options to find the payload marker (0xFF)
+    let mut offset = header_and_token_len;
+    let mut payload_start = None;
+
+    while offset < payload.len() {
+        if payload[offset] == 0xFF {
+            payload_start = Some(offset + 1);
+            break;
+        }
+        // CoAP option delta & length parsing
+        let delta_byte = payload[offset];
+        offset = offset.checked_add(1)?;
+
+        let mut _option_delta = (delta_byte >> 4) as usize;
+        let mut option_len = (delta_byte & 0x0F) as usize;
+
+        if _option_delta == 13 {
+            if offset >= payload.len() {
+                return None;
+            }
+            _option_delta = payload[offset] as usize + 13;
+            offset = offset.checked_add(1)?;
+        } else if _option_delta == 14 {
+            if offset + 1 >= payload.len() {
+                return None;
+            }
+            _option_delta =
+                u16::from_be_bytes([payload[offset], payload[offset + 1]]) as usize + 269;
+            offset = offset.checked_add(2)?;
+        }
+
+        if option_len == 13 {
+            if offset >= payload.len() {
+                return None;
+            }
+            option_len = payload[offset] as usize + 13;
+            offset = offset.checked_add(1)?;
+        } else if option_len == 14 {
+            if offset + 1 >= payload.len() {
+                return None;
+            }
+            option_len = u16::from_be_bytes([payload[offset], payload[offset + 1]]) as usize + 269;
+            offset = offset.checked_add(2)?;
+        }
+
+        offset = offset.checked_add(option_len)?;
+    }
+
+    let parsed_payload = if let Some(start) = payload_start {
+        if start < payload.len() {
+            String::from_utf8(payload[start..].to_vec())
+                .ok()
+                .map(|s| s.trim().to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Some(CoapPacket {
+        source_mac,
+        source_ip,
+        code,
+        message_id,
+        payload: parsed_payload,
+    })
+}
+
+/// KNXnet/IP UDP port
+pub const KNX_PORT: u16 = 3671;
+
+/// Checks if the port matches the KNXnet/IP port.
+pub fn is_knx_port(port: u16) -> bool {
+    port == KNX_PORT
+}
+
+/// Parsed KNXnet/IP protocol packet
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "http-api", derive(serde::Serialize, serde::Deserialize))]
+pub struct KnxPacket {
+    /// Source MAC address
+    pub source_mac: String,
+    /// Source IP address
+    pub source_ip: std::net::IpAddr,
+    /// Service Type Identifier
+    pub service_type: u16,
+    /// Friendly Name of the KNX device
+    pub friendly_name: Option<String>,
+    /// Serial Number of the KNX device (hex string format)
+    pub serial_number: Option<String>,
+}
+
+/// Parses a KNXnet/IP packet from UDP payload bytes.
+pub fn parse_knx_payload(
+    payload: &[u8],
+    source_mac: String,
+    source_ip: std::net::IpAddr,
+) -> Option<KnxPacket> {
+    if payload.len() < 6 {
+        return None;
+    }
+    // Verify header length (typically 6) and protocol version (0x10 or 0x20)
+    let header_len = payload[0] as usize;
+    if header_len < 6 || header_len > payload.len() {
+        return None;
+    }
+    let version = payload[1];
+    if version != 0x10 && version != 0x20 {
+        return None;
+    }
+
+    let service_type = u16::from_be_bytes([payload[2], payload[3]]);
+    let total_len = u16::from_be_bytes([payload[4], payload[5]]) as usize;
+    if total_len > payload.len() {
+        return None;
+    }
+
+    let mut friendly_name = None;
+    let mut serial_number = None;
+
+    // Search response (0x0202) or Description response (0x0204)
+    if (service_type == 0x0202 || service_type == 0x0204) && payload.len() > header_len {
+        let mut offset = header_len;
+        // Parse DIBs (Device Information Blocks)
+        while offset + 2 <= payload.len() {
+            let dib_len = payload[offset] as usize;
+            if dib_len == 0 {
+                break;
+            }
+            let next_offset = match offset.checked_add(dib_len) {
+                Some(val) => val,
+                None => break,
+            };
+            if next_offset > payload.len() {
+                break;
+            }
+            let dib_type = payload[offset + 1];
+
+            // Device Info DIB (type 0x01 or 0x02)
+            if (dib_type == 0x01 || dib_type == 0x02) && dib_len >= 54 {
+                // Serial number (6 bytes starting at index 12 in the DIB)
+                let serial_bytes = &payload[offset + 12..offset + 18];
+                serial_number = Some(format!(
+                    "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                    serial_bytes[0],
+                    serial_bytes[1],
+                    serial_bytes[2],
+                    serial_bytes[3],
+                    serial_bytes[4],
+                    serial_bytes[5]
+                ));
+
+                // Friendly name (30 bytes starting at index 22 in the DIB)
+                let name_bytes = &payload[offset + 22..offset + 52];
+                // Find first null byte to trim name
+                let end = name_bytes.iter().position(|&b| b == 0).unwrap_or(30);
+                if end > 0
+                    && let Ok(name) = String::from_utf8(name_bytes[..end].to_vec())
+                {
+                    let name_trimmed = name.trim().to_string();
+                    if !name_trimmed.is_empty() {
+                        friendly_name = Some(name_trimmed);
+                    }
+                }
+                break;
+            }
+            offset = next_offset;
+        }
+    }
+
+    Some(KnxPacket {
+        source_mac,
+        source_ip,
+        service_type,
+        friendly_name,
+        serial_number,
+    })
+}
