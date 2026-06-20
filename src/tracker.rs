@@ -700,13 +700,19 @@ impl DeviceTracker {
             }
         }
 
-        let mut txt_vendor = None;
-        let mut txt_device_type = None;
+        // Extract IoT-specific metadata (Matter, HAP)
+        let iot_meta = crate::parser::iot::extract_iot_metadata(&services, &txt_attrs);
 
-        if let Some(model) = txt_attrs
-            .get("model")
-            .or_else(|| txt_attrs.get("md"))
-            .or_else(|| txt_attrs.get("ty"))
+        let mut txt_vendor = iot_meta.vendor.clone();
+        let mut txt_device_type = iot_meta.device_type.clone();
+        let txt_model = iot_meta.model.clone();
+
+        if txt_vendor.is_none()
+            && txt_device_type.is_none()
+            && let Some(model) = txt_attrs
+                .get("model")
+                .or_else(|| txt_attrs.get("md"))
+                .or_else(|| txt_attrs.get("ty"))
         {
             let owned_m;
             let m = if model.bytes().any(|b| b.is_ascii_uppercase()) {
@@ -716,48 +722,48 @@ impl DeviceTracker {
                 model
             };
             if m.contains("appletv") || m.contains("apple tv") {
-                txt_vendor = Some("Apple");
-                txt_device_type = Some("Apple TV");
+                txt_vendor = Some("Apple".to_string());
+                txt_device_type = Some("Apple TV".to_string());
             } else if m.contains("macbook")
                 || m.contains("imac")
                 || m.contains("macmini")
                 || m.contains("macpro")
             {
-                txt_vendor = Some("Apple");
-                txt_device_type = Some("Mac");
+                txt_vendor = Some("Apple".to_string());
+                txt_device_type = Some("Mac".to_string());
             } else if m.contains("chromecast") {
-                txt_vendor = Some("Google");
-                txt_device_type = Some("Media Player");
+                txt_vendor = Some("Google".to_string());
+                txt_device_type = Some("Media Player".to_string());
             } else if m.contains("hp ")
                 || m.contains("laserjet")
                 || m.contains("officejet")
                 || m.contains("deskjet")
             {
-                txt_vendor = Some("HP");
-                txt_device_type = Some("Printer");
+                txt_vendor = Some("HP".to_string());
+                txt_device_type = Some("Printer".to_string());
             } else if m.contains("epson") {
-                txt_vendor = Some("Epson");
-                txt_device_type = Some("Printer");
+                txt_vendor = Some("Epson".to_string());
+                txt_device_type = Some("Printer".to_string());
             } else if m.contains("canon") {
-                txt_vendor = Some("Canon");
-                txt_device_type = Some("Printer");
+                txt_vendor = Some("Canon".to_string());
+                txt_device_type = Some("Printer".to_string());
             } else if m.contains("brother") {
-                txt_vendor = Some("Brother");
-                txt_device_type = Some("Printer");
+                txt_vendor = Some("Brother".to_string());
+                txt_device_type = Some("Printer".to_string());
             } else if m.contains("sonos") {
-                txt_vendor = Some("Sonos");
-                txt_device_type = Some("Smart Speaker");
+                txt_vendor = Some("Sonos".to_string());
+                txt_device_type = Some("Smart Speaker".to_string());
             }
         }
 
         // Determine vendor and device type from services and hostname (before borrowing device)
         let vendor = Self::detect_vendor_from_hostname(first_hostname)
             .map(str::to_string)
-            .or_else(|| txt_vendor.map(str::to_string))
+            .or_else(|| txt_vendor.clone())
             .or_else(|| self.detect_vendor_from_services(&services));
         let device_type = Self::detect_device_type_from_hostname(first_hostname)
             .map(str::to_string)
-            .or_else(|| txt_device_type.map(str::to_string))
+            .or_else(|| txt_device_type.clone())
             .or_else(|| self.detect_device_type_from_services(&services));
 
         let ipv6_addr = first_ipv6;
@@ -818,6 +824,14 @@ impl DeviceTracker {
                 if device.device_type.as_deref() != Some(&t) {
                     device.device_type = Some(t.clone());
                 }
+                updated += 1;
+            }
+
+            // Set system description if IoT model is present
+            if let Some(ref desc) = txt_model
+                && device.system_description.as_ref() != Some(desc)
+            {
+                device.system_description = Some(desc.clone());
                 updated += 1;
             }
 
@@ -1613,6 +1627,59 @@ impl DeviceTracker {
             && Self::should_replace_device_type(device.device_type.as_deref(), t)
         {
             device.device_type = Some(t.clone());
+            updated += 1;
+        }
+
+        device.last_seen = SystemTime::now();
+
+        if updated > 0 && self.auto_save {
+            let _ = self.save_to_csv();
+        }
+
+        if updated > 0 {
+            self.dirty_devices.lock().unwrap().insert(mac.to_string());
+        }
+
+        updated
+    }
+
+    /// Updates the tracker state with information from a LIFX packet.
+    ///
+    /// # Returns
+    /// The count of unique updates applied to the device entry.
+    #[cfg(feature = "ssdp")]
+    pub fn update_from_lifx(&mut self, packet: &crate::parser::iot::LifxPacket) -> usize {
+        let mac = &packet.source_mac;
+        let mut updated = 0;
+
+        let device = self.devices.entry(mac.to_string()).or_insert_with(|| {
+            updated += 1;
+            DeviceInfo::new(mac.to_string(), packet.source_ip, None)
+        });
+
+        // Update IP if currently unspecified
+        if matches!(device.ip_address, IpAddr::V4(addr) if addr.is_unspecified()) {
+            device.ip_address = packet.source_ip;
+            updated += 1;
+        }
+
+        // Set LIFX as vendor if not set or if we should replace it
+        let oui_vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(mac));
+        if Self::should_replace_vendor(device.vendor.as_deref(), "LIFX", oui_vendor) {
+            device.vendor = Some("LIFX".to_string());
+            updated += 1;
+        }
+
+        // Set Lightbulb as device type if not set
+        if Self::should_replace_device_type(device.device_type.as_deref(), "Lightbulb") {
+            device.device_type = Some("Lightbulb".to_string());
+            updated += 1;
+        }
+
+        // Update description with msg_type info
+        let desc = format!("LIFX device (msg_type: {})", packet.msg_type);
+        if device.system_description.as_ref() != Some(&desc) {
+            device.system_description = Some(desc);
             updated += 1;
         }
 

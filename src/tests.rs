@@ -2822,4 +2822,107 @@ mod tests {
         assert_eq!(parsed.ipv6_address, Some(IpAddr::V6(gua)));
         assert_eq!(parsed.ipv6_addresses, vec![lla, ula, gua]);
     }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_is_lifx_port() {
+        use crate::parser::iot::is_lifx_port;
+        assert!(is_lifx_port(56700));
+        assert!(!is_lifx_port(80));
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_parse_lifx_payload() {
+        use crate::parser::iot::parse_lifx_payload;
+        
+        let mut payload = vec![0u8; 36];
+        payload[0] = 36;
+        payload[2] = 0;
+        payload[3] = 4; // protocol = 1024
+        payload[8] = 0xAA;
+        payload[9] = 0xBB;
+        payload[10] = 0xCC;
+        payload[11] = 0xDD;
+        payload[12] = 0xEE;
+        payload[13] = 0xFF;
+        payload[32] = 3; // msg_type = 3
+
+        let source_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10));
+        let result = parse_lifx_payload(&payload, "11:22:33:44:55:66".to_string(), source_ip);
+        assert!(result.is_some());
+        let packet = result.unwrap();
+        assert_eq!(packet.source_mac, "11:22:33:44:55:66");
+        assert_eq!(packet.target_mac, "aa:bb:cc:dd:ee:ff");
+        assert_eq!(packet.msg_type, 3);
+        assert_eq!(packet.size, 36);
+        assert_eq!(packet.source_ip, source_ip);
+    }
+
+    #[test]
+    #[cfg(feature = "mdns")]
+    fn test_extract_iot_metadata_matter() {
+        use crate::parser::iot::extract_iot_metadata;
+        use std::collections::HashMap;
+
+        let services = vec!["_matter._tcp", "_services._dns-sd._udp"];
+        let mut txt = HashMap::new();
+        txt.insert("vid".to_string(), "0x10B1");
+        txt.insert("pid".to_string(), "0x0001");
+
+        let meta = extract_iot_metadata(&services, &txt);
+        assert_eq!(meta.vendor.as_deref(), Some("Google"));
+        assert_eq!(meta.device_type.as_deref(), Some("Matter Smart Device"));
+        assert_eq!(meta.model.as_deref(), Some("Matter Device (VID: 0x10B1, PID: 0x0001)"));
+    }
+
+    #[test]
+    #[cfg(feature = "mdns")]
+    fn test_extract_iot_metadata_hap() {
+        use crate::parser::iot::extract_iot_metadata;
+        use std::collections::HashMap;
+
+        let services = vec!["_hap._tcp"];
+        let mut txt = HashMap::new();
+        txt.insert("md".to_string(), "Eve Energy");
+        txt.insert("ci".to_string(), "7"); // Outlet category
+        txt.insert("sf".to_string(), "1"); // Unpaired flag
+
+        let meta = extract_iot_metadata(&services, &txt);
+        assert_eq!(meta.vendor.as_deref(), Some("Eve Systems"));
+        assert_eq!(meta.device_type.as_deref(), Some("Outlet"));
+        assert_eq!(meta.model.as_deref(), Some("Eve Energy"));
+        assert_eq!(meta.status.as_deref(), Some("Unpaired / Pairing Mode"));
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_device_tracker_update_from_lifx() {
+        let temp_path = "/tmp/lanwatch_test_lifx.csv";
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+
+        {
+            let mut tracker = DeviceTracker::new(temp_path).unwrap();
+            let packet = crate::parser::iot::LifxPacket {
+                source_mac: "11:22:33:44:55:66".to_string(),
+                source_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 55)),
+                target_mac: "00:00:00:00:00:00".to_string(),
+                msg_type: 3,
+                size: 36,
+            };
+
+            let updates = tracker.update_from_lifx(&packet);
+            assert!(updates > 0);
+
+            let device = tracker.devices.get("11:22:33:44:55:66").unwrap();
+            assert_eq!(device.vendor.as_deref(), Some("LIFX"));
+            assert_eq!(device.device_type.as_deref(), Some("Lightbulb"));
+            assert_eq!(device.ip_address, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 55)));
+            assert_eq!(device.system_description.as_deref(), Some("LIFX device (msg_type: 3)"));
+        }
+
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+    }
 }

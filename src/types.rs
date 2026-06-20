@@ -406,6 +406,9 @@ pub enum NetworkEvent {
     /// CDP packet (Cisco Discovery Protocol)
     #[cfg(feature = "ssdp")]
     Cdp(CdpPacket),
+    /// LIFX smart device packet
+    #[cfg(feature = "ssdp")]
+    Lifx(crate::parser::iot::LifxPacket),
 }
 
 #[cfg(any(feature = "mdns", feature = "ssdp"))]
