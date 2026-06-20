@@ -546,7 +546,9 @@ A `Makefile` is provided to simplify common development, testing, linting, and d
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is dual-licensed under the MIT License and the Apache License, Version 2.0.
+- See the [LICENSE-MIT](LICENSE-MIT) file for the MIT License details.
+- See the [LICENSE-APACHE](LICENSE-APACHE) file for the Apache License details.
 
 ## Author
 

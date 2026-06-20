@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Richard Vidal-Dorsch
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //
 // LANwatch - Network device discovery and tracking
 
