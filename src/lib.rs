@@ -1,7 +1,7 @@
 //! LANwatch is a library for network device discovery and tracking using DHCP, mDNS, SSDP, and other discovery protocols.
 
 // Copyright (c) 2026 Richard Vidal-Dorsch
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //
 // LANwatch - Network device discovery and tracking
 

@@ -1,7 +1,7 @@
 //! Packet parsing modules for DHCP, mDNS, SSDP, and other network discovery protocols.
 
 // Copyright (c) 2026 Richard Vidal-Dorsch
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //
 // LANwatch - Network device discovery and tracking
 
