@@ -3070,4 +3070,78 @@ mod tests {
         let _ = std::fs::remove_file(temp_path);
         let _ = std::fs::remove_file(format!("{}.journal", temp_path));
     }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_cctv_ports() {
+        assert!(crate::parser::cctv::is_cctv_port(9999));
+        assert!(crate::parser::cctv::is_cctv_port(37810));
+        assert!(crate::parser::cctv::is_cctv_port(554));
+        assert!(!crate::parser::cctv::is_cctv_port(80));
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_parse_sadp_payload() {
+        let payload = r#"<?xml version="1.0" encoding="utf-8"?><Response><DeviceType>DS-2CD2132F-I</DeviceType><DeviceDescription>IP Camera</DeviceDescription><DeviceSN>DS-2CD2132F-I20140922AAWR481234567</DeviceSN><IPv4Address>192.168.1.64</IPv4Address><MAC>70:3d:15:ab:cd:ef</MAC></Response>"#.as_bytes();
+        let source_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 64));
+        let result = crate::parser::cctv::parse_sadp_payload(payload, "00:11:22:33:44:55".to_string(), source_ip);
+        assert!(result.is_some());
+        let packet = result.unwrap();
+        assert_eq!(packet.source_mac, "70:3d:15:ab:cd:ef");
+        assert_eq!(packet.vendor, "Hikvision");
+        assert_eq!(packet.model.as_deref(), Some("DS-2CD2132F-I"));
+        assert_eq!(packet.serial_number.as_deref(), Some("DS-2CD2132F-I20140922AAWR481234567"));
+        assert_eq!(packet.protocol, "SADP");
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_parse_dahua_payload() {
+        let payload = r#"{ "method": "client.notifyDeviceIP", "params": { "mac": "00:1a:2b:3c:4d:5e", "ip": "192.168.1.108", "deviceType": "IPC-HFW4431R-ZS", "serial": "XYZ98765" } }"#.as_bytes();
+        let source_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 108));
+        let result = crate::parser::cctv::parse_dahua_payload(payload, "00:11:22:33:44:55".to_string(), source_ip);
+        assert!(result.is_some());
+        let packet = result.unwrap();
+        assert_eq!(packet.source_mac, "00:1a:2b:3c:4d:5e");
+        assert_eq!(packet.vendor, "Dahua");
+        assert_eq!(packet.model.as_deref(), Some("IPC-HFW4431R-ZS"));
+        assert_eq!(packet.serial_number.as_deref(), Some("XYZ98765"));
+        assert_eq!(packet.protocol, "Dahua Discovery");
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_device_tracker_update_from_cctv() {
+        let temp_path = "/tmp/lanwatch_test_cctv.csv";
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+
+        {
+            let mut tracker = DeviceTracker::new(temp_path).unwrap();
+            let packet = crate::parser::cctv::CctvPacket {
+                source_mac: "11:22:33:44:55:66".to_string(),
+                source_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 55)),
+                vendor: "Hikvision".to_string(),
+                model: Some("DS-ABC1234".to_string()),
+                serial_number: Some("SN987654".to_string()),
+                protocol: "SADP".to_string(),
+            };
+
+            let updates = tracker.update_from_cctv(&packet);
+            assert!(updates > 0);
+
+            let device = tracker.devices.get("11:22:33:44:55:66").unwrap();
+            assert_eq!(device.vendor.as_deref(), Some("Hikvision"));
+            assert_eq!(device.device_type.as_deref(), Some("IP Camera"));
+            assert_eq!(device.hostname.as_deref(), Some("DS-ABC1234"));
+            assert_eq!(
+                device.system_description.as_deref(),
+                Some("IP Camera (DS-ABC1234 Serial: SN987654) via SADP")
+            );
+        }
+
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+    }
 }

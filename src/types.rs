@@ -415,6 +415,9 @@ pub enum NetworkEvent {
     /// KNXnet/IP building automation packet
     #[cfg(feature = "ssdp")]
     Knx(crate::parser::iot::KnxPacket),
+    /// CCTV / IP Camera discovery packet
+    #[cfg(feature = "ssdp")]
+    Cctv(crate::parser::cctv::CctvPacket),
 }
 
 #[cfg(any(feature = "mdns", feature = "ssdp"))]

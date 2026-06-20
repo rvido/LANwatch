@@ -517,6 +517,16 @@ fn start_network_worker(
                                     print_knx_packet(packet, updates > 0, tracker.device_count());
                                 }
                             }
+                            #[cfg(feature = "ssdp")]
+                            NetworkEvent::Cctv(packet) => {
+                                if _enable_ssdp {
+                                    let updates = tracker.update_from_cctv(packet);
+                                    if updates > 0 {
+                                        pending_updates += updates;
+                                    }
+                                    print_cctv_packet(packet, updates > 0, tracker.device_count());
+                                }
+                            }
                         }
                     }
                 }
@@ -633,6 +643,25 @@ fn print_knx_packet(packet: &lanwatch::KnxPacket, is_new_or_updated: bool, total
     if let Some(ref serial) = packet.serial_number {
         println!("Serial:     {}", serial);
     }
+    if is_new_or_updated {
+        println!("-> [CSV Updated] Total devices: {}", total);
+    }
+    println!("------------------------------");
+}
+
+#[cfg(feature = "ssdp")]
+fn print_cctv_packet(packet: &lanwatch::CctvPacket, is_new_or_updated: bool, total: usize) {
+    println!("\n[CCTV] Physical Security/IP Camera Detected");
+    println!("Source MAC: {}", packet.source_mac);
+    println!("Source IP:  {}", packet.source_ip);
+    println!("Vendor:     {}", packet.vendor);
+    if let Some(ref model) = packet.model {
+        println!("Model:      {}", model);
+    }
+    if let Some(ref serial) = packet.serial_number {
+        println!("Serial:     {}", serial);
+    }
+    println!("Protocol:   {}", packet.protocol);
     if is_new_or_updated {
         println!("-> [CSV Updated] Total devices: {}", total);
     }
