@@ -487,6 +487,16 @@ fn start_network_worker(
                                     );
                                 }
                             }
+                            #[cfg(feature = "ssdp")]
+                            NetworkEvent::Lifx(packet) => {
+                                if _enable_ssdp {
+                                    let updates = tracker.update_from_lifx(packet);
+                                    if updates > 0 {
+                                        pending_updates += updates;
+                                    }
+                                    print_lifx_packet(packet, updates > 0, tracker.device_count());
+                                }
+                            }
                         }
                     }
                 }
@@ -556,6 +566,19 @@ fn print_lldp_packet(packet: &lanwatch::LldpPacket, is_new_or_updated: bool, tot
     if let Some(ref ip) = packet.management_address {
         println!("Mgmt IP:     {}", ip);
     }
+    if is_new_or_updated {
+        println!("-> [CSV Updated] Total devices: {}", total);
+    }
+    println!("------------------------------");
+}
+
+#[cfg(feature = "ssdp")]
+fn print_lifx_packet(packet: &lanwatch::LifxPacket, is_new_or_updated: bool, total: usize) {
+    println!("\n[LIFX] Smart Device Packet Detected");
+    println!("Source MAC: {}", packet.source_mac);
+    println!("Source IP:  {}", packet.source_ip);
+    println!("Target MAC: {}", packet.target_mac);
+    println!("Msg Type:   {}", packet.msg_type);
     if is_new_or_updated {
         println!("-> [CSV Updated] Total devices: {}", total);
     }
