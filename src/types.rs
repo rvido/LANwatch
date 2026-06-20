@@ -409,6 +409,12 @@ pub enum NetworkEvent {
     /// LIFX smart device packet
     #[cfg(feature = "ssdp")]
     Lifx(crate::parser::iot::LifxPacket),
+    /// CoAP constrained device packet
+    #[cfg(feature = "ssdp")]
+    Coap(crate::parser::iot::CoapPacket),
+    /// KNXnet/IP building automation packet
+    #[cfg(feature = "ssdp")]
+    Knx(crate::parser::iot::KnxPacket),
 }
 
 #[cfg(any(feature = "mdns", feature = "ssdp"))]
