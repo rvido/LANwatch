@@ -17,6 +17,9 @@ A Rust library and CLI tool for network device discovery and tracking via DHCP, 
 - **WS-Discovery (WSD) Sniffing** (optional): Passive sniffing of SOAP XML multicast probe traffic on UDP port 3702 to discover network hardware, PCs, and IP Cameras. Gated under `ssdp` feature.
 - **mDNS TXT Record Parsing**: Extracts model, md, and ty metadata from DNS-SD records to identify specific hardware devices (Apple TV, Chromecast, Sonos speakers, and printer models)
 - **Device Classification**: Expanded classification engine mapping hostnames, mDNS TXT metadata, and service fingerprints to specific device types and vendors (Roku, Sonos, Apple TV, Google Chromecast, ESP32 IoT, Raspberry Pi, Synology NAS, Playstation, Xbox, Nintendo, smart plugs, printers, etc.)
+- **Smart Home & IoT Discovery**: Extracts model and vendor metadata from HomeKit (HAP) and Matter service advertisements (Google, Apple, Amazon, Eve, Signify/Philips Hue, Aqara, IKEA, Nanoleaf, Tuya, Somfy, TP-Link, Lutron, Yale, Belkin, Bosch, etc.)
+- **Specialized IoT & Constrained Protocols**: Captures and parses CoAP (Constrained Application Protocol) on UDP port 5683 and KNXnet/IP building automation traffic on UDP port 3671 to dynamically identify sensors, smart lights, smart plugs, and home automation systems
+- **IP Camera & CCTV Discovery (Physical Security)**: Identifies physical security hardware by parsing Hikvision SADP (port 9999) XML discovery messages, Dahua discovery (port 37810) JSON payloads, and active RTSP (TCP port 554) video streams
 - **IEEE OUI Database**: Built-in vendor identification from MAC addresses using IEEE OUI (Organizationally Unique Identifier) prefixes (40,000+ entries)
 - **Device Tracking**: Automatically track detected devices and persist them using the fast, compact, and transactional-ready Postcard binary serialization format.
 - **Legacy CSV Migration**: Auto-detects legacy CSV format databases on startup and seamlessly migrates them to the new Postcard format.
@@ -489,6 +492,21 @@ Under the `ssdp` feature gate, LANwatch passively listens to UDP port 3702 WS-Di
 ### mDNS TXT Record Parsing
 
 When processing mDNS traffic under the `mdns` feature gate, LANwatch extracts key-value parameters from TXT records (such as `model`, `md`, or `ty`). These hardware and model descriptors (e.g., `AppleTV14,1`, `Sonos Play:1`, or printer models) are cross-referenced to determine exact manufacturer and device classifications.
+
+### Smart Home & IoT Discovery (Matter & HomeKit)
+
+Under the `mdns` feature gate, LANwatch monitors mDNS announcements to extract metadata from HomeKit Accessory Protocol (`_hap._tcp`) and Matter (`_matter._tcp`) service instances. It decodes Manufacturer, Model, Category Identifier (determining device type like Outlet, Smart Light, Sensor, Bridge), and Pairing status.
+
+### Constrained & Building Automation Protocols (CoAP & KNXnet/IP)
+
+Under the `ssdp` feature gate, LANwatch passively sniffs UDP port 5683 to parse CoAP (Constrained Application Protocol) payloads (e.g., CoRE Link Format) and UDP port 3671 to parse KNXnet/IP building automation traffic, dynamically categorizing sensors, smart bulbs, switches, and home automation systems.
+
+### IP Camera & CCTV Discovery (Physical Security)
+
+Under the `ssdp` feature gate, LANwatch sniffs physical security endpoints via:
+- **Hikvision SADP**: Sniffing UDP port 9999 for SOAP XML probe/response frames, extracting exact model names and serial numbers.
+- **Dahua Discovery**: Sniffing UDP port 37810 JSON-over-UDP frames, parsing camera models, MACs, and serial numbers.
+- **RTSP Active Traffic**: Sniffing TCP port 554 connections to identify generic surveillance and media streaming cameras.
 
 ## Development and Build Automation
 
