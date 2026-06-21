@@ -504,9 +504,19 @@ Under the `ssdp` feature gate, LANwatch passively sniffs UDP port 5683 to parse 
 ### IP Camera & CCTV Discovery (Physical Security)
 
 Under the `ssdp` feature gate, LANwatch sniffs physical security endpoints via:
-- **Hikvision SADP**: Sniffing UDP port 9999 for SOAP XML probe/response frames, extracting exact model names and serial numbers.
+- **Hikvision SADP**: Sniffing UDP ports 9999 and 37020 for SOAP XML probe/response frames, extracting exact model names and serial numbers.
 - **Dahua Discovery**: Sniffing UDP port 37810 JSON-over-UDP frames, parsing camera models, MACs, and serial numbers.
 - **RTSP Active Traffic**: Sniffing TCP port 554 connections to identify generic surveillance and media streaming cameras.
+
+#### Summary of IoT & Camera Discovery Protocols
+
+| Protocol | Port / Protocol | Target Devices | Data Extracted |
+|---|---|---|---|
+| **CoAP** | UDP 5683 | Thread, Zigbee IP, low-power IoT | Device endpoints and resource directories |
+| **Matter** | UDP 5353 (mDNS) | Modern Smart Plugs, Bulbs, Hubs | Vendor ID (VID) & Product ID (PID) |
+| **KNXnet/IP** | UDP 3671 | Smart Building / HVAC Controls | Smart switches, actuator controls |
+| **SADP** | UDP 37020 / 9999 | Hikvision CCTV & IP Cameras | Model number, serial number, firmware version |
+| **Dahua** | UDP 37810 | Dahua CCTV & IP Cameras | Camera model, software version |
 
 ## Development and Build Automation
 
