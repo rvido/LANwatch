@@ -30,7 +30,7 @@ pub mod cctv;
 // Re-export the main parsing entry points and types
 #[cfg(any(feature = "mdns", feature = "ssdp"))]
 pub use cctv::{
-    CctvPacket, DAHUA_PORT, RTSP_PORT, SADP_PORT, is_cctv_port, parse_dahua_payload,
+    CctvPacket, DAHUA_PORT, RTSP_PORT, SADP_ALT_PORT, SADP_PORT, is_cctv_port, parse_dahua_payload,
     parse_sadp_payload,
 };
 pub use dhcp::{is_dhcpv4_ports, is_dhcpv6_ports, parse_dhcpv4_payload, parse_dhcpv6_payload};

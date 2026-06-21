@@ -269,7 +269,11 @@ fn process_ipv4_packet_extended(ethernet: &EthernetPacket) -> Option<NetworkEven
         }
 
         #[cfg(feature = "ssdp")]
-        if src == crate::parser::cctv::SADP_PORT || dest == crate::parser::cctv::SADP_PORT {
+        if src == crate::parser::cctv::SADP_PORT
+            || dest == crate::parser::cctv::SADP_PORT
+            || src == crate::parser::cctv::SADP_ALT_PORT
+            || dest == crate::parser::cctv::SADP_ALT_PORT
+        {
             let source_mac = ethernet.get_source().to_string();
             let packet = crate::parser::cctv::parse_sadp_payload(
                 udp.payload(),
@@ -471,7 +475,11 @@ fn process_ipv6_packet_extended(ethernet: &EthernetPacket) -> Option<NetworkEven
         }
 
         #[cfg(feature = "ssdp")]
-        if src == crate::parser::cctv::SADP_PORT || dest == crate::parser::cctv::SADP_PORT {
+        if src == crate::parser::cctv::SADP_PORT
+            || dest == crate::parser::cctv::SADP_PORT
+            || src == crate::parser::cctv::SADP_ALT_PORT
+            || dest == crate::parser::cctv::SADP_ALT_PORT
+        {
             let source_mac = ethernet.get_source().to_string();
             let packet = crate::parser::cctv::parse_sadp_payload(
                 udp.payload(),

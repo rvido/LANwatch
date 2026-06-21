@@ -3075,6 +3075,7 @@ mod tests {
     #[cfg(feature = "ssdp")]
     fn test_cctv_ports() {
         assert!(crate::parser::cctv::is_cctv_port(9999));
+        assert!(crate::parser::cctv::is_cctv_port(37020));
         assert!(crate::parser::cctv::is_cctv_port(37810));
         assert!(crate::parser::cctv::is_cctv_port(554));
         assert!(!crate::parser::cctv::is_cctv_port(80));

@@ -8,6 +8,9 @@
 /// Hikvision SADP discovery port
 pub const SADP_PORT: u16 = 9999;
 
+/// Hikvision SADP alternate discovery port
+pub const SADP_ALT_PORT: u16 = 37020;
+
 /// Dahua discovery port
 pub const DAHUA_PORT: u16 = 37810;
 
@@ -34,7 +37,7 @@ pub struct CctvPacket {
 
 /// Checks if the port matches any of the CCTV discovery ports (SADP, Dahua, RTSP).
 pub fn is_cctv_port(port: u16) -> bool {
-    port == SADP_PORT || port == DAHUA_PORT || port == RTSP_PORT
+    port == SADP_PORT || port == SADP_ALT_PORT || port == DAHUA_PORT || port == RTSP_PORT
 }
 
 /// Parses a Hikvision SADP UDP payload.
