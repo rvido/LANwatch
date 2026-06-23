@@ -527,6 +527,26 @@ fn start_network_worker(
                                     print_cctv_packet(packet, updates > 0, tracker.device_count());
                                 }
                             }
+                            #[cfg(feature = "ssdp")]
+                            NetworkEvent::Mqtt(packet) => {
+                                if _enable_ssdp {
+                                    let updates = tracker.update_from_mqtt(packet);
+                                    if updates > 0 {
+                                        pending_updates += updates;
+                                    }
+                                    print_mqtt_packet(packet, updates > 0, tracker.device_count());
+                                }
+                            }
+                            #[cfg(feature = "ssdp")]
+                            NetworkEvent::Gdm(packet) => {
+                                if _enable_ssdp {
+                                    let updates = tracker.update_from_gdm(packet);
+                                    if updates > 0 {
+                                        pending_updates += updates;
+                                    }
+                                    print_gdm_packet(packet, updates > 0, tracker.device_count());
+                                }
+                            }
                         }
                     }
                 }
@@ -662,6 +682,42 @@ fn print_cctv_packet(packet: &lanwatch::CctvPacket, is_new_or_updated: bool, tot
         println!("Serial:     {}", serial);
     }
     println!("Protocol:   {}", packet.protocol);
+    if is_new_or_updated {
+        println!("-> [CSV Updated] Total devices: {}", total);
+    }
+    println!("------------------------------");
+}
+
+#[cfg(feature = "ssdp")]
+fn print_mqtt_packet(packet: &lanwatch::MqttPacket, is_new_or_updated: bool, total: usize) {
+    println!("\n[MQTT] IoT Device Detected");
+    println!("Source MAC: {}", packet.source_mac);
+    println!("Source IP:  {}", packet.source_ip);
+    println!("Client ID:  {}", packet.client_id);
+    println!("Protocol:   {}", packet.protocol);
+    if is_new_or_updated {
+        println!("-> [CSV Updated] Total devices: {}", total);
+    }
+    println!("------------------------------");
+}
+
+#[cfg(feature = "ssdp")]
+fn print_gdm_packet(packet: &lanwatch::GdmPacket, is_new_or_updated: bool, total: usize) {
+    println!("\n[Plex GDM] Media Device Detected");
+    println!("Source MAC: {}", packet.source_mac);
+    println!("Source IP:  {}", packet.source_ip);
+    if let Some(ref name) = packet.name {
+        println!("Name:       {}", name);
+    }
+    if let Some(ref product) = packet.product {
+        println!("Product:    {}", product);
+    }
+    if let Some(ref resource_id) = packet.resource_id {
+        println!("UUID:       {}", resource_id);
+    }
+    if let Some(port) = packet.port {
+        println!("Port:       {}", port);
+    }
     if is_new_or_updated {
         println!("-> [CSV Updated] Total devices: {}", total);
     }

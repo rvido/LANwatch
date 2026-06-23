@@ -294,6 +294,29 @@ fn process_ipv4_packet_extended(ethernet: &EthernetPacket) -> Option<NetworkEven
             return Some(NetworkEvent::Cctv(packet));
         }
 
+        #[cfg(feature = "ssdp")]
+        if crate::parser::mqtt_gdm::is_mqtt_port(src) || crate::parser::mqtt_gdm::is_mqtt_port(dest)
+        {
+            let source_mac = ethernet.get_source().to_string();
+            let packet = crate::parser::mqtt_gdm::parse_mqtt_sn_connect(
+                udp.payload(),
+                source_mac,
+                std::net::IpAddr::V4(ipv4.get_source()),
+            )?;
+            return Some(NetworkEvent::Mqtt(packet));
+        }
+
+        #[cfg(feature = "ssdp")]
+        if crate::parser::mqtt_gdm::is_gdm_port(src) || crate::parser::mqtt_gdm::is_gdm_port(dest) {
+            let source_mac = ethernet.get_source().to_string();
+            let packet = crate::parser::mqtt_gdm::parse_gdm_payload(
+                udp.payload(),
+                source_mac,
+                std::net::IpAddr::V4(ipv4.get_source()),
+            )?;
+            return Some(NetworkEvent::Gdm(packet));
+        }
+
         // Check for DHCPv4
         if is_dhcpv4_ports(src, dest) {
             let packet = parse_dhcpv4_payload(
@@ -322,6 +345,17 @@ fn process_ipv4_packet_extended(ethernet: &EthernetPacket) -> Option<NetworkEven
                     serial_number: None,
                     protocol: "RTSP".to_string(),
                 }));
+            }
+            if crate::parser::mqtt_gdm::is_mqtt_port(src)
+                || crate::parser::mqtt_gdm::is_mqtt_port(dest)
+            {
+                let source_mac = ethernet.get_source().to_string();
+                let packet = crate::parser::mqtt_gdm::parse_mqtt_connect(
+                    tcp.payload(),
+                    source_mac,
+                    std::net::IpAddr::V4(ipv4.get_source()),
+                )?;
+                return Some(NetworkEvent::Mqtt(packet));
             }
         }
     }
@@ -500,6 +534,29 @@ fn process_ipv6_packet_extended(ethernet: &EthernetPacket) -> Option<NetworkEven
             return Some(NetworkEvent::Cctv(packet));
         }
 
+        #[cfg(feature = "ssdp")]
+        if crate::parser::mqtt_gdm::is_mqtt_port(src) || crate::parser::mqtt_gdm::is_mqtt_port(dest)
+        {
+            let source_mac = ethernet.get_source().to_string();
+            let packet = crate::parser::mqtt_gdm::parse_mqtt_sn_connect(
+                udp.payload(),
+                source_mac,
+                std::net::IpAddr::V6(ipv6.get_source()),
+            )?;
+            return Some(NetworkEvent::Mqtt(packet));
+        }
+
+        #[cfg(feature = "ssdp")]
+        if crate::parser::mqtt_gdm::is_gdm_port(src) || crate::parser::mqtt_gdm::is_gdm_port(dest) {
+            let source_mac = ethernet.get_source().to_string();
+            let packet = crate::parser::mqtt_gdm::parse_gdm_payload(
+                udp.payload(),
+                source_mac,
+                std::net::IpAddr::V6(ipv6.get_source()),
+            )?;
+            return Some(NetworkEvent::Gdm(packet));
+        }
+
         // Check for DHCPv6
         if is_dhcpv6_ports(src, dest) {
             let packet = parse_dhcpv6_payload(
@@ -528,6 +585,17 @@ fn process_ipv6_packet_extended(ethernet: &EthernetPacket) -> Option<NetworkEven
                     serial_number: None,
                     protocol: "RTSP".to_string(),
                 }));
+            }
+            if crate::parser::mqtt_gdm::is_mqtt_port(src)
+                || crate::parser::mqtt_gdm::is_mqtt_port(dest)
+            {
+                let source_mac = ethernet.get_source().to_string();
+                let packet = crate::parser::mqtt_gdm::parse_mqtt_connect(
+                    tcp.payload(),
+                    source_mac,
+                    std::net::IpAddr::V6(ipv6.get_source()),
+                )?;
+                return Some(NetworkEvent::Mqtt(packet));
             }
         }
     }

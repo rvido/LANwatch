@@ -18,11 +18,11 @@ A Rust library and CLI tool for network device discovery and tracking via DHCP, 
 - **mDNS TXT Record Parsing**: Extracts model, md, and ty metadata from DNS-SD records to identify specific hardware devices (Apple TV, Chromecast, Sonos speakers, and printer models)
 - **Device Classification**: Expanded classification engine mapping hostnames, mDNS TXT metadata, and service fingerprints to specific device types and vendors (Roku, Sonos, Apple TV, Google Chromecast, ESP32 IoT, Raspberry Pi, Synology NAS, Playstation, Xbox, Nintendo, smart plugs, printers, etc.)
 - **Smart Home & IoT Discovery**: Extracts model and vendor metadata from HomeKit (HAP) and Matter service advertisements (Google, Apple, Amazon, Eve, Signify/Philips Hue, Aqara, IKEA, Nanoleaf, Tuya, Somfy, TP-Link, Lutron, Yale, Belkin, Bosch, etc.)
-- **Specialized IoT & Constrained Protocols**: Captures and parses CoAP (Constrained Application Protocol) on UDP port 5683 and KNXnet/IP building automation traffic on UDP port 3671 to dynamically identify sensors, smart lights, smart plugs, and home automation systems
+- **Specialized IoT & Constrained Protocols**: Captures and parses CoAP (Constrained Application Protocol) on UDP port 5683, KNXnet/IP building automation traffic on UDP port 3671, and MQTT/MQTT-SN on TCP/UDP port 1883 to dynamically identify sensors, smart lights, smart plugs, and home automation systems
+- **Media Server & Player Discovery**: Parses Plex GDM (Good Day Mate) XML/HTTP-like discovery broadcasts on UDP ports 32410, 32412, and 32414 to locate and identify Plex Media Servers and Players
 - **IP Camera & CCTV Discovery (Physical Security)**: Identifies physical security hardware by parsing Hikvision SADP (port 9999) XML discovery messages, Dahua discovery (port 37810) JSON payloads, and active RTSP (TCP port 554) video streams
 - **IEEE OUI Database**: Built-in vendor identification from MAC addresses using IEEE OUI (Organizationally Unique Identifier) prefixes (40,000+ entries)
 - **Device Tracking**: Automatically track detected devices and persist them using the fast, compact, and transactional-ready Postcard binary serialization format.
-- **Legacy CSV Migration**: Auto-detects legacy CSV format databases on startup and seamlessly migrates them to the new Postcard format.
 - **HTTP API** (optional): Opt-in REST API server to query devices as JSON. (Requires the `http-api` feature.)
 - **Library API**: Use as a library in your own Rust projects
 - **CLI Tool**: Run as a standalone command-line tool
@@ -36,10 +36,10 @@ Add to your `Cargo.toml`. The `http-api` feature is opt-in to keep binary size s
 ```toml
 [dependencies]
 # Smallest binary footprint, core DHCP & MAC tracking only
-lanwatch = "0.6"
+lanwatch = "0.7"
 
 # With HTTP API server and active discovery protocols
-lanwatch = { version = "0.6", features = ["http-api", "mdns", "ssdp"] }
+lanwatch = { version = "0.7", features = ["http-api", "mdns", "ssdp"] }
 ```
 
 Or clone and build from source. Release builds are automatically optimized for size (`opt-level = "z"`, `strip = true`, `panic = "abort"`):
@@ -63,13 +63,13 @@ cargo build --release --all-features
 # List available interfaces
 sudo cargo run
 
-# Sniff DHCP traffic on a specific interface (saves to dhcp_devices.csv by default)
+# Sniff DHCP traffic on a specific interface (saves to devices.bin by default)
 sudo cargo run -- en0        # macOS
 sudo cargo run -- eth0       # Linux
 
-# Specify a custom output CSV file
-sudo cargo run -- en0 -o /path/to/devices.csv
-sudo cargo run -- en0 --output devices.csv
+# Specify a custom output database file
+sudo cargo run -- en0 -o /path/to/devices.bin
+sudo cargo run -- en0 --output devices.bin
 
 # Load additional OUI database entries
 sudo cargo run -- en0 --oui /path/to/oui.txt
@@ -94,7 +94,7 @@ sudo cargo run --features mdns -- en0 --mdns-query
 sudo cargo run --features ssdp -- en0 --ssdp-query
 
 # Combine all options
-sudo cargo run --all-features -- en0 -o devices.csv --api 0.0.0.0:8080 --mdns-query --ssdp-query -u oui.txt
+sudo cargo run --all-features -- en0 -o devices.bin --api 0.0.0.0:8080 --mdns-query --ssdp-query -u oui.txt
 
 # Show help
 cargo run -- --help
@@ -102,18 +102,9 @@ cargo run -- --help
 
 **Note:** Root/sudo privileges are typically required for packet capture.
 
-### Database Persistence Format
+### Database Schema
 
-The tool saves detected devices to a high-performance binary database file using the **Postcard** serialization format. 
-
-For compatibility, it automatically detects legacy CSV database files (with the format below) on startup, parses and migrates them to the new binary format, and deletes any old journal files:
-
-```csv
-first_seen,last_seen,mac_address,ip_address,ipv6_address,hostname,device_type,vendor,services,system_description,ipv6_addresses
-2026-01-16T10:25:00Z,2026-01-16T10:30:45Z,AA:BB:CC:DD:EE:FF,192.168.1.100,"fe80::1","mydevice","Chromecast","Google","_googlecast._tcp","","fe80::1"
-2026-01-16T10:28:30Z,2026-01-16T10:28:30Z,11:22:33:44:55:66,192.168.1.101,"","","AirPlay Device","Apple","_airplay._tcp","",""
-2026-06-04T21:40:00Z,2026-06-04T21:45:10Z,DC:69:B5:A5:8C:A0,fe80::de69:b5ff:fea5:8cb2,"fe80::de69:b5ff:fea5:8cb2","eero","Router","eero inc.","","eero Pro 6E GGB1UD22435506MW","fe80::de69:b5ff:fea5:8cb2"
-```
+The tool saves detected devices to a high-performance binary database file using the **Postcard** serialization format. The schema contains the following fields:
 
 - **first_seen**: ISO 8601 timestamp of first detection
 - **last_seen**: ISO 8601 timestamp of last DHCP/mDNS/LLDP activity
@@ -270,7 +261,7 @@ use lanwatch::{DhcpSniffer, DhcpEvent, DeviceTracker, Dhcpv6Option};
 
 fn main() {
     let mut sniffer = DhcpSniffer::new("en0").expect("Failed to create sniffer");
-    let mut tracker = DeviceTracker::new("devices.csv").expect("Failed to create tracker");
+    let mut tracker = DeviceTracker::new("devices.bin").expect("Failed to create tracker");
 
     sniffer.run(|event| {
         match &event {
@@ -508,6 +499,14 @@ Under the `ssdp` feature gate, LANwatch sniffs physical security endpoints via:
 - **Dahua Discovery**: Sniffing UDP port 37810 JSON-over-UDP frames, parsing camera models, MACs, and serial numbers.
 - **RTSP Active Traffic**: Sniffing TCP port 554 connections to identify generic surveillance and media streaming cameras.
 
+### MQTT & MQTT-SN Sniffing
+
+Under the `ssdp` feature gate, LANwatch passively sniffs MQTT (TCP port 1883) and MQTT-SN (UDP port 1883) `CONNECT` frames to discover IoT client devices, extracting their unique Client Identifier and protocol level.
+
+### Plex GDM (Good Day Mate) Protocol
+
+Under the `ssdp` feature gate, LANwatch sniffs Plex GDM discovery messages broadcast over UDP ports 32410, 32412, and 32414. By parsing the HTTP-like text payload, it extracts device friendly name, product (e.g. Plex Media Server, Plex for Apple TV), unique resource identifier UUID, and the service port.
+
 #### Summary of IoT & Camera Discovery Protocols
 
 | Protocol | Port / Protocol | Target Devices | Data Extracted |
@@ -517,6 +516,8 @@ Under the `ssdp` feature gate, LANwatch sniffs physical security endpoints via:
 | **KNXnet/IP** | UDP 3671 | Smart Building / HVAC Controls | Smart switches, actuator controls |
 | **SADP** | UDP 37020 / 9999 | Hikvision CCTV & IP Cameras | Model number, serial number, firmware version |
 | **Dahua** | UDP 37810 | Dahua CCTV & IP Cameras | Camera model, software version |
+| **MQTT** | TCP/UDP 1883 | IoT Devices, Smart Appliances | Client ID, protocol flavor (MQTT / MQTT-SN) |
+| **Plex GDM** | UDP 32410-32414 | Plex Media Servers & Players | Friendly name, product type, resource UUID, service port |
 
 ## Development and Build Automation
 
@@ -559,6 +560,10 @@ A `Makefile` is provided to simplify common development, testing, linting, and d
 *   **Quickly typecheck code:**
     ```bash
     make check
+    ```
+*   **Build all example binaries with all features enabled:**
+    ```bash
+    make examples
     ```
 *   **List all available make targets:**
     ```bash

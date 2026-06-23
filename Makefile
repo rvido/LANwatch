@@ -3,7 +3,7 @@
 CARGO = cargo
 RUSTDOCFLAGS = -D missing-docs
 
-.PHONY: all build build-minimal release test doc clean fmt fmt-check clippy check Help
+.PHONY: all build build-minimal release test doc clean fmt fmt-check clippy check help examples
 
 all: build test doc clippy
 
@@ -50,6 +50,10 @@ clippy:
 ## check: Check codebase quickly
 check:
 	$(CARGO) check --all-features
+
+## examples: Build all example binaries with all features enabled
+examples:
+	$(CARGO) build --examples --all-features
 
 ## help: Show this help message
 help:
