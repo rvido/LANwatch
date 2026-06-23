@@ -1891,6 +1891,130 @@ impl DeviceTracker {
         updated
     }
 
+    /// Updates the tracker state with information from an MQTT packet.
+    ///
+    /// # Returns
+    /// The count of unique updates applied to the device entry.
+    #[cfg(feature = "ssdp")]
+    pub fn update_from_mqtt(&mut self, packet: &crate::parser::mqtt_gdm::MqttPacket) -> usize {
+        let mac = &packet.source_mac;
+        let mut updated = 0;
+
+        let device = self.devices.entry(mac.to_string()).or_insert_with(|| {
+            updated += 1;
+            DeviceInfo::new(mac.to_string(), packet.source_ip, None)
+        });
+
+        // Update IP if currently unspecified
+        if matches!(device.ip_address, IpAddr::V4(addr) if addr.is_unspecified()) {
+            device.ip_address = packet.source_ip;
+            updated += 1;
+        }
+
+        // Set device type to "IoT Device"
+        if Self::should_replace_device_type(device.device_type.as_deref(), "IoT Device") {
+            device.device_type = Some("IoT Device".to_string());
+            updated += 1;
+        }
+
+        // System Description
+        let desc = format!(
+            "MQTT Client ID: {} via {}",
+            packet.client_id, packet.protocol
+        );
+        if device.system_description.as_ref() != Some(&desc) {
+            device.system_description = Some(desc);
+            updated += 1;
+        }
+
+        device.last_seen = SystemTime::now();
+
+        if updated > 0 && self.auto_save {
+            let _ = self.save_to_csv();
+        }
+
+        if updated > 0 {
+            self.dirty_devices.lock().unwrap().insert(mac.to_string());
+        }
+
+        updated
+    }
+
+    /// Updates the tracker state with information from a Plex GDM packet.
+    ///
+    /// # Returns
+    /// The count of unique updates applied to the device entry.
+    #[cfg(feature = "ssdp")]
+    pub fn update_from_gdm(&mut self, packet: &crate::parser::mqtt_gdm::GdmPacket) -> usize {
+        let mac = &packet.source_mac;
+        let mut updated = 0;
+
+        let device = self.devices.entry(mac.to_string()).or_insert_with(|| {
+            updated += 1;
+            DeviceInfo::new(mac.to_string(), packet.source_ip, None)
+        });
+
+        // Update IP if currently unspecified
+        if matches!(device.ip_address, IpAddr::V4(addr) if addr.is_unspecified()) {
+            device.ip_address = packet.source_ip;
+            updated += 1;
+        }
+
+        // Set vendor to "Plex"
+        let vendor_name = "Plex".to_string();
+        let oui_vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(mac));
+        if Self::should_replace_vendor(device.vendor.as_deref(), &vendor_name, oui_vendor) {
+            device.vendor = Some(vendor_name);
+            updated += 1;
+        }
+
+        // Classify device type as "Media Server" or "Media Player"
+        let dt = if let Some(ref prod) = packet.product {
+            if prod.to_lowercase().contains("server") {
+                "Media Server"
+            } else {
+                "Media Player"
+            }
+        } else {
+            "Media Server"
+        };
+        if Self::should_replace_device_type(device.device_type.as_deref(), dt) {
+            device.device_type = Some(dt.to_string());
+            updated += 1;
+        }
+
+        // Hostname set to server/device name
+        if let Some(ref name) = packet.name
+            && device.hostname.as_ref() != Some(name)
+        {
+            device.hostname = Some(name.clone());
+            updated += 1;
+        }
+
+        // System Description
+        let desc = match (&packet.product, &packet.resource_id) {
+            (Some(prod), Some(uuid)) => format!("Plex device: {} ({})", prod, uuid),
+            (Some(prod), None) => format!("Plex device: {}", prod),
+            _ => "Plex Media Service".to_string(),
+        };
+        if device.system_description.as_ref() != Some(&desc) {
+            device.system_description = Some(desc);
+            updated += 1;
+        }
+
+        device.last_seen = SystemTime::now();
+
+        if updated > 0 && self.auto_save {
+            let _ = self.save_to_csv();
+        }
+
+        if updated > 0 {
+            self.dirty_devices.lock().unwrap().insert(mac.to_string());
+        }
+
+        updated
+    }
+
     /// Detect device type from vendor name
     fn detect_device_type_from_vendor(vendor: &str) -> Option<&'static str> {
         let owned_holder;

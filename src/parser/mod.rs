@@ -27,6 +27,10 @@ pub mod iot;
 #[cfg(any(feature = "mdns", feature = "ssdp"))]
 pub mod cctv;
 
+/// MQTT and Plex GDM Discovery parsers.
+#[cfg(any(feature = "mdns", feature = "ssdp"))]
+pub mod mqtt_gdm;
+
 // Re-export the main parsing entry points and types
 #[cfg(any(feature = "mdns", feature = "ssdp"))]
 pub use cctv::{
@@ -38,6 +42,11 @@ pub use dhcp::{is_dhcpv4_ports, is_dhcpv6_ports, parse_dhcpv4_payload, parse_dhc
 pub use iot::{
     CoapPacket, IotMetadata, KnxPacket, LifxPacket, extract_iot_metadata, is_coap_port,
     is_knx_port, is_lifx_port, parse_coap_payload, parse_knx_payload, parse_lifx_payload,
+};
+#[cfg(any(feature = "mdns", feature = "ssdp"))]
+pub use mqtt_gdm::{
+    GDM_PORTS, GdmPacket, MQTT_PORT, MqttPacket, is_gdm_port, is_mqtt_port, parse_gdm_payload,
+    parse_mqtt_connect, parse_mqtt_sn_connect,
 };
 pub use network::{parse_arp_packet, parse_ndp_packet};
 

@@ -3145,4 +3145,143 @@ mod tests {
         let _ = std::fs::remove_file(temp_path);
         let _ = std::fs::remove_file(format!("{}.journal", temp_path));
     }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_parse_mqtt_connect() {
+        let payload = vec![
+            0x10, // Connect packet type
+            0x11, // Remaining length (17)
+            0x00, 0x04, // Protocol name length (4)
+            b'M', b'Q', b'T', b'T', // Protocol name
+            0x04, // Proto level
+            0x02, // Connect flags
+            0x00, 0x3c, // Keep alive (60)
+            0x00, 0x05, // Client ID length (5)
+            b'm', b'y', b'c', b'l', b'i', // Client ID
+        ];
+        let source_ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 100));
+        let result = crate::parser::mqtt_gdm::parse_mqtt_connect(
+            &payload,
+            "00:11:22:33:44:55".to_string(),
+            source_ip,
+        );
+        assert!(result.is_some());
+        let packet = result.unwrap();
+        assert_eq!(packet.client_id, "mycli");
+        assert_eq!(packet.protocol, "MQTT");
+        assert_eq!(packet.source_mac, "00:11:22:33:44:55");
+        assert_eq!(packet.source_ip, source_ip);
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_parse_mqtt_sn_connect() {
+        let payload = vec![
+            13, // Length
+            0x04, // MsgType: CONNECT
+            0x04, // Flags
+            0x01, // ProtocolId
+            0x00, 0x3c, // Duration
+            b'm', b'y', b's', b'n', b'c', b'l', b'i', // Client ID
+        ];
+        let source_ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 101));
+        let result = crate::parser::mqtt_gdm::parse_mqtt_sn_connect(
+            &payload,
+            "00:11:22:33:44:66".to_string(),
+            source_ip,
+        );
+        assert!(result.is_some());
+        let packet = result.unwrap();
+        assert_eq!(packet.client_id, "mysncli");
+        assert_eq!(packet.protocol, "MQTT-SN");
+        assert_eq!(packet.source_mac, "00:11:22:33:44:66");
+        assert_eq!(packet.source_ip, source_ip);
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_parse_gdm_payload() {
+        let payload = b"Content-Type: plex/media-server\r\nName: MyPlexServer\r\nPort: 32400\r\nProduct: Plex Media Server\r\nResource-Identifier: 12345678-abcd-ef01-2345-6789abcdef01\r\n";
+        let source_ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 102));
+        let result = crate::parser::mqtt_gdm::parse_gdm_payload(
+            payload,
+            "00:11:22:33:44:77".to_string(),
+            source_ip,
+        );
+        assert!(result.is_some());
+        let packet = result.unwrap();
+        assert_eq!(packet.name.as_deref(), Some("MyPlexServer"));
+        assert_eq!(packet.port, Some(32400));
+        assert_eq!(packet.product.as_deref(), Some("Plex Media Server"));
+        assert_eq!(packet.resource_id.as_deref(), Some("12345678-abcd-ef01-2345-6789abcdef01"));
+        assert_eq!(packet.source_mac, "00:11:22:33:44:77");
+        assert_eq!(packet.source_ip, source_ip);
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_device_tracker_update_from_mqtt() {
+        let temp_path = "/tmp/lanwatch_test_mqtt.csv";
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+
+        {
+            let mut tracker = DeviceTracker::new(temp_path).unwrap();
+            let packet = crate::parser::mqtt_gdm::MqttPacket {
+                source_mac: "11:22:33:44:55:66".to_string(),
+                source_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 55)),
+                client_id: "test-client".to_string(),
+                protocol: "MQTT".to_string(),
+            };
+
+            let updates = tracker.update_from_mqtt(&packet);
+            assert!(updates > 0);
+
+            let device = tracker.devices.get("11:22:33:44:55:66").unwrap();
+            assert_eq!(device.device_type.as_deref(), Some("IoT Device"));
+            assert_eq!(
+                device.system_description.as_deref(),
+                Some("MQTT Client ID: test-client via MQTT")
+            );
+        }
+
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_device_tracker_update_from_gdm() {
+        let temp_path = "/tmp/lanwatch_test_gdm.csv";
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+
+        {
+            let mut tracker = DeviceTracker::new(temp_path).unwrap();
+            let packet = crate::parser::mqtt_gdm::GdmPacket {
+                source_mac: "22:33:44:55:66:77".to_string(),
+                source_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 56)),
+                name: Some("PlexServer".to_string()),
+                product: Some("Plex Media Server".to_string()),
+                resource_id: Some("uuid-12345".to_string()),
+                port: Some(32400),
+            };
+
+            let updates = tracker.update_from_gdm(&packet);
+            assert!(updates > 0);
+
+            let device = tracker.devices.get("22:33:44:55:66:77").unwrap();
+            assert_eq!(device.vendor.as_deref(), Some("Plex"));
+            assert_eq!(device.device_type.as_deref(), Some("Media Server"));
+            assert_eq!(device.hostname.as_deref(), Some("PlexServer"));
+            assert_eq!(
+                device.system_description.as_deref(),
+                Some("Plex device: Plex Media Server (uuid-12345)")
+            );
+        }
+
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+    }
 }

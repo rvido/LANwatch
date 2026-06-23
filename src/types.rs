@@ -418,6 +418,12 @@ pub enum NetworkEvent {
     /// CCTV / IP Camera discovery packet
     #[cfg(feature = "ssdp")]
     Cctv(crate::parser::cctv::CctvPacket),
+    /// MQTT / MQTT-SN packet
+    #[cfg(feature = "ssdp")]
+    Mqtt(crate::parser::mqtt_gdm::MqttPacket),
+    /// Plex GDM discovery packet
+    #[cfg(feature = "ssdp")]
+    Gdm(crate::parser::mqtt_gdm::GdmPacket),
 }
 
 #[cfg(any(feature = "mdns", feature = "ssdp"))]
