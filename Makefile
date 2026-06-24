@@ -3,7 +3,7 @@
 CARGO = cargo
 RUSTDOCFLAGS = -D missing-docs
 
-.PHONY: all build build-minimal release test doc clean fmt fmt-check clippy check help examples
+.PHONY: all build build-minimal release release-aarch64 release-aarch64-static test doc clean fmt fmt-check clippy check help examples
 
 all: build test doc clippy
 
@@ -22,6 +22,14 @@ build-minimal: update
 ## release: Build the project in release mode with all features enabled
 release: update
 	$(CARGO) build --release --all-features
+
+## release-aarch64: Cross-compile the release binary for ARM64 (aarch64-unknown-linux-gnu) using cross/docker
+release-aarch64: update
+	cross build --target aarch64-unknown-linux-gnu --release --all-features
+
+## release-aarch64-static: Cross-compile the release binary for ARM64 (aarch64-unknown-linux-musl) using cross/docker
+release-aarch64-static: update
+	cross build --target aarch64-unknown-linux-musl --release --all-features
 
 ## test: Run unit tests with all features enabled
 test:
