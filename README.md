@@ -537,6 +537,10 @@ A `Makefile` is provided to simplify common development, testing, linting, and d
     ```bash
     make release
     ```
+*   **Cross-compile release binary for ARM64 (aarch64-unknown-linux-gnu):**
+    ```bash
+    make release-aarch64
+    ```
 *   **Run all unit tests:**
     ```bash
     make test
