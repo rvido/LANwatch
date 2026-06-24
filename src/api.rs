@@ -313,18 +313,10 @@ impl ApiServer {
     }
 
     fn handle_root(&self) -> Response<std::io::Cursor<Vec<u8>>> {
-        let json = serde_json::json!({
-            "service": "lanwatch",
-            "version": env!("CARGO_PKG_VERSION"),
-            "endpoints": {
-                "/devices": "GET - List detected devices (supports: ?limit=50&offset=0)",
-                "/devices/{mac}": "GET - Get a specific device by MAC address",
-                "/devices/count": "GET - Get device count",
-                "/health": "GET - Health check"
-            }
-        });
-        Response::from_string(serde_json::to_string(&json).unwrap_or_default())
-            .with_header(tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap())
+        let html = include_str!("dashboard.html");
+        Response::from_string(html).with_header(
+            tiny_http::Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap(),
+        )
     }
 
     fn handle_not_found(&self) -> Response<std::io::Cursor<Vec<u8>>> {

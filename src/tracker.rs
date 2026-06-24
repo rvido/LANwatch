@@ -1402,9 +1402,16 @@ impl DeviceTracker {
         match current {
             None => true,
             Some(existing) if existing.eq_ignore_ascii_case(incoming) => false,
-            Some(existing) => oui_vendor
-                .map(|oui| existing.eq_ignore_ascii_case(oui))
-                .unwrap_or(false),
+            Some(existing) => {
+                if existing.eq_ignore_ascii_case("Google")
+                    && incoming.eq_ignore_ascii_case("Rachio")
+                {
+                    return true;
+                }
+                oui_vendor
+                    .map(|oui| existing.eq_ignore_ascii_case(oui))
+                    .unwrap_or(false)
+            }
         }
     }
 
@@ -1425,7 +1432,12 @@ impl DeviceTracker {
                         | "apple iphone"
                 ) && matches!(
                     existing.as_str(),
-                    "security camera" | "router" | "smart home device" | "unknown" | "chromecast"
+                    "security camera"
+                        | "router"
+                        | "smart home device"
+                        | "unknown"
+                        | "chromecast"
+                        | "thermostat"
                 )
             }
         }
