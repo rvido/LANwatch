@@ -1,0 +1,805 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LANwatch Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #09090b;
+            --surface: #18181b;
+            --surface-hover: #27272a;
+            --border: #27272a;
+            --text: #f4f4f5;
+            --text-muted: #a1a1aa;
+            --primary: #8b5cf6;
+            --primary-glow: rgba(139, 92, 246, 0.15);
+            --accent-emerald: #10b981;
+            --accent-blue: #3b82f6;
+            --accent-orange: #f97316;
+            --accent-plex: #e5a93b;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Outfit', sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            padding: 2rem;
+            line-height: 1.5;
+            background-image: 
+                radial-gradient(at 0% 0%, rgba(139, 92, 246, 0.08) 0px, transparent 50%),
+                radial-gradient(at 100% 100%, rgba(59, 130, 246, 0.05) 0px, transparent 50%);
+            background-attachment: fixed;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 2.5rem;
+            padding-bottom: 1.5rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .logo-section {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .logo-icon {
+            background: linear-gradient(135deg, var(--primary), var(--accent-blue));
+            padding: 0.75rem;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 4px 20px rgba(139, 92, 246, 0.3);
+        }
+
+        h1 {
+            font-size: 2rem;
+            font-weight: 800;
+            letter-spacing: -0.05em;
+            background: linear-gradient(to right, #ffffff, #a1a1aa);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .pulse-badge {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            background: rgba(16, 185, 129, 0.1);
+            border: 1px solid rgba(16, 185, 129, 0.2);
+            padding: 0.5rem 1rem;
+            border-radius: 9999px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: var(--accent-emerald);
+        }
+
+        .pulse-dot {
+            width: 8px;
+            height: 8px;
+            background-color: var(--accent-emerald);
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0% {
+                transform: scale(0.95);
+                box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7);
+            }
+            70% {
+                transform: scale(1);
+                box-shadow: 0 0 0 8px rgba(16, 185, 129, 0);
+            }
+            100% {
+                transform: scale(0.95);
+                box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
+            }
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2.5rem;
+        }
+
+        .stat-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 1.5rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            position: relative;
+            overflow: hidden;
+            cursor: pointer;
+            transition: transform 0.2s, border-color 0.2s;
+        }
+
+        .stat-card:hover, .stat-card.active {
+            transform: translateY(-2px);
+            border-color: var(--primary);
+            box-shadow: 0 0 15px var(--primary-glow);
+        }
+
+        .stat-label {
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .stat-value {
+            font-size: 2.5rem;
+            font-weight: 800;
+        }
+
+        .controls {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 2rem;
+            flex-wrap: wrap;
+        }
+
+        .search-wrapper {
+            flex: 1;
+            min-width: 280px;
+            position: relative;
+        }
+
+        .search-input {
+            width: 100%;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 0.75rem 1rem 0.75rem 2.75rem;
+            color: var(--text);
+            font-family: inherit;
+            font-size: 1rem;
+            outline: none;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+
+        .search-input:focus {
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px var(--primary-glow);
+        }
+
+        .search-icon {
+            position: absolute;
+            left: 1rem;
+            top: 50%;
+            transform: translateY(-50%);
+            color: var(--text-muted);
+            pointer-events: none;
+        }
+
+        .devices-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+            gap: 1.5rem;
+        }
+
+        .device-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 1.5rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1.25rem;
+            position: relative;
+            cursor: pointer;
+            transition: all 0.25s ease;
+        }
+
+        .device-card:hover {
+            transform: translateY(-4px);
+            border-color: var(--primary);
+            box-shadow: 0 12px 30px rgba(0, 0, 0, 0.4);
+        }
+
+        .device-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+        }
+
+        .device-icon-box {
+            padding: 0.75rem;
+            border-radius: 12px;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-muted);
+            transition: color 0.2s, background-color 0.2s;
+        }
+
+        .device-card:hover .device-icon-box {
+            color: var(--primary);
+            background: var(--primary-glow);
+        }
+
+        .device-badge {
+            font-size: 0.75rem;
+            font-weight: 700;
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--border);
+        }
+
+        .device-info {
+            display: flex;
+            flex-direction: column;
+            gap: 0.25rem;
+        }
+
+        .device-name {
+            font-size: 1.15rem;
+            font-weight: 700;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .device-vendor {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        .device-meta {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            border-top: 1px solid var(--border);
+            padding-top: 1rem;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+        }
+
+        .meta-row {
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .meta-label {
+            color: var(--text-muted);
+        }
+
+        .meta-val {
+            color: var(--text);
+            font-weight: bold;
+        }
+
+        /* Modal styling */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.8);
+            backdrop-filter: blur(8px);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+
+        .modal-overlay.active {
+            display: flex;
+            opacity: 1;
+        }
+
+        .modal-content {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            width: 90%;
+            max-width: 650px;
+            max-height: 85vh;
+            border-radius: 24px;
+            padding: 2rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+            position: relative;
+            transform: scale(0.95);
+            transition: transform 0.3s ease;
+            overflow-y: auto;
+        }
+
+        .modal-overlay.active .modal-content {
+            transform: scale(1);
+        }
+
+        .modal-close {
+            position: absolute;
+            top: 1.5rem;
+            right: 1.5rem;
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            outline: none;
+            padding: 0.5rem;
+        }
+
+        .modal-close:hover {
+            color: var(--text);
+        }
+
+        .modal-header {
+            display: flex;
+            gap: 1.25rem;
+            align-items: center;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 1.5rem;
+        }
+
+        .modal-details {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+
+        .details-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 1rem;
+        }
+
+        .detail-item {
+            display: flex;
+            flex-direction: column;
+            gap: 0.25rem;
+            background: rgba(255, 255, 255, 0.02);
+            padding: 0.75rem 1rem;
+            border-radius: 12px;
+            border: 1px solid var(--border);
+        }
+
+        .detail-label {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            font-weight: 700;
+        }
+
+        .detail-value {
+            font-size: 0.95rem;
+            font-weight: 600;
+            word-break: break-all;
+        }
+
+        .json-preview {
+            background: #09090b;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.25rem;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.8rem;
+            overflow-x: auto;
+            max-height: 250px;
+            color: #a78bfa;
+        }
+
+        .copy-btn {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--border);
+            color: var(--text);
+            padding: 0.25rem 0.5rem;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            cursor: pointer;
+            margin-left: 0.5rem;
+            font-family: 'Outfit', sans-serif;
+            transition: background 0.2s;
+        }
+
+        .copy-btn:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="logo-section">
+            <div class="logo-icon">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
+                    <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
+                    <line x1="6" y1="6" x2="6.01" y2="6"></line>
+                    <line x1="6" y1="18" x2="6.01" y2="18"></line>
+                </svg>
+            </div>
+            <div>
+                <h1>LANwatch Dashboard</h1>
+                <p style="color: var(--text-muted); font-size: 0.85rem;">Local Network Scanner & Device Registry</p>
+            </div>
+        </div>
+        <div class="pulse-badge">
+            <div class="pulse-dot"></div>
+            <span>LIVE MONITORING</span>
+        </div>
+    </header>
+
+    <div class="stats-grid">
+        <div class="stat-card active" onclick="selectCategory('all', true)">
+            <span class="stat-label">Total Devices</span>
+            <span class="stat-value" id="stat-total">0</span>
+        </div>
+        <div class="stat-card" onclick="selectCategory('iot', false)">
+            <span class="stat-label">IoT Clients</span>
+            <span class="stat-value" id="stat-iot">0</span>
+        </div>
+        <div class="stat-card" onclick="selectCategory('media', false)">
+            <span class="stat-label">Media Systems</span>
+            <span class="stat-value" id="stat-media">0</span>
+        </div>
+        <div class="stat-card" onclick="selectCategory('cctv', false)">
+            <span class="stat-label">IP Cameras</span>
+            <span class="stat-value" id="stat-cctv">0</span>
+        </div>
+    </div>
+
+    <div class="controls">
+        <div class="search-wrapper">
+            <svg class="search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="11" cy="11" r="8"></circle>
+                <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+            </svg>
+            <input type="text" class="search-input" id="search" placeholder="Search devices by IP, MAC, Name, Category...">
+        </div>
+    </div>
+
+    <div class="devices-grid" id="devices-grid">
+        <!-- Rendered dynamically -->
+    </div>
+
+    <!-- Modal for Device Details -->
+    <div class="modal-overlay" id="modal-overlay" onclick="closeModal(event)">
+        <div class="modal-content" onclick="event.stopPropagation()">
+            <button class="modal-close" onclick="toggleModal(false)">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="18" y1="6" x2="6" y2="18"></line>
+                    <line x1="6" y1="6" x2="18" y2="18"></line>
+                </svg>
+            </button>
+            <div class="modal-header">
+                <div class="device-icon-box" id="modal-icon-box" style="padding: 1rem; border-radius: 16px;">
+                    <!-- SVG icon -->
+                </div>
+                <div>
+                    <h2 id="modal-title" style="font-size: 1.5rem; font-weight: 800;">Device Name</h2>
+                    <p id="modal-subtitle" style="color: var(--text-muted); font-size: 0.9rem;">Category / Vendor</p>
+                </div>
+            </div>
+            <div class="modal-details">
+                <div class="details-grid">
+                    <div class="detail-item">
+                        <span class="detail-label">IP Address</span>
+                        <span class="detail-value" id="modal-ip">Unspecified</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">MAC Address</span>
+                        <span class="detail-value" id="modal-mac">00:00:00:00:00:00</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">Device Type</span>
+                        <span class="detail-value" id="modal-type">Generic Device</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">Last Active</span>
+                        <span class="detail-value" id="modal-last-active">Just now</span>
+                    </div>
+                </div>
+                <div class="detail-item" style="grid-column: span 2;">
+                    <span class="detail-label">System Description</span>
+                    <span class="detail-value" id="modal-desc" style="font-style: italic;">No description available</span>
+                </div>
+                <div class="detail-item" style="grid-column: span 2;" id="modal-services-box">
+                    <span class="detail-label">Discovered Services</span>
+                    <span class="detail-value" id="modal-services" style="font-family: 'JetBrains Mono', monospace; font-size: 0.85rem;">None</span>
+                </div>
+                <div>
+                    <span class="detail-label" style="margin-bottom: 0.5rem; display: block;">Raw JSON Endpoint Data</span>
+                    <pre class="json-preview" id="modal-json"></pre>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let devicesData = [];
+        let currentCategory = 'all';
+        let lastRenderedKeys = '';
+
+        function matchesCategory(device, category) {
+            if (category === 'all') return true;
+            const type = (device.device_type || "").toLowerCase();
+            if (category === 'iot') {
+                return type.includes("plug") || type.includes("iot") || type.includes("bulb") || type.includes("sensor") || type.includes("outlet") || type.includes("smart");
+            }
+            if (category === 'media') {
+                return type.includes("server") || type.includes("media") || type.includes("speaker") || type.includes("audio") || type.includes("tv") || type.includes("chromecast") || type.includes("plex");
+            }
+            if (category === 'cctv') {
+                return type.includes("camera") || type.includes("cctv") || type.includes("video");
+            }
+            return false;
+        }
+
+        function selectCategory(category, clearSearch) {
+            currentCategory = category;
+            
+            const cards = document.querySelectorAll('.stat-card');
+            cards.forEach((card, index) => {
+                const isMatched = 
+                    (index === 0 && category === 'all') ||
+                    (index === 1 && category === 'iot') ||
+                    (index === 2 && category === 'media') ||
+                    (index === 3 && category === 'cctv');
+                if (isMatched) {
+                    card.classList.add('active');
+                } else {
+                    card.classList.remove('active');
+                }
+            });
+
+            if (clearSearch) {
+                document.getElementById('search').value = '';
+            }
+
+            renderDevices();
+        }
+
+        function getIconForType(type) {
+            const t = (type || "").toLowerCase();
+            if (t.includes("camera") || t.includes("cctv") || t.includes("video")) {
+                return `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path>
+                    <circle cx="12" cy="13" r="4"></circle>
+                </svg>`;
+            }
+            if (t.includes("speaker") || t.includes("smart speaker") || t.includes("audio") || t.includes("sonos")) {
+                return `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path>
+                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                    <line x1="12" y1="19" x2="12" y2="22"></line>
+                </svg>`;
+            }
+            if (t.includes("tv") || t.includes("chromecast") || t.includes("roku") || t.includes("media player")) {
+                return `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+                    <line x1="8" y1="21" x2="16" y2="21"></line>
+                    <line x1="12" y1="17" x2="12" y2="21"></line>
+                </svg>`;
+            }
+            if (t.includes("server") || t.includes("nas") || t.includes("storage")) {
+                return `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
+                    <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
+                    <line x1="6" y1="6" x2="6.01" y2="6"></line>
+                    <line x1="6" y1="18" x2="6.01" y2="18"></line>
+                </svg>`;
+            }
+            if (t.includes("router") || t.includes("switch") || t.includes("network") || t.includes("hub")) {
+                return `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+                </svg>`;
+            }
+            if (t.includes("plug") || t.includes("iot") || t.includes("bulb") || t.includes("sensor") || t.includes("outlet") || t.includes("smart")) {
+                return `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M18 10h-1.25A3 3 0 0 0 14 7.25V6h1a1 1 0 0 0 0-2H9a1 1 0 0 0 0 2h1v1.25A3 3 0 0 0 7.25 10H6a4 4 0 0 0-4 4v1a1 1 0 0 0 1 1h18a1 1 0 0 0 1-1v-1a4 4 0 0 0-4-4z"></path>
+                    <line x1="12" y1="16" x2="12" y2="21"></line>
+                </svg>`;
+            }
+            if (t.includes("pc") || t.includes("laptop") || t.includes("computer") || t.includes("windows") || t.includes("mac")) {
+                return `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+                    <line x1="2" y1="20" x2="22" y2="20"></line>
+                    <line x1="12" y1="17" x2="12" y2="20"></line>
+                </svg>`;
+            }
+            if (t.includes("phone") || t.includes("tablet") || t.includes("mobile") || t.includes("ipad") || t.includes("android")) {
+                return `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="5" y="2" width="14" height="20" rx="2" ry="2"></rect>
+                    <line x1="12" y1="18" x2="12.01" y2="18"></line>
+                </svg>`;
+            }
+            return `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="4" y="4" width="16" height="16" rx="2" ry="2"></rect>
+                <rect x="9" y="9" width="6" height="6"></rect>
+                <line x1="9" y1="1" x2="9" y2="4"></line>
+                <line x1="15" y1="1" x2="15" y2="4"></line>
+                <line x1="9" y1="20" x2="9" y2="23"></line>
+                <line x1="15" y1="20" x2="15" y2="23"></line>
+                <line x1="20" y1="9" x2="23" y2="9"></line>
+                <line x1="20" y1="15" x2="23" y2="15"></line>
+                <line x1="1" y1="9" x2="4" y2="9"></line>
+                <line x1="1" y1="15" x2="4" y2="15"></line>
+            </svg>`;
+        }
+
+        async function fetchDevices() {
+            try {
+                const response = await fetch('/devices');
+                const result = await response.json();
+                if (result.success && Array.isArray(result.data)) {
+                    devicesData = result.data;
+                    renderStats();
+                    renderDevices();
+                }
+            } catch (error) {
+                console.error("Error fetching devices:", error);
+            }
+        }
+
+        function renderStats() {
+            document.getElementById('stat-total').textContent = devicesData.length;
+            
+            let iot = 0, media = 0, cctv = 0;
+            devicesData.forEach(d => {
+                if (matchesCategory(d, 'iot')) iot++;
+                else if (matchesCategory(d, 'media')) media++;
+                else if (matchesCategory(d, 'cctv')) cctv++;
+            });
+
+            document.getElementById('stat-iot').textContent = iot;
+            document.getElementById('stat-media').textContent = media;
+            document.getElementById('stat-cctv').textContent = cctv;
+        }
+
+        function renderDevices() {
+            const search = document.getElementById('search').value.toLowerCase().trim();
+            const filtered = devicesData.filter(d => {
+                const matchesFilter = matchesCategory(d, currentCategory);
+                const matchesSearch = 
+                    (d.hostname || '').toLowerCase().includes(search) ||
+                    (d.mac_address || '').toLowerCase().includes(search) ||
+                    (d.ip_address || '').toLowerCase().includes(search) ||
+                    (d.device_type || '').toLowerCase().includes(search) ||
+                    (d.vendor || '').toLowerCase().includes(search) ||
+                    (d.system_description || '').toLowerCase().includes(search);
+                return matchesFilter && matchesSearch;
+            });
+
+            // Diff check: only rebuild grid DOM if the matched keys/values have changed
+            const currentMatchedKeys = filtered.map(d => `${d.mac_address}-${d.ip_address}-${d.hostname}-${d.device_type}`).join('|');
+            if (currentMatchedKeys === lastRenderedKeys) {
+                return;
+            }
+            lastRenderedKeys = currentMatchedKeys;
+
+            const grid = document.getElementById('devices-grid');
+            grid.innerHTML = '';
+
+            if (filtered.length === 0) {
+                grid.innerHTML = `<div style="grid-column: 1/-1; text-align: center; color: var(--text-muted); padding: 3rem;">
+                    No devices match selection.
+                </div>`;
+                return;
+            }
+
+            filtered.forEach(d => {
+                const name = d.hostname || d.vendor || "Unknown Device";
+                const type = d.device_type || "Generic Device";
+                const ip = d.ip_address === "0.0.0.0" ? "IPv6-Only / NDP" : d.ip_address;
+                const mac = d.mac_address;
+                const vendor = d.vendor || "Unknown Vendor";
+
+                const card = document.createElement('div');
+                card.className = 'device-card';
+                card.onclick = () => showDeviceDetails(d);
+
+                card.innerHTML = `
+                    <div class="device-header">
+                        <div class="device-icon-box">
+                            ${getIconForType(type)}
+                        </div>
+                        <span class="device-badge">${type}</span>
+                    </div>
+                    <div class="device-info">
+                        <span class="device-name" title="${name}">${name}</span>
+                        <span class="device-vendor">${vendor}</span>
+                    </div>
+                    <div class="device-meta">
+                        <div class="meta-row">
+                            <span class="meta-label">IP</span>
+                            <span class="meta-val">${ip}</span>
+                        </div>
+                        <div class="meta-row">
+                            <span class="meta-label">MAC</span>
+                            <span class="meta-val">${mac}</span>
+                        </div>
+                    </div>
+                `;
+                grid.appendChild(card);
+            });
+        }
+
+        function formatDate(timestamp) {
+            try {
+                const date = new Date(timestamp);
+                return date.toLocaleString();
+            } catch (e) {
+                return timestamp;
+            }
+        }
+
+        function showDeviceDetails(device) {
+            document.getElementById('modal-icon-box').innerHTML = getIconForType(device.device_type);
+            document.getElementById('modal-title').textContent = device.hostname || device.vendor || "Unknown Device";
+            document.getElementById('modal-subtitle').textContent = `${device.device_type || 'Generic Device'} / ${device.vendor || 'Unknown Vendor'}`;
+            
+            const ipVal = device.ip_address === "0.0.0.0" ? "IPv6-Only / NDP" : device.ip_address;
+            document.getElementById('modal-ip').innerHTML = `${ipVal} <button class="copy-btn" onclick="navigator.clipboard.writeText('${ipVal}')">Copy</button>`;
+            document.getElementById('modal-mac').innerHTML = `${device.mac_address} <button class="copy-btn" onclick="navigator.clipboard.writeText('${device.mac_address}')">Copy</button>`;
+            
+            document.getElementById('modal-type').textContent = device.device_type || "Generic Device";
+            document.getElementById('modal-last-active').textContent = device.last_seen ? formatDate(device.last_seen) : "N/A";
+            
+            const desc = device.system_description || "No description available";
+            document.getElementById('modal-desc').textContent = desc;
+
+            const servicesBox = document.getElementById('modal-services-box');
+            if (device.services && device.services.length > 0) {
+                servicesBox.style.display = 'flex';
+                document.getElementById('modal-services').textContent = Array.isArray(device.services) ? device.services.join(', ') : device.services;
+            } else {
+                servicesBox.style.display = 'none';
+            }
+
+            document.getElementById('modal-json').textContent = JSON.stringify(device, null, 2);
+            
+            toggleModal(true);
+        }
+
+        function toggleModal(show) {
+            const overlay = document.getElementById('modal-overlay');
+            if (show) {
+                overlay.style.display = 'flex';
+                setTimeout(() => overlay.classList.add('active'), 10);
+            } else {
+                overlay.classList.remove('active');
+                setTimeout(() => overlay.style.display = 'none', 300);
+            }
+        }
+
+        function closeModal(event) {
+            toggleModal(false);
+        }
+
+        document.getElementById('search').addEventListener('input', () => {
+            renderDevices();
+        });
+
+        fetchDevices();
+        setInterval(fetchDevices, 4000);
+    </script>
+</body>
+</html>

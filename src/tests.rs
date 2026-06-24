@@ -640,6 +640,43 @@ mod tests {
     }
 
     #[test]
+    fn test_device_tracker_reclassifies_rachio_from_google_thermostat() {
+        let temp_path = "/tmp/lanwatch_test_rachio_google_reclassify.csv";
+        let _ = std::fs::remove_file(temp_path);
+
+        let seeded = "first_seen,last_seen,mac_address,ip_address,ipv6_address,hostname,device_type,vendor,services\n2026-05-22T16:50:19Z,2026-05-22T23:52:20Z,9c:50:d1:18:8d:cc,192.168.4.36,\"\",\"rachio-188dcc\",\"Thermostat\",\"Google\",\"_hap._tcp\"\n";
+        std::fs::write(temp_path, seeded).unwrap();
+
+        let mut tracker = DeviceTracker::new(temp_path).unwrap();
+        let mut registry = OuiRegistry::new();
+        registry.add("9c:50:d1", "Murata Manufacturing Co., Ltd.");
+        tracker.set_oui_registry(registry);
+
+        let packet = Dhcpv4Packet {
+            source_ip: Ipv4Addr::new(192, 168, 4, 36),
+            dest_ip: Ipv4Addr::new(255, 255, 255, 255),
+            source_port: 68,
+            dest_port: 67,
+            operation: Dhcpv4Operation::BootRequest,
+            client_mac: [0x9C, 0x50, 0xD1, 0x18, 0x8D, 0xCC],
+            message_type: Some(Dhcpv4MessageType::Discover),
+            hostname: Some("rachio-188dcc".to_string()),
+            requested_ip: Some(Ipv4Addr::new(192, 168, 4, 36)),
+            parameter_request_list: None,
+            vendor_class_id: None,
+            vendor_specific_info: None,
+        };
+
+        tracker.update_from_dhcpv4(&packet);
+
+        let device = tracker.devices().get("9c:50:d1:18:8d:cc").unwrap();
+        assert_eq!(device.vendor.as_deref(), Some("Rachio"));
+        assert_eq!(device.device_type.as_deref(), Some("Smart Watering Device"));
+
+        let _ = std::fs::remove_file(temp_path);
+    }
+
+    #[test]
     fn test_device_tracker_reclassifies_roborock_from_loaded_csv() {
         let temp_path = "/tmp/lanwatch_test_roborock_reclassify.csv";
         let _ = std::fs::remove_file(temp_path);
