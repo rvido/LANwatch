@@ -1735,6 +1735,43 @@ mod tests {
     }
 
     #[test]
+    fn test_oui_registry_private_mac() {
+        let registry = OuiRegistry::new();
+
+        // Test various private/randomized MAC formats
+        // 2, 6, A, E as second hexadecimal digit
+        assert_eq!(registry.lookup("02:00:00:00:00:00"), Some("Private MAC Address"));
+        assert_eq!(registry.lookup("16:11:22:33:44:55"), Some("Private MAC Address"));
+        assert_eq!(registry.lookup("AA:BB:CC:DD:EE:FF"), Some("Private MAC Address"));
+        assert_eq!(registry.lookup("fe:ff:ff:00:00:00"), Some("Private MAC Address"));
+
+        // A non-private MAC should still be None in an empty registry
+        assert_eq!(registry.lookup("00:11:22:33:44:55"), None);
+        assert_eq!(registry.lookup("01:23:45:67:89:AB"), None);
+    }
+
+    #[test]
+    fn test_is_private_mac() {
+        use crate::oui::is_private_mac;
+
+        // Valid private/randomized MACs (second digit is 2, 6, a/A, e/E)
+        assert!(is_private_mac("02:00:00:00:00:00"));
+        assert!(is_private_mac("36-12-34-56-78-90"));
+        assert!(is_private_mac("5A1122334455"));
+        assert!(is_private_mac("FE:FF:FF:00:00:00"));
+
+        // Valid non-private/randomized MACs
+        assert!(!is_private_mac("00:11:22:33:44:55"));
+        assert!(!is_private_mac("01-23-45-67-89-AB"));
+        assert!(!is_private_mac("13579BDF0246"));
+
+        // Invalid MAC formats
+        assert!(!is_private_mac(""));
+        assert!(!is_private_mac("G"));
+        assert!(!is_private_mac("0"));
+    }
+
+    #[test]
     fn test_oui_registry_load_from_file() {
         use std::io::Write;
 
