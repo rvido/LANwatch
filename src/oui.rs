@@ -87,6 +87,11 @@ impl OuiRegistry {
             return Some(vendor.as_str());
         }
 
+        // Check if it is a private/randomized MAC address
+        if is_private_mac(mac_address) {
+            return Some("Private MAC Address");
+        }
+
         None
     }
 
@@ -324,4 +329,20 @@ pub fn download_and_load_ieee_oui(
     registry
         .load_from_ieee_file(path)
         .map_err(|e| format!("Failed to parse IEEE OUI file: {}", e))
+}
+
+/// Returns true if the MAC address is a private, randomized, or locally administered address.
+/// These addresses have 2, 6, A, or E as their second hexadecimal digit.
+pub fn is_private_mac(mac: &str) -> bool {
+    let mut hex_count = 0;
+    for c in mac.chars() {
+        if c.is_ascii_hexdigit() {
+            if hex_count == 1 {
+                let u = c.to_ascii_uppercase();
+                return u == '2' || u == '6' || u == 'A' || u == 'E';
+            }
+            hex_count += 1;
+        }
+    }
+    false
 }
