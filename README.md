@@ -263,8 +263,6 @@ curl http://localhost:3000/health
 
 LANwatch features a premium web-based dashboard accessible directly at `http://localhost:8080/` (or the custom address configured via the `--api` flag) when running the sniffer. The dashboard dynamically updates as devices are discovered, offering search filtering, category tabs, and detailed inspection views.
 
-![Web Dashboard](assets/lanwatch_dashboard_screenshot_blurred.jpg)
-
 ![Device Inspection Info](assets/lanwatch_dashboard_device_info_blurred.jpg)
 
 ### Library Usage
