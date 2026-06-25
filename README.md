@@ -1,5 +1,10 @@
 # LANwatch
 
+[![Crates.io](https://img.shields.io/crates/v/lanwatch.svg)](https://crates.io/crates/lanwatch)
+[![Docs.rs](https://docs.rs/lanwatch/badge.svg)](https://docs.rs/lanwatch)
+[![License: MIT/Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
+[![GitHub stars](https://img.shields.io/github/stars/rvido/lanwatch.svg)](https://github.com/rvido/lanwatch/stargazers)
+
 A Rust library and CLI tool for network device discovery and tracking via DHCP, mDNS, SSDP/UPnP, LLMNR, NetBIOS (NBNS), WS-Discovery (WSD), CoAP, Matter, KNXnet/IP, MQTT, Plex GDM, IP Camera discovery (SADP, Dahua, RTSP), link-layer frames (ARP, NDP, LLDP, CDP), and IEEE OUI vendor identification.
 
 ![LANwatch System Architecture](assets/lanwatch_architecture.jpg)
@@ -210,7 +215,7 @@ When started with `--api` or `--api-default`, the tool exposes a REST API for qu
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/` | GET | Service info and available endpoints |
+| `/` | GET | Serves the interactive Web Dashboard |
 | `/devices` | GET | List all devices as JSON (sorted by last_seen) |
 | `/devices/{mac}` | GET | Get a specific device by MAC address |
 | `/devices/count` | GET | Get device count |
@@ -253,6 +258,14 @@ curl http://localhost:3000/health
   ]
 }
 ```
+
+### Web Dashboard
+
+LANwatch features a premium web-based dashboard accessible directly at `http://localhost:8080/` (or the custom address configured via the `--api` flag) when running the sniffer. The dashboard dynamically updates as devices are discovered, offering search filtering, category tabs, and detailed inspection views.
+
+![Web Dashboard](assets/lanwatch_dashboard_screenshot_blurred.jpg)
+
+![Device Inspection Info](assets/lanwatch_dashboard_device_info_blurred.jpg)
 
 ### Library Usage
 
