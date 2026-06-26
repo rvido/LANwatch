@@ -4,6 +4,7 @@
 [![License: MIT/Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
 [![GitHub stars](https://img.shields.io/github/stars/rvido/lanwatch.svg)](https://github.com/rvido/lanwatch/stargazers)
 
+![LANwatch Logo](assets/lanwatch_logo.jpg)
 
 A Rust library and CLI tool for network device discovery and tracking via DHCP, mDNS, SSDP/UPnP, LLMNR, NetBIOS (NBNS), WS-Discovery (WSD), CoAP, Matter, KNXnet/IP, MQTT, Plex GDM, IP Camera discovery (SADP, Dahua, RTSP), link-layer frames (ARP, NDP, LLDP, CDP), and IEEE OUI vendor identification.
 
