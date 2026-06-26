@@ -1,9 +1,9 @@
 # LANwatch
 
-[![Crates.io](https://img.shields.io/crates/v/lanwatch.svg)](https://crates.io/crates/lanwatch)
-[![Docs.rs](https://docs.rs/lanwatch/badge.svg)](https://docs.rs/lanwatch)
+[![CI](https://github.com/rvido/lanwatch/actions/workflows/ci.yml/badge.svg)](https://github.com/rvido/lanwatch/actions/workflows/ci.yml)
 [![License: MIT/Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
 [![GitHub stars](https://img.shields.io/github/stars/rvido/lanwatch.svg)](https://github.com/rvido/lanwatch/stargazers)
+
 
 A Rust library and CLI tool for network device discovery and tracking via DHCP, mDNS, SSDP/UPnP, LLMNR, NetBIOS (NBNS), WS-Discovery (WSD), CoAP, Matter, KNXnet/IP, MQTT, Plex GDM, IP Camera discovery (SADP, Dahua, RTSP), link-layer frames (ARP, NDP, LLDP, CDP), and IEEE OUI vendor identification.
 
