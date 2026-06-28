@@ -622,12 +622,57 @@ impl DeviceTracker {
     pub fn update_from_mdns(&mut self, packet: &MdnsPacket) -> usize {
         let packet = packet.view();
 
+        // 1. Target MAC resolution logic to handle proxying/relaying (e.g. from Eero routers)
+        let mut advertised_ips = Vec::new();
+        for record in packet.all_records() {
+            match &record.data {
+                MdnsRecordDataView::A(addr) => {
+                    advertised_ips.push(IpAddr::V4(*addr));
+                }
+                MdnsRecordDataView::Aaaa(addr) => {
+                    advertised_ips.push(IpAddr::V6(*addr));
+                }
+                _ => {}
+            }
+        }
+
+        let target_mac = if advertised_ips.is_empty() {
+            Some(packet.source_mac.to_string())
+        } else {
+            let directly_from_host = advertised_ips.contains(&packet.source_ip);
+            if directly_from_host {
+                Some(packet.source_mac.to_string())
+            } else {
+                // Relayed/proxied packet: try to find an existing device matching any of the advertised IPs
+                let mut resolved = None;
+                for ip in &advertised_ips {
+                    let found = self.devices.values().find(|d| {
+                        d.ip_address == *ip
+                            || match ip {
+                                IpAddr::V4(_) => false,
+                                IpAddr::V6(ipv6) => d.ipv6_addresses.contains(ipv6),
+                            }
+                    });
+                    if let Some(dev) = found {
+                        resolved = Some(dev.mac_address.clone());
+                        break;
+                    }
+                }
+                resolved
+            }
+        };
+
+        // If target_mac cannot be resolved, skip processing to avoid polluting the router's entry
+        let target_mac = match target_mac {
+            Some(m) => m,
+            None => return 0,
+        };
+
         let mut updated = 0;
-        let mac = &packet.source_mac;
         let oui_vendor = self
             .oui_registry
             .as_ref()
-            .and_then(|registry| registry.lookup(mac))
+            .and_then(|registry| registry.lookup(&target_mac))
             .map(str::to_string);
 
         // Track the first hostname and addresses seen (defer String allocation)
@@ -770,11 +815,14 @@ impl DeviceTracker {
 
         // Get or create device entry and perform updates within a short scope
         {
-            let device = self.devices.entry(mac.to_string()).or_insert_with(|| {
-                let ip = first_ipv4.map(IpAddr::V4).unwrap_or(packet.source_ip);
-                updated += 1;
-                DeviceInfo::new(mac.to_string(), ip, None)
-            });
+            let device = self
+                .devices
+                .entry(target_mac.to_string())
+                .or_insert_with(|| {
+                    let ip = first_ipv4.map(IpAddr::V4).unwrap_or(packet.source_ip);
+                    updated += 1;
+                    DeviceInfo::new(target_mac.to_string(), ip, None)
+                });
 
             // Update hostname from the first seen A/AAAA
             if device.hostname.is_none()
@@ -811,28 +859,88 @@ impl DeviceTracker {
             if let Some(v) = vendor_to_apply
                 && Self::should_replace_vendor(device.vendor.as_deref(), &v, oui_vendor.as_deref())
             {
-                if device.vendor.as_deref() != Some(&v) {
-                    device.vendor = Some(v.clone());
+                // Protect Eero devices from being overwritten by other vendors
+                let is_eero = first_hostname
+                    .map(|h| h.to_ascii_lowercase().contains("eero"))
+                    .unwrap_or(false)
+                    || device
+                        .hostname
+                        .as_deref()
+                        .map(|h| h.to_ascii_lowercase().contains("eero"))
+                        .unwrap_or(false)
+                    || device
+                        .vendor
+                        .as_deref()
+                        .map(|v| v.eq_ignore_ascii_case("eero inc."))
+                        .unwrap_or(false)
+                    || oui_vendor
+                        .as_deref()
+                        .map(|v| v.eq_ignore_ascii_case("eero inc."))
+                        .unwrap_or(false);
+                if !is_eero || v.eq_ignore_ascii_case("eero inc.") {
+                    if device.vendor.as_deref() != Some(&v) {
+                        device.vendor = Some(v.clone());
+                    }
+                    updated += 1;
                 }
-                updated += 1;
             }
 
             // Set device type if detected
             if let Some(t) = device_type
                 && Self::should_replace_device_type(device.device_type.as_deref(), &t)
             {
-                if device.device_type.as_deref() != Some(&t) {
-                    device.device_type = Some(t.clone());
+                // Protect Eero devices from being overwritten by other device types
+                let is_eero = first_hostname
+                    .map(|h| h.to_ascii_lowercase().contains("eero"))
+                    .unwrap_or(false)
+                    || device
+                        .hostname
+                        .as_deref()
+                        .map(|h| h.to_ascii_lowercase().contains("eero"))
+                        .unwrap_or(false)
+                    || device
+                        .vendor
+                        .as_deref()
+                        .map(|v| v.eq_ignore_ascii_case("eero inc."))
+                        .unwrap_or(false)
+                    || oui_vendor
+                        .as_deref()
+                        .map(|v| v.eq_ignore_ascii_case("eero inc."))
+                        .unwrap_or(false);
+                if !is_eero || t.eq_ignore_ascii_case("Router") {
+                    if device.device_type.as_deref() != Some(&t) {
+                        device.device_type = Some(t.clone());
+                    }
+                    updated += 1;
                 }
-                updated += 1;
             }
 
             // Set system description if IoT model is present
-            if let Some(ref desc) = txt_model
-                && device.system_description.as_ref() != Some(desc)
-            {
-                device.system_description = Some(desc.clone());
-                updated += 1;
+            if let Some(ref desc) = txt_model {
+                // Protect Eero devices from being overwritten by other system descriptions
+                let is_eero = first_hostname
+                    .map(|h| h.to_ascii_lowercase().contains("eero"))
+                    .unwrap_or(false)
+                    || device
+                        .hostname
+                        .as_deref()
+                        .map(|h| h.to_ascii_lowercase().contains("eero"))
+                        .unwrap_or(false)
+                    || device
+                        .vendor
+                        .as_deref()
+                        .map(|v| v.eq_ignore_ascii_case("eero inc."))
+                        .unwrap_or(false)
+                    || oui_vendor
+                        .as_deref()
+                        .map(|v| v.eq_ignore_ascii_case("eero inc."))
+                        .unwrap_or(false);
+                if (!is_eero || desc.to_ascii_lowercase().contains("eero"))
+                    && device.system_description.as_ref() != Some(desc)
+                {
+                    device.system_description = Some(desc.clone());
+                    updated += 1;
+                }
             }
 
             // Update timestamp
@@ -843,7 +951,10 @@ impl DeviceTracker {
             let _ = self.save_to_csv();
         }
 
-        self.dirty_devices.lock().unwrap().insert(mac.to_string());
+        self.dirty_devices
+            .lock()
+            .unwrap()
+            .insert(target_mac.to_string());
 
         updated
     }
@@ -1033,6 +1144,10 @@ impl DeviceTracker {
             return Some("Rachio");
         }
 
+        if hostname.contains("eero") {
+            return Some("eero inc.");
+        }
+
         if hostname.contains("lenovo")
             || hostname.contains("legion")
             || hostname.contains("thinkpad")
@@ -1174,6 +1289,10 @@ impl DeviceTracker {
 
         if hostname.contains("rachio") {
             return Some("Smart Watering Device");
+        }
+
+        if hostname.contains("eero") {
+            return Some("Router");
         }
 
         if hostname.contains("lenovo")
@@ -1372,6 +1491,9 @@ impl DeviceTracker {
             if s.contains("nvstream") {
                 return Some("NVIDIA".to_string());
             }
+            if s.contains("eero") {
+                return Some("eero inc.".to_string());
+            }
             if !is_peripheral
                 && (s.contains("airplay")
                     || s.contains("airdrop")
@@ -1468,6 +1590,9 @@ impl DeviceTracker {
             }
             if s.contains("amzn-wplay") {
                 return Some("Fire TV".to_string());
+            }
+            if s.contains("eero") {
+                return Some("Router".to_string());
             }
             if s.contains("_printer")
                 || s.contains("_ipp")

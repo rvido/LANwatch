@@ -464,6 +464,14 @@
             <span class="stat-label">IP Cameras</span>
             <span class="stat-value" id="stat-cctv">0</span>
         </div>
+        <div class="stat-card" onclick="selectCategory('mobile', false)">
+            <span class="stat-label">Mobile Devices</span>
+            <span class="stat-value" id="stat-mobile">0</span>
+        </div>
+        <div class="stat-card" onclick="selectCategory('infrastructure', false)">
+            <span class="stat-label">Computers & Network</span>
+            <span class="stat-value" id="stat-infra">0</span>
+        </div>
     </div>
 
     <div class="controls">
@@ -550,6 +558,12 @@
             if (category === 'cctv') {
                 return type.includes("camera") || type.includes("cctv") || type.includes("video");
             }
+            if (category === 'mobile') {
+                return type.includes("phone") || type.includes("tablet") || type.includes("mobile") || type.includes("ipad") || type.includes("iphone") || type.includes("watch");
+            }
+            if (category === 'infrastructure') {
+                return type.includes("router") || type.includes("switch") || type.includes("ap") || type.includes("gateway") || type.includes("pc") || type.includes("laptop") || type.includes("computer") || type.includes("mac") || type.includes("windows") || type.includes("linux") || type.includes("network");
+            }
             return false;
         }
 
@@ -562,7 +576,9 @@
                     (index === 0 && category === 'all') ||
                     (index === 1 && category === 'iot') ||
                     (index === 2 && category === 'media') ||
-                    (index === 3 && category === 'cctv');
+                    (index === 3 && category === 'cctv') ||
+                    (index === 4 && category === 'mobile') ||
+                    (index === 5 && category === 'infrastructure');
                 if (isMatched) {
                     card.classList.add('active');
                 } else {
@@ -662,16 +678,20 @@
         function renderStats() {
             document.getElementById('stat-total').textContent = devicesData.length;
             
-            let iot = 0, media = 0, cctv = 0;
+            let iot = 0, media = 0, cctv = 0, mobile = 0, infra = 0;
             devicesData.forEach(d => {
                 if (matchesCategory(d, 'iot')) iot++;
                 else if (matchesCategory(d, 'media')) media++;
                 else if (matchesCategory(d, 'cctv')) cctv++;
+                else if (matchesCategory(d, 'mobile')) mobile++;
+                else if (matchesCategory(d, 'infrastructure')) infra++;
             });
 
             document.getElementById('stat-iot').textContent = iot;
             document.getElementById('stat-media').textContent = media;
             document.getElementById('stat-cctv').textContent = cctv;
+            document.getElementById('stat-mobile').textContent = mobile;
+            document.getElementById('stat-infra').textContent = infra;
         }
 
         function renderDevices() {

@@ -779,6 +779,120 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "mdns")]
+    fn test_device_tracker_mdns_proxy_reflector_no_pollution() {
+        let temp_path = "/tmp/lanwatch_test_eero_mdns_reflector.csv";
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+
+        let mut tracker = DeviceTracker::new(temp_path).unwrap();
+        let mut registry = OuiRegistry::new();
+        registry.add("dc:69:b5", "eero inc.");
+        tracker.set_oui_registry(registry);
+
+        // Pre-populate router (Eero) and a tracked device (HP printer)
+        let router_mac = "dc:69:b5:95:58:b2";
+        let router_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 7, 1));
+        let mut router_device = DeviceInfo::new(router_mac.to_string(), router_ip, Some("eero-02j6".to_string()));
+        router_device.vendor = Some("eero inc.".to_string());
+        router_device.device_type = Some("Router".to_string());
+        tracker.devices.insert(router_mac.to_string(), router_device);
+
+        let printer_mac = "00:11:22:33:44:55";
+        let printer_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 7, 50));
+        let printer_device = DeviceInfo::new(printer_mac.to_string(), printer_ip, None);
+        tracker.devices.insert(printer_mac.to_string(), printer_device);
+
+        // Create an mDNS packet representing a proxied advertisement for the HP printer
+        // sent from the Eero router's MAC/IP, but with target IPs in the records
+        let packet = MdnsPacket {
+            source_mac: router_mac.to_string(),
+            source_ip: router_ip,
+            dest_ip: IpAddr::V4(Ipv4Addr::new(224, 0, 0, 251)),
+            transaction_id: 42,
+            is_response: true,
+            questions: vec![],
+            answers: vec![
+                MdnsRecord {
+                    name: "HP-Printer.local".to_string(),
+                    record_type: MdnsRecordType::A,
+                    ttl: 120,
+                    data: MdnsRecordData::A(Ipv4Addr::new(192, 168, 7, 50)),
+                },
+                MdnsRecord {
+                    name: "_printer._tcp.local".to_string(),
+                    record_type: MdnsRecordType::Ptr,
+                    ttl: 120,
+                    data: MdnsRecordData::Ptr("HP-Printer.local".to_string()),
+                },
+                MdnsRecord {
+                    name: "HP-Printer.local".to_string(),
+                    record_type: MdnsRecordType::Txt,
+                    ttl: 120,
+                    data: MdnsRecordData::Txt(vec!["model=HP OfficeJet".to_string()]),
+                },
+            ],
+            authority: vec![],
+            additional: vec![],
+        };
+
+        // Update should succeed and return some changes
+        let changes = tracker.update_from_mdns(&packet);
+        assert!(changes > 0, "mDNS update should successfully process proxied info");
+
+        // Verify the printer device was updated
+        let printer = tracker.devices().get(printer_mac).unwrap();
+        assert_eq!(printer.hostname.as_deref(), Some("HP-Printer"));
+        assert_eq!(printer.vendor.as_deref(), Some("HP"));
+        assert_eq!(printer.device_type.as_deref(), Some("Printer"));
+
+        // Verify the Eero router was NOT polluted or updated by the printer's mDNS records
+        let router = tracker.devices().get(router_mac).unwrap();
+        assert_eq!(router.hostname.as_deref(), Some("eero-02j6"));
+        assert_eq!(router.vendor.as_deref(), Some("eero inc."));
+        assert_eq!(router.device_type.as_deref(), Some("Router"));
+        assert!(!router.services.iter().any(|s| s == "_printer._tcp"));
+
+        // Test a proxied packet for an UNTRACKED IP - should be ignored to avoid pollution
+        let untracked_packet = MdnsPacket {
+            source_mac: router_mac.to_string(),
+            source_ip: router_ip,
+            dest_ip: IpAddr::V4(Ipv4Addr::new(224, 0, 0, 251)),
+            transaction_id: 43,
+            is_response: true,
+            questions: vec![],
+            answers: vec![
+                MdnsRecord {
+                    name: "Rachio-188DCC.local".to_string(),
+                    record_type: MdnsRecordType::A,
+                    ttl: 120,
+                    data: MdnsRecordData::A(Ipv4Addr::new(192, 168, 7, 99)),
+                },
+                MdnsRecord {
+                    name: "Rachio-188DCC.local".to_string(),
+                    record_type: MdnsRecordType::Txt,
+                    ttl: 120,
+                    data: MdnsRecordData::Txt(vec!["model=Rachio-188DCC".to_string()]),
+                },
+            ],
+            authority: vec![],
+            additional: vec![],
+        };
+
+        let changes_untracked = tracker.update_from_mdns(&untracked_packet);
+        assert_eq!(changes_untracked, 0, "untracked proxy packets should be ignored");
+
+        // Verify again that the Eero router has not been polluted
+        let router_after = tracker.devices().get(router_mac).unwrap();
+        assert_eq!(router_after.vendor.as_deref(), Some("eero inc."));
+        assert_eq!(router_after.device_type.as_deref(), Some("Router"));
+        assert_ne!(router_after.system_description.as_deref(), Some("Rachio-188DCC"));
+
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+    }
+
+    #[test]
     #[cfg(feature = "ssdp")]
     fn test_device_tracker_uses_oui_for_eero_in_ssdp_when_no_vendor_present() {
         let temp_path = "/tmp/lanwatch_test_eero_ssdp_oui.csv";
