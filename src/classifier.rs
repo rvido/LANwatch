@@ -5,7 +5,14 @@
 
 /// Detect vendor from hostname patterns
 pub fn detect_vendor_from_hostname(hostname: Option<&str>) -> Option<&'static str> {
-    let hostname = hostname?.to_lowercase();
+    let hostname_val = hostname?;
+    let owned_holder;
+    let hostname = if hostname_val.bytes().any(|b| b.is_ascii_uppercase()) {
+        owned_holder = hostname_val.to_ascii_lowercase();
+        owned_holder.as_str()
+    } else {
+        hostname_val
+    };
 
     if hostname.contains("roborock") {
         return Some("Roborock");
@@ -13,6 +20,10 @@ pub fn detect_vendor_from_hostname(hostname: Option<&str>) -> Option<&'static st
 
     if hostname.contains("rachio") {
         return Some("Rachio");
+    }
+
+    if hostname.contains("eero") {
+        return Some("eero inc.");
     }
 
     if hostname.contains("lenovo")
@@ -140,7 +151,14 @@ pub fn detect_vendor_from_hostname(hostname: Option<&str>) -> Option<&'static st
 
 /// Detect device type from hostname patterns
 pub fn detect_device_type_from_hostname(hostname: Option<&str>) -> Option<&'static str> {
-    let hostname = hostname?.to_lowercase();
+    let hostname_val = hostname?;
+    let owned_holder;
+    let hostname = if hostname_val.bytes().any(|b| b.is_ascii_uppercase()) {
+        owned_holder = hostname_val.to_ascii_lowercase();
+        owned_holder.as_str()
+    } else {
+        hostname_val
+    };
 
     if hostname.contains("roborock") {
         return Some("Smart Cleaning Device");
@@ -148,6 +166,10 @@ pub fn detect_device_type_from_hostname(hostname: Option<&str>) -> Option<&'stat
 
     if hostname.contains("rachio") {
         return Some("Smart Watering Device");
+    }
+
+    if hostname.contains("eero") {
+        return Some("Router");
     }
 
     if hostname.contains("lenovo")
