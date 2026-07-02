@@ -438,7 +438,7 @@ When the `mdns` feature is enabled, the tool can capture mDNS traffic to discove
 
 **Passive mode** (`--mdns`): Captures mDNS announcements as devices broadcast them.
 
-**Active mode** (`--mdns-query`): Also sends multicast queries for common services:
+**Active mode** (`--mdns-query`): Also sends multicast queries for common services. To prevent multicast leakage over WAN ports on multi-homed hosts and routers, LANwatch queries the local IPv4 address of the specified network interface and binds the outgoing query sockets directly to it. Common queried services include:
 - `_http._tcp.local` - Web servers
 - `_airplay._tcp.local` - Apple AirPlay devices
 - `_googlecast._tcp.local` - Chromecast devices
@@ -458,7 +458,7 @@ When the `ssdp` feature is enabled, the tool can capture SSDP (Simple Service Di
 
 **Passive mode** (`--ssdp` or `--upnp`): Listens for SSDP announcements (NOTIFY messages and responses).
 
-**Active mode** (`--ssdp-query`): Also sends M-SEARCH discovery probes for:
+**Active mode** (`--ssdp-query`): Also sends M-SEARCH discovery probes. Similar to active mDNS, the outgoing socket binds directly to the local interface IPv4 address to prevent queries from leaking onto the WAN interface:
 - `ssdp:all` - All SSDP devices
 - `upnp:rootdevice` - All UPnP root devices
 - MediaServer and MediaRenderer devices
@@ -585,6 +585,18 @@ A `Makefile` is provided to simplify common development, testing, linting, and d
     ```bash
     make help
     ```
+
+## Performance Tuning & Optimizations
+
+LANwatch includes several configurations and design patterns to maximize execution speed and scalability on hotpaths under high network traffic:
+
+*   **Host-Specific CPU Optimizations (`target-cpu=native`)**: Configured globally in `.cargo/config.toml` to compile LANwatch utilizing all instruction set extensions (AVX2, SSE4.2, NEON, etc.) supported by your local CPU, allowing LLVM to perform advanced loop vectorization and unrolling.
+*   **Zero-Allocation Hostname Classification**: Device classification in the parser loops avoids heap allocations for case conversion.
+*   **Dynamic Allocator Swap**: For concurrent HTTP API and high-traffic packet capture, you can preload lock-free allocators (`mimalloc` or `jemalloc`) dynamically without altering code:
+    ```bash
+    LD_PRELOAD=/usr/lib/libmimalloc.so ./target/release/lanwatch eth0 --api
+    ```
+*   **Global Customization Skills**: Standard optimization and test coverage configurations can be invoked using the global skills `/home/richard/.gemini/config/skills/senior_performance_engineer/` and `/home/richard/.gemini/config/skills/rust_coverage/`.
 
 ## Dependencies
 
