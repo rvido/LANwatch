@@ -3,6 +3,7 @@
 [![CI](https://github.com/rvido/lanwatch/actions/workflows/ci.yml/badge.svg)](https://github.com/rvido/lanwatch/actions/workflows/ci.yml)
 [![License: MIT/Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
 [![GitHub stars](https://img.shields.io/github/stars/rvido/lanwatch.svg)](https://github.com/rvido/lanwatch/stargazers)
+[![codecov](https://codecov.io/github/rvido/LANwatch/graph/badge.svg?token=XRZYW0IPS9)](https://codecov.io/github/rvido/LANwatch)
 
 ![LANwatch Logo](assets/lanwatch_logo.jpg)
 
