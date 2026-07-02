@@ -143,7 +143,8 @@ fn main() {
     #[cfg(feature = "mdns")]
     if config.enable_mdns && config.mdns_query {
         println!("Sending mDNS queries for service discovery...");
-        if let Ok(querier) = MdnsQuerier::new()
+        let interface_ip = lanwatch::get_interface_ipv4(&config.interface_name);
+        if let Ok(querier) = MdnsQuerier::new(interface_ip)
             && let Err(e) = querier.query_common_services()
         {
             eprintln!("Warning: Failed to send mDNS queries: {}", e);
@@ -154,7 +155,8 @@ fn main() {
     #[cfg(feature = "ssdp")]
     if config.enable_ssdp && config.ssdp_query {
         println!("Sending SSDP M-SEARCH discovery probes...");
-        if let Ok(querier) = SsdpQuerier::new()
+        let interface_ip = lanwatch::get_interface_ipv4(&config.interface_name);
+        if let Ok(querier) = SsdpQuerier::new(interface_ip)
             && let Err(e) = querier.search_common_devices()
         {
             eprintln!("Warning: Failed to send SSDP queries: {}", e);

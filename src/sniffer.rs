@@ -60,6 +60,19 @@ pub fn find_interface(name: &str) -> Option<NetworkInterface> {
         .find(|iface| iface.name == name)
 }
 
+/// Returns the first IPv4 address associated with the network interface.
+pub fn get_interface_ipv4(name: &str) -> Option<std::net::Ipv4Addr> {
+    find_interface(name).and_then(|iface| {
+        iface.ips.into_iter().find_map(|ip_net| {
+            if let std::net::IpAddr::V4(ipv4) = ip_net.ip() {
+                Some(ipv4)
+            } else {
+                None
+            }
+        })
+    })
+}
+
 /// Processes a raw Ethernet frame and extracts a DHCP event (v4 or v6) if present.
 ///
 /// # Arguments

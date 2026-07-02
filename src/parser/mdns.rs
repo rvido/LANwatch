@@ -837,11 +837,12 @@ pub struct MdnsQuerier {
 }
 
 impl MdnsQuerier {
-    /// Creates a new mDNS querier and binds a UDP socket.
-    pub fn new() -> std::io::Result<Self> {
+    /// Creates a new mDNS querier and binds a UDP socket, optionally targeting a specific local interface IP.
+    pub fn new(interface_ip: Option<std::net::Ipv4Addr>) -> std::io::Result<Self> {
         use std::net::{Ipv4Addr, SocketAddrV4};
 
-        let socket = std::net::UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))?;
+        let bind_ip = interface_ip.unwrap_or(Ipv4Addr::UNSPECIFIED);
+        let socket = std::net::UdpSocket::bind(SocketAddrV4::new(bind_ip, 0))?;
 
         // Set multicast TTL
         socket.set_multicast_ttl_v4(255)?;

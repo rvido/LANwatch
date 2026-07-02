@@ -2033,7 +2033,7 @@ mod tests {
     #[cfg(feature = "ssdp")]
     fn test_ssdp_querier_new() {
         // Test that SsdpQuerier can be created
-        let result = SsdpQuerier::new();
+        let result = SsdpQuerier::new(None);
         assert!(result.is_ok(), "SsdpQuerier::new() should succeed");
     }
 
@@ -3471,5 +3471,64 @@ mod tests {
 
         let _ = std::fs::remove_file(temp_path);
         let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+    }
+
+    #[test]
+    #[cfg(any(feature = "mdns", feature = "ssdp"))]
+    fn test_direct_parse_arp_packet() {
+        use crate::parser::network::parse_arp_packet;
+        let mut arp_payload = vec![0u8; 28];
+        // Hardware type: Ethernet (1)
+        arp_payload[0..2].copy_from_slice(&[0x00, 0x01]);
+        // Protocol type: IPv4 (0x0800)
+        arp_payload[2..4].copy_from_slice(&[0x08, 0x00]);
+        // Hardware size (6), Protocol size (4)
+        arp_payload[4] = 6;
+        arp_payload[5] = 4;
+        // Opcode: Reply (2)
+        arp_payload[6..8].copy_from_slice(&[0x00, 0x02]);
+        // Sender MAC: 00:11:22:33:44:55
+        arp_payload[8..14].copy_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+        // Sender IP: 192.168.1.10
+        arp_payload[14..18].copy_from_slice(&[192, 168, 1, 10]);
+
+        let result = parse_arp_packet(&arp_payload);
+        assert!(result.is_some());
+        let (mac, ip) = result.unwrap();
+        assert_eq!(mac, "00:11:22:33:44:55");
+        assert_eq!(ip, std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 10)));
+
+        // Test invalid packet
+        let invalid = vec![0u8; 5];
+        assert!(parse_arp_packet(&invalid).is_none());
+        
+        // Test invalid operation opcode (e.g. 0)
+        arp_payload[7] = 0;
+        assert!(parse_arp_packet(&arp_payload).is_none());
+    }
+
+    #[test]
+    #[cfg(any(feature = "mdns", feature = "ssdp"))]
+    fn test_direct_parse_ndp_packet() {
+        use crate::parser::network::parse_ndp_packet;
+        let ndp_payload = vec![135, 0, 0, 0, 0, 0, 0, 0]; // type 135 (solicitation)
+        let source_ip = std::net::Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
+        let result = parse_ndp_packet(&ndp_payload, source_ip, "00:11:22:33:44:55".to_string());
+        assert!(result.is_some());
+        let (mac, ip) = result.unwrap();
+        assert_eq!(mac, "00:11:22:33:44:55");
+        assert_eq!(ip, std::net::IpAddr::V6(source_ip));
+
+        // Test invalid payload size
+        let invalid = vec![135, 0];
+        assert!(parse_ndp_packet(&invalid, source_ip, "00:11:22:33:44:55".to_string()).is_none());
+
+        // Test invalid ICMPv6 type (e.g. 1)
+        let invalid_type = vec![1, 0, 0, 0, 0, 0, 0, 0];
+        assert!(parse_ndp_packet(&invalid_type, source_ip, "00:11:22:33:44:55".to_string()).is_none());
+
+        // Test unspecified source IP
+        let unspecified = std::net::Ipv6Addr::UNSPECIFIED;
+        assert!(parse_ndp_packet(&ndp_payload, unspecified, "00:11:22:33:44:55".to_string()).is_none());
     }
 }
