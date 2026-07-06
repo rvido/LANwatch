@@ -125,7 +125,7 @@ The tool saves detected devices to an embedded **SQLite** database file. The sch
 - **services**: Semicolon-separated list of mDNS services (requires `mdns` feature)
 - **system_description**: Detailed hardware or system description parsed from link-layer protocols (e.g., LLDP system descriptions or CDP software versions)
 
-Database writes are executed in transactions using single-row transactional upserts, eliminating write-amplification and improving write efficiency to $O(1)$ performance. Reads are concurrent and lock-free thanks to WAL mode.
+Database writes are executed in transactions using single-row transactional upserts, eliminating write-amplification and improving write efficiency to O(1) performance. Reads are concurrent and lock-free thanks to WAL mode.
 
 ### mDNS Service Identification
 
@@ -592,8 +592,8 @@ A `Makefile` is provided to simplify common development, testing, linting, and d
 LANwatch includes several configurations and design patterns to maximize execution speed and scalability on hotpaths under high network traffic:
 
 *   **Host-Specific CPU Optimizations (`target-cpu=native`)**: Configured globally in `.cargo/config.toml` to compile LANwatch utilizing all instruction set extensions (AVX2, SSE4.2, NEON, etc.) supported by your local CPU, allowing LLVM to perform advanced loop vectorization and unrolling.
-*   **O(1) Transactional Database Updates**: Migrated the storage backend from full-file serializations to SQLite with Write-Ahead Logging (WAL), reducing write amplification from $O(N)$ full file rewrites to $O(1)$ single-row updates.
-*   **O(log N) Indexed Sorting**: Refactored the REST API query engine to run paginated, pre-sorted index scans inside SQLite directly rather than cloning and sorting the entire registry in-memory, cutting memory overhead to $O(\text{page\_size})$ and sorting to $O(\log N)$.
+*   **O(1) Transactional Database Updates**: Migrated the storage backend from full-file serializations to SQLite with Write-Ahead Logging (WAL), reducing write amplification from O(N) full file rewrites to O(1) single-row updates.
+*   **O(log N) Indexed Sorting**: Refactored the REST API query engine to run paginated, pre-sorted index scans inside SQLite directly rather than cloning and sorting the entire registry in-memory, cutting memory overhead to O(page_size) and sorting to O(log N).
 *   **Zero-Allocation Hostname Classification**: Device classification in the parser loops avoids heap allocations for case conversion.
 *   **Dynamic Allocator Swap**: For concurrent HTTP API and high-traffic packet capture, you can preload lock-free allocators (`mimalloc` or `jemalloc`) dynamically without altering code:
     ```bash
