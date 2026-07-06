@@ -607,10 +607,16 @@ mod tests {
         let temp_path = "/tmp/lanwatch_test_rachio_reclassify.csv";
         let _ = std::fs::remove_file(temp_path);
 
-        let seeded = "first_seen,last_seen,mac_address,ip_address,ipv6_address,hostname,device_type,vendor,services\n2026-05-22T16:50:19Z,2026-05-22T23:52:20Z,9c:50:d1:18:8d:cc,192.168.4.36,\"\",\"rachio-188dcc\",\"Security Camera\",\"Murata Manufacturing Co., Ltd.\",\"\"\n";
-        std::fs::write(temp_path, seeded).unwrap();
-
         let mut tracker = DeviceTracker::new(temp_path).unwrap();
+        let mut device = DeviceInfo::new(
+            "9c:50:d1:18:8d:cc".to_string(),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 4, 36)),
+            Some("rachio-188dcc".to_string()),
+        );
+        device.device_type = Some("Security Camera".to_string());
+        device.vendor = Some("Murata Manufacturing Co., Ltd.".to_string());
+        tracker.devices.insert(device.mac_address.clone(), device);
+
         let mut registry = OuiRegistry::new();
         registry.add("9c:50:d1", "Murata Manufacturing Co., Ltd.");
         tracker.set_oui_registry(registry);
@@ -644,10 +650,17 @@ mod tests {
         let temp_path = "/tmp/lanwatch_test_rachio_google_reclassify.csv";
         let _ = std::fs::remove_file(temp_path);
 
-        let seeded = "first_seen,last_seen,mac_address,ip_address,ipv6_address,hostname,device_type,vendor,services\n2026-05-22T16:50:19Z,2026-05-22T23:52:20Z,9c:50:d1:18:8d:cc,192.168.4.36,\"\",\"rachio-188dcc\",\"Thermostat\",\"Google\",\"_hap._tcp\"\n";
-        std::fs::write(temp_path, seeded).unwrap();
-
         let mut tracker = DeviceTracker::new(temp_path).unwrap();
+        let mut device = DeviceInfo::new(
+            "9c:50:d1:18:8d:cc".to_string(),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 4, 36)),
+            Some("rachio-188dcc".to_string()),
+        );
+        device.device_type = Some("Thermostat".to_string());
+        device.vendor = Some("Google".to_string());
+        device.services.push("_hap._tcp".to_string());
+        tracker.devices.insert(device.mac_address.clone(), device);
+
         let mut registry = OuiRegistry::new();
         registry.add("9c:50:d1", "Murata Manufacturing Co., Ltd.");
         tracker.set_oui_registry(registry);
@@ -681,10 +694,16 @@ mod tests {
         let temp_path = "/tmp/lanwatch_test_roborock_reclassify.csv";
         let _ = std::fs::remove_file(temp_path);
 
-        let seeded = "first_seen,last_seen,mac_address,ip_address,ipv6_address,hostname,device_type,vendor,services\n2026-05-22T16:50:19Z,2026-05-22T23:52:20Z,b0:4a:39:e3:3f:da,192.168.7.193,\"\",\"roborock-vacuum-a75\",\"Security Camera\",\"Beijing Roborock Technology Co., Ltd.\",\"\"\n";
-        std::fs::write(temp_path, seeded).unwrap();
-
         let mut tracker = DeviceTracker::new(temp_path).unwrap();
+        let mut device = DeviceInfo::new(
+            "b0:4a:39:e3:3f:da".to_string(),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 7, 193)),
+            Some("roborock-vacuum-a75".to_string()),
+        );
+        device.device_type = Some("Security Camera".to_string());
+        device.vendor = Some("Beijing Roborock Technology Co., Ltd.".to_string());
+        tracker.devices.insert(device.mac_address.clone(), device);
+
         let mut registry = OuiRegistry::new();
         registry.add("b0:4a:39", "Beijing Roborock Technology Co., Ltd.");
         tracker.set_oui_registry(registry);
@@ -2921,19 +2940,23 @@ mod tests {
             );
 
             // Read the main file to verify the old IP is still there in the saved file (since we haven't flushed yet)
-            let saved_bytes = std::fs::read(temp_path).unwrap();
-            let saved_devices: std::collections::HashMap<String, DeviceInfo> = postcard::from_bytes(&saved_bytes).unwrap();
-            let saved_device = saved_devices.get("00:11:22:33:44:55").unwrap();
-            assert_eq!(saved_device.ip_address, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)));
+            {
+                let conn = rusqlite::Connection::open(temp_path).unwrap();
+                let mut stmt = conn.prepare("SELECT ip_address FROM devices WHERE mac_address = '00:11:22:33:44:55'").unwrap();
+                let saved_ip: String = stmt.query_row([], |row| row.get(0)).unwrap();
+                assert_eq!(saved_ip, "192.168.1.100");
+            }
 
             // Flush to save the updated state
             tracker.flush_to_csv().unwrap();
 
             // Verify that after flushing, the file has the updated IP
-            let saved_bytes2 = std::fs::read(temp_path).unwrap();
-            let saved_devices2: std::collections::HashMap<String, DeviceInfo> = postcard::from_bytes(&saved_bytes2).unwrap();
-            let saved_device2 = saved_devices2.get("00:11:22:33:44:55").unwrap();
-            assert_eq!(saved_device2.ip_address, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 101)));
+            {
+                let conn = rusqlite::Connection::open(temp_path).unwrap();
+                let mut stmt = conn.prepare("SELECT ip_address FROM devices WHERE mac_address = '00:11:22:33:44:55'").unwrap();
+                let saved_ip2: String = stmt.query_row([], |row| row.get(0)).unwrap();
+                assert_eq!(saved_ip2, "192.168.1.101");
+            }
         }
 
         let _ = std::fs::remove_file(temp_path);

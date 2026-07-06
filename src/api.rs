@@ -179,10 +179,9 @@ impl ApiServer {
                 return Ok(Arc::clone(&cache_entry.devices));
             }
 
-            // Rebuild sorted device list from the tracker
+            // Rebuild sorted device list from the tracker using SQL indexed query
             if let Ok(tracker) = self.tracker.read() {
-                let mut devices: Vec<DeviceInfo> = tracker.devices().values().cloned().collect();
-                devices.sort_by_key(|device| std::cmp::Reverse(device.last_seen));
+                let devices = tracker.get_devices_sorted();
                 let devices_arc = Arc::new(devices);
                 *guard = Some(SortedDevicesCache {
                     devices: Arc::clone(&devices_arc),

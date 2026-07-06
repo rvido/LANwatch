@@ -7,8 +7,9 @@ use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
 use std::sync::Mutex;
-#[cfg(any(feature = "mdns", feature = "ssdp"))]
 use std::time::SystemTime;
+
+use rusqlite::{Connection, params};
 
 use crate::device::{DeviceInfo, normalize_device_identifier, sanitize_hostname};
 use crate::oui::OuiRegistry;
@@ -27,7 +28,7 @@ use crate::types::{CdpPacket, LldpPacket};
 // Imports from dhcp parser module for helper functions
 use crate::parser::dhcp::{extract_mac_from_duid, format_duid_identifier};
 
-/// Device tracker that maintains a list of seen devices and saves to CSV
+/// Device tracker that maintains a list of seen devices and saves to SQLite
 pub struct DeviceTracker {
     pub(crate) devices: HashMap<String, DeviceInfo>,
     pub(crate) csv_path: String,
@@ -38,27 +39,61 @@ pub struct DeviceTracker {
     pub(crate) service_registry: Option<MdnsServiceRegistry>,
     /// Track updated MAC addresses for incremental journal flushes
     pub(crate) dirty_devices: Mutex<HashSet<String>>,
+    /// SQLite database connection
+    pub(crate) conn: Mutex<Connection>,
 }
 
 impl DeviceTracker {
-    /// Creates a new device tracker, loading existing data from the specified CSV file.
+    /// Creates a new device tracker, loading existing data from the specified SQLite database file.
     ///
     /// # Arguments
-    /// * `csv_path` - The path to the file used for persistence.
+    /// * `csv_path` - The path to the database file used for persistence.
     pub fn new<P: AsRef<Path>>(csv_path: P) -> std::io::Result<Self> {
-        let csv_path = csv_path.as_ref().to_string_lossy().to_string();
+        let csv_path_str = csv_path.as_ref().to_string_lossy().to_string();
+
+        let conn = Connection::open(&csv_path_str)
+            .map_err(|e| std::io::Error::other(format!("Failed to open SQLite database: {}", e)))?;
+
+        // Enable WAL mode and normal synchronous writes
+        let _ = conn.execute("PRAGMA journal_mode = WAL;", []);
+        let _ = conn.execute("PRAGMA synchronous = NORMAL;", []);
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS devices (
+                mac_address TEXT PRIMARY KEY,
+                ip_address TEXT NOT NULL,
+                ipv6_address TEXT,
+                ipv6_addresses TEXT,
+                hostname TEXT,
+                system_description TEXT,
+                services TEXT,
+                vendor TEXT,
+                device_type TEXT,
+                first_seen TEXT NOT NULL,
+                last_seen TEXT NOT NULL
+            );",
+            [],
+        )
+        .map_err(|e| std::io::Error::other(format!("Failed to create SQLite schema: {}", e)))?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_devices_last_seen ON devices(last_seen DESC);",
+            [],
+        )
+        .map_err(|e| std::io::Error::other(format!("Failed to create SQLite index: {}", e)))?;
+
         let mut tracker = Self {
             devices: HashMap::new(),
-            csv_path,
+            csv_path: csv_path_str,
             auto_save: true,
             oui_registry: None,
             #[cfg(feature = "mdns")]
             service_registry: None,
             dirty_devices: Mutex::new(HashSet::new()),
+            conn: Mutex::new(conn),
         };
 
-        // Load existing data if file exists
-        tracker.load_from_csv()?;
+        tracker.load_from_db()?;
 
         Ok(tracker)
     }
@@ -85,119 +120,246 @@ impl DeviceTracker {
         self.service_registry.as_ref()
     }
 
-    /// Load devices from existing database file (supports Postcard binary format and falls back to legacy CSV)
-    fn load_from_csv(&mut self) -> std::io::Result<()> {
-        let path = Path::new(&self.csv_path);
-        if !path.exists() {
-            return Ok(());
-        }
+    /// Load devices from existing SQLite database file
+    fn load_from_db(&mut self) -> std::io::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT mac_address, ip_address, ipv6_address, ipv6_addresses, hostname,
+                    system_description, services, vendor, device_type, first_seen, last_seen
+             FROM devices;",
+            )
+            .map_err(std::io::Error::other)?;
 
-        let bytes = std::fs::read(path)?;
-        if bytes.is_empty() {
-            return Ok(());
-        }
+        let device_iter = stmt
+            .query_map([], |row| {
+                let mac_address: String = row.get(0)?;
+                let ip_address_str: String = row.get(1)?;
+                let ipv6_address_str: Option<String> = row.get(2)?;
+                let ipv6_addresses_str: Option<String> = row.get(3)?;
+                let hostname: Option<String> = row.get(4)?;
+                let system_description: Option<String> = row.get(5)?;
+                let services_str: Option<String> = row.get(6)?;
+                let vendor: Option<String> = row.get(7)?;
+                let device_type: Option<String> = row.get(8)?;
+                let first_seen_str: String = row.get(9)?;
+                let last_seen_str: String = row.get(10)?;
 
-        // Check if the file starts with CSV headers (first_seen, last_seen, etc.)
-        let is_csv = bytes.starts_with(b"first_seen,")
-            || bytes.starts_with(b"timestamp,")
-            || bytes.starts_with(b"last_seen,");
-
-        if is_csv {
-            // Read as CSV (backward compatibility & migration)
-            let content = std::str::from_utf8(&bytes)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            for line in content.lines() {
-                if line.starts_with("timestamp,")
-                    || line.starts_with("last_seen,")
-                    || line.starts_with("first_seen,")
-                {
-                    continue;
-                }
-                if let Some(device) = DeviceInfo::from_csv_line(line) {
-                    self.devices.insert(device.mac_address.clone(), device);
-                }
-            }
-            // Migrate immediately to the new postcard format
-            self.save_to_csv()?;
-        } else {
-            // Read as Postcard binary
-            match postcard::from_bytes::<HashMap<String, DeviceInfo>>(&bytes) {
-                Ok(mut devices) => {
-                    for device in devices.values_mut() {
-                        if device.ipv6_addresses.is_empty()
-                            && let Some(IpAddr::V6(v6)) = device.ipv6_address
-                        {
-                            device.ipv6_addresses.push(v6);
+                let ip_address: IpAddr = ip_address_str
+                    .parse()
+                    .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+                let ipv6_address: Option<IpAddr> = ipv6_address_str.and_then(|s| s.parse().ok());
+                let mut ipv6_addresses = Vec::new();
+                if let Some(s) = ipv6_addresses_str {
+                    for ip in s.split(';') {
+                        if let Ok(ipv6) = ip.parse() {
+                            ipv6_addresses.push(ipv6);
                         }
                     }
-                    self.devices = devices;
                 }
-                Err(e) => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("Failed to deserialize postcard database: {}", e),
-                    ));
-                }
-            }
-        }
 
-        // Clean up any old CSV journal file that might be lying around
-        let journal_path = format!("{}.journal", &self.csv_path);
-        let jpath = Path::new(&journal_path);
-        if jpath.exists() {
-            let _ = std::fs::remove_file(jpath);
+                let mut services = Vec::new();
+                if let Some(s) = services_str {
+                    for service in s.split(';') {
+                        if !service.is_empty() {
+                            services.push(service.to_string());
+                        }
+                    }
+                }
+
+                let first_seen =
+                    crate::device::parse_timestamp(&first_seen_str).unwrap_or_else(SystemTime::now);
+                let last_seen =
+                    crate::device::parse_timestamp(&last_seen_str).unwrap_or_else(SystemTime::now);
+
+                Ok(DeviceInfo {
+                    mac_address,
+                    ip_address,
+                    ipv6_address,
+                    ipv6_addresses,
+                    hostname,
+                    system_description,
+                    services,
+                    vendor,
+                    device_type,
+                    first_seen,
+                    last_seen,
+                })
+            })
+            .map_err(std::io::Error::other)?;
+
+        for device in device_iter.flatten() {
+            self.devices.insert(device.mac_address.clone(), device);
         }
 
         Ok(())
     }
 
-    /// Persists all current device information to the database file in Postcard format.
+    /// Persists all current device information to the SQLite database file.
     pub fn save_to_csv(&self) -> std::io::Result<()> {
-        // Write to a temp file and atomically replace to avoid partial writes
-        let tmp_path = format!("{}.tmp", &self.csv_path);
+        let dirty = {
+            let mut guard = self.dirty_devices.lock().unwrap();
+            std::mem::take(&mut *guard)
+        };
 
-        let bytes = postcard::to_stdvec(&self.devices).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Failed to serialize postcard database: {}", e),
-            )
-        })?;
+        if dirty.is_empty() {
+            return Ok(());
+        }
 
-        std::fs::write(&tmp_path, bytes)?;
-        std::fs::rename(tmp_path, &self.csv_path)?;
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn
+            .transaction()
+            .map_err(|e| std::io::Error::other(format!("Failed to start transaction: {}", e)))?;
 
-        // Clear dirty devices
-        self.dirty_devices.lock().unwrap().clear();
+        {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT INTO devices (
+                    mac_address, ip_address, ipv6_address, ipv6_addresses, hostname,
+                    system_description, services, vendor, device_type, first_seen, last_seen
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(mac_address) DO UPDATE SET
+                    ip_address = excluded.ip_address,
+                    ipv6_address = excluded.ipv6_address,
+                    ipv6_addresses = excluded.ipv6_addresses,
+                    hostname = excluded.hostname,
+                    system_description = excluded.system_description,
+                    services = excluded.services,
+                    vendor = excluded.vendor,
+                    device_type = excluded.device_type,
+                    last_seen = excluded.last_seen;",
+                )
+                .map_err(std::io::Error::other)?;
+
+            for mac in &dirty {
+                if let Some(device) = self.devices.get(mac) {
+                    let ip_address = device.ip_address.to_string();
+                    let ipv6_address = device.ipv6_address.map(|ip| ip.to_string());
+                    let ipv6_addresses = device
+                        .ipv6_addresses
+                        .iter()
+                        .map(|ip| ip.to_string())
+                        .collect::<Vec<_>>()
+                        .join(";");
+                    let services = device.services.join(";");
+                    let first_seen = crate::device::format_timestamp(device.first_seen);
+                    let last_seen = crate::device::format_timestamp(device.last_seen);
+
+                    stmt.execute(params![
+                        device.mac_address,
+                        ip_address,
+                        ipv6_address,
+                        ipv6_addresses,
+                        device.hostname,
+                        device.system_description,
+                        services,
+                        device.vendor,
+                        device.device_type,
+                        first_seen,
+                        last_seen,
+                    ])
+                    .map_err(|e| {
+                        std::io::Error::other(format!(
+                            "Failed to insert device {}: {}",
+                            device.mac_address, e
+                        ))
+                    })?;
+                }
+            }
+        }
+
+        tx.commit()
+            .map_err(|e| std::io::Error::other(format!("Failed to commit transaction: {}", e)))?;
 
         Ok(())
     }
 
     /// Enable or disable automatic writes on each update.
-    /// Disabled mode is intended for external batched flush pipelines.
     pub fn set_auto_save(&mut self, enabled: bool) {
         self.auto_save = enabled;
     }
 
     /// Explicitly flushes the current in-memory device state to the database file.
     pub fn flush_to_csv(&self) -> std::io::Result<()> {
-        let dirty = {
-            let mut guard = self.dirty_devices.lock().unwrap();
-            if guard.is_empty() {
-                return Ok(());
-            }
-            std::mem::take(&mut *guard)
+        self.save_to_csv()
+    }
+
+    /// Returns a vector of all tracked devices pre-sorted by `last_seen` descending from the SQL database.
+    pub fn get_devices_sorted(&self) -> Vec<DeviceInfo> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = match conn.prepare(
+            "SELECT mac_address, ip_address, ipv6_address, ipv6_addresses, hostname,
+                    system_description, services, vendor, device_type, first_seen, last_seen
+             FROM devices
+             ORDER BY last_seen DESC;",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
         };
 
-        if let Err(e) = self.save_to_csv() {
-            // Restore dirty flags if write failed
-            let mut guard = self.dirty_devices.lock().unwrap();
-            for mac in dirty {
-                guard.insert(mac);
-            }
-            return Err(e);
-        }
+        let device_iter = match stmt.query_map([], |row| {
+            let mac_address: String = row.get(0)?;
+            let ip_address_str: String = row.get(1)?;
+            let ipv6_address_str: Option<String> = row.get(2)?;
+            let ipv6_addresses_str: Option<String> = row.get(3)?;
+            let hostname: Option<String> = row.get(4)?;
+            let system_description: Option<String> = row.get(5)?;
+            let services_str: Option<String> = row.get(6)?;
+            let vendor: Option<String> = row.get(7)?;
+            let device_type: Option<String> = row.get(8)?;
+            let first_seen_str: String = row.get(9)?;
+            let last_seen_str: String = row.get(10)?;
 
-        Ok(())
+            let ip_address: IpAddr = ip_address_str
+                .parse()
+                .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+            let ipv6_address: Option<IpAddr> = ipv6_address_str.and_then(|s| s.parse().ok());
+            let mut ipv6_addresses = Vec::new();
+            if let Some(s) = ipv6_addresses_str {
+                for ip in s.split(';') {
+                    if let Ok(ipv6) = ip.parse() {
+                        ipv6_addresses.push(ipv6);
+                    }
+                }
+            }
+
+            let mut services = Vec::new();
+            if let Some(s) = services_str {
+                for service in s.split(';') {
+                    if !service.is_empty() {
+                        services.push(service.to_string());
+                    }
+                }
+            }
+
+            let first_seen =
+                crate::device::parse_timestamp(&first_seen_str).unwrap_or_else(SystemTime::now);
+            let last_seen =
+                crate::device::parse_timestamp(&last_seen_str).unwrap_or_else(SystemTime::now);
+
+            Ok(DeviceInfo {
+                mac_address,
+                ip_address,
+                ipv6_address,
+                ipv6_addresses,
+                hostname,
+                system_description,
+                services,
+                vendor,
+                device_type,
+                first_seen,
+                last_seen,
+            })
+        }) {
+            Ok(it) => it,
+            Err(_) => return Vec::new(),
+        };
+
+        let mut list = Vec::new();
+        for device in device_iter.flatten() {
+            list.push(device);
+        }
+        list
     }
 
     /// Updates the tracker state with information extracted from a DHCPv4 packet.
