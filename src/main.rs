@@ -22,7 +22,7 @@ use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const DEFAULT_DB_PATH: &str = "devices.bin";
+const DEFAULT_DB_PATH: &str = "devices.db";
 #[cfg(feature = "http-api")]
 const DEFAULT_API_ADDR: &str = "127.0.0.1:8080";
 const DEFAULT_OUI_DOWNLOAD_PATH: &str = "ieee-oui.txt";
