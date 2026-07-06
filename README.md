@@ -29,7 +29,7 @@ A Rust library and CLI tool for network device discovery and tracking via DHCP, 
 - **Media Server & Player Discovery**: Parses Plex GDM (Good Day Mate) XML/HTTP-like discovery broadcasts on UDP ports 32410, 32412, and 32414 to locate and identify Plex Media Servers and Players
 - **IP Camera & CCTV Discovery (Physical Security)**: Identifies physical security hardware by parsing Hikvision SADP (port 9999) XML discovery messages, Dahua discovery (port 37810) JSON payloads, and active RTSP (TCP port 554) video streams
 - **IEEE OUI Database**: Built-in vendor identification from MAC addresses using IEEE OUI (Organizationally Unique Identifier) prefixes (40,000+ entries)
-- **Device Tracking**: Automatically track detected devices and persist them using the fast, compact, and transactional-ready Postcard binary serialization format.
+- **Device Tracking & Persistence**: Automatically track detected devices and persist them to a high-performance embedded SQLite database (`devices.db`) with index-sorted queries and Write-Ahead Logging (WAL) for lock-free, concurrent reads and writes.
 - **HTTP API** (optional): Opt-in REST API server to query devices as JSON. (Requires the `http-api` feature.)
 - **Library API**: Use as a library in your own Rust projects
 - **CLI Tool**: Run as a standalone command-line tool
@@ -70,13 +70,13 @@ cargo build --release --all-features
 # List available interfaces
 sudo cargo run
 
-# Sniff DHCP traffic on a specific interface (saves to devices.bin by default)
+# Sniff DHCP traffic on a specific interface (saves to devices.db by default)
 sudo cargo run -- en0        # macOS
 sudo cargo run -- eth0       # Linux
 
 # Specify a custom output database file
-sudo cargo run -- en0 -o /path/to/devices.bin
-sudo cargo run -- en0 --output devices.bin
+sudo cargo run -- en0 -o /path/to/devices.db
+sudo cargo run -- en0 --output devices.db
 
 # Load additional OUI database entries
 sudo cargo run -- en0 --oui /path/to/oui.txt
@@ -101,7 +101,7 @@ sudo cargo run --features mdns -- en0 --mdns-query
 sudo cargo run --features ssdp -- en0 --ssdp-query
 
 # Combine all options
-sudo cargo run --all-features -- en0 -o devices.bin --api 0.0.0.0:8080 --mdns-query --ssdp-query -u oui.txt
+sudo cargo run --all-features -- en0 -o devices.db --api 0.0.0.0:8080 --mdns-query --ssdp-query -u oui.txt
 
 # Show help
 cargo run -- --help
@@ -111,7 +111,7 @@ cargo run -- --help
 
 ### Database Schema
 
-The tool saves detected devices to a high-performance binary database file using the **Postcard** serialization format. The schema contains the following fields:
+The tool saves detected devices to an embedded **SQLite** database file. The schema contains the following fields:
 
 - **first_seen**: ISO 8601 timestamp of first detection
 - **last_seen**: ISO 8601 timestamp of last DHCP/mDNS/LLDP activity
@@ -125,7 +125,7 @@ The tool saves detected devices to a high-performance binary database file using
 - **services**: Semicolon-separated list of mDNS services (requires `mdns` feature)
 - **system_description**: Detailed hardware or system description parsed from link-layer protocols (e.g., LLDP system descriptions or CDP software versions)
 
-The database is written atomically using a temporary file and renamed on successful write to prevent data corruption.
+Database writes are executed in transactions using single-row transactional upserts, eliminating write-amplification and improving write efficiency to $O(1)$ performance. Reads are concurrent and lock-free thanks to WAL mode.
 
 ### mDNS Service Identification
 
@@ -274,7 +274,7 @@ use lanwatch::{DhcpSniffer, DhcpEvent, DeviceTracker, Dhcpv6Option};
 
 fn main() {
     let mut sniffer = DhcpSniffer::new("en0").expect("Failed to create sniffer");
-    let mut tracker = DeviceTracker::new("devices.bin").expect("Failed to create tracker");
+    let mut tracker = DeviceTracker::new("devices.db").expect("Failed to create tracker");
 
     sniffer.run(|event| {
         match &event {
@@ -354,7 +354,7 @@ cargo run --example parse_payload
 - `MdnsQuerier` - Active mDNS query sender (requires `mdns` feature)
 - `SsdpPacket` - Parsed SSDP packet (requires `ssdp` feature)
 - `SsdpQuerier` - Active SSDP M-SEARCH sender (requires `ssdp` feature)
-- `DeviceTracker` - Track detected devices and persist to a binary database using Postcard
+- `DeviceTracker` - Track detected devices and persist to an embedded SQLite database
 - `DeviceInfo` - Information about a detected device
 - `OuiRegistry` - IEEE OUI database for MAC-to-vendor lookups
 - `DhcpError` - Error types for sniffer operations
@@ -592,6 +592,8 @@ A `Makefile` is provided to simplify common development, testing, linting, and d
 LANwatch includes several configurations and design patterns to maximize execution speed and scalability on hotpaths under high network traffic:
 
 *   **Host-Specific CPU Optimizations (`target-cpu=native`)**: Configured globally in `.cargo/config.toml` to compile LANwatch utilizing all instruction set extensions (AVX2, SSE4.2, NEON, etc.) supported by your local CPU, allowing LLVM to perform advanced loop vectorization and unrolling.
+*   **O(1) Transactional Database Updates**: Migrated the storage backend from full-file serializations to SQLite with Write-Ahead Logging (WAL), reducing write amplification from $O(N)$ full file rewrites to $O(1)$ single-row updates.
+*   **O(log N) Indexed Sorting**: Refactored the REST API query engine to run paginated, pre-sorted index scans inside SQLite directly rather than cloning and sorting the entire registry in-memory, cutting memory overhead to $O(\text{page\_size})$ and sorting to $O(\log N)$.
 *   **Zero-Allocation Hostname Classification**: Device classification in the parser loops avoids heap allocations for case conversion.
 *   **Dynamic Allocator Swap**: For concurrent HTTP API and high-traffic packet capture, you can preload lock-free allocators (`mimalloc` or `jemalloc`) dynamically without altering code:
     ```bash
