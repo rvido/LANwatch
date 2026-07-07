@@ -32,3 +32,7 @@ strip = true
 opt-level = 3
 codegen-units = 1
 panic = "abort"
+
+# Compile all dependencies with size optimization to shrink binary footprint
+[profile.release.package."*"]
+opt-level = "z"
