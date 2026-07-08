@@ -974,6 +974,51 @@ mod tests {
     }
 
     #[test]
+    fn test_device_tracker_does_not_downgrade_chromecast_to_android_phone_from_dhcp() {
+        let temp_path = "/tmp/lanwatch_test_chromecast_downgrade.csv";
+        let _ = std::fs::remove_file(temp_path);
+
+        let mut tracker = DeviceTracker::new(temp_path).unwrap();
+
+        // 1. Seen as Chromecast with cast services
+        let mut device = DeviceInfo::new(
+            "14:c1:4e:6e:f2:7e".to_string(),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 7, 96)),
+            Some("d50d84c4-d385-360b-f730-3a2034b24f87".to_string()),
+        );
+        device.device_type = Some("Chromecast".to_string());
+        device.vendor = Some("Google".to_string());
+        device.add_service("_googlecast._tcp");
+        tracker.devices.insert(device.mac_address.clone(), device);
+
+        // 2. Attempt to update with a generic Android/Linux DHCP signature
+        // Creating a DHCP packet that would result in generic "Android Phone" type
+        let packet = Dhcpv4Packet {
+            source_ip: Ipv4Addr::new(192, 168, 7, 96),
+            dest_ip: Ipv4Addr::new(255, 255, 255, 255),
+            source_port: 68,
+            dest_port: 67,
+            operation: Dhcpv4Operation::BootRequest,
+            client_mac: [0x14, 0xc1, 0x4e, 0x6e, 0xf2, 0x7e],
+            message_type: Some(Dhcpv4MessageType::Request),
+            hostname: Some("d50d84c4-d385-360b-f730-3a2034b24f87".to_string()),
+            requested_ip: Some(Ipv4Addr::new(192, 168, 7, 96)),
+            parameter_request_list: Some(vec![1, 3, 6, 15, 26, 28, 121]), // Has 26 and 28
+            vendor_class_id: None,
+            vendor_specific_info: None,
+        };
+
+        tracker.update_from_dhcpv4(&packet);
+
+        // 3. Verify it is still a Chromecast
+        let device = tracker.devices().get("14:c1:4e:6e:f2:7e").unwrap();
+        assert_eq!(device.device_type.as_deref(), Some("Chromecast"));
+        assert_eq!(device.vendor.as_deref(), Some("Google"));
+
+        let _ = std::fs::remove_file(temp_path);
+    }
+
+    #[test]
     fn test_extract_mac_from_duid_llt() {
         // DUID-LLT type 1, hw type 1 (Ethernet), time 0x12345678, MAC 8c:e2:da:bc:78:7a
         let duid = vec![

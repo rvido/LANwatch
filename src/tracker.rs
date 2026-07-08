@@ -1049,7 +1049,7 @@ impl DeviceTracker {
 
             // Set device type if detected
             if let Some(t) = device_type
-                && Self::should_replace_device_type(device.device_type.as_deref(), &t)
+                && Self::should_replace_device_type(device, &t)
             {
                 // Protect Eero devices from being overwritten by other device types
                 let is_eero = first_hostname
@@ -1190,7 +1190,7 @@ impl DeviceTracker {
 
             // Update device type
             if let Some(ref t) = device_type
-                && Self::should_replace_device_type(device.device_type.as_deref(), t)
+                && Self::should_replace_device_type(device, t)
             {
                 device.device_type = Some(t.clone());
                 updated += 1;
@@ -1403,13 +1403,69 @@ impl DeviceTracker {
         }
     }
 
-    fn should_replace_device_type(current: Option<&str>, incoming: &str) -> bool {
+    fn should_replace_device_type(device: &DeviceInfo, incoming: &str) -> bool {
+        let current = device.device_type.as_deref();
         match current {
             None => true,
             Some(existing) if existing.eq_ignore_ascii_case(incoming) => false,
             Some(existing) => {
                 let existing = existing.to_ascii_lowercase();
                 let incoming = incoming.to_ascii_lowercase();
+
+                // Define priority categories:
+                // Inferred/Generic types (Priority 0) should be overwritten by specific active-discovery types (Priority 1).
+                let is_generic = |t: &str| -> bool {
+                    matches!(
+                        t,
+                        "unknown"
+                            | "android phone"
+                            | "pc/windows"
+                            | "apple device"
+                            | "linux"
+                            | "iot device"
+                            | "smart home device"
+                    )
+                };
+
+                // Do not downgrade a device classified via mDNS/SSDP cast services (like Chromecast) to a generic Android Phone
+                if existing == "chromecast" && incoming == "android phone" {
+                    let has_cast_service = device
+                        .services
+                        .iter()
+                        .any(|s| s.contains("googlecast") || s.contains("androidtvremote2"));
+                    if has_cast_service {
+                        return false;
+                    }
+                }
+
+                // Do not downgrade a device with active mDNS/SSDP discovery services to a generic class,
+                // UNLESS the hostname explicitly confirms it is a specific mobile device (e.g. Moto, Samsung, iPhone).
+                if !is_generic(&existing) && is_generic(&incoming) {
+                    let is_confirmed_phone = |h: Option<&str>| -> bool {
+                        let Some(h) = h else {
+                            return false;
+                        };
+                        let h = h.to_lowercase();
+                        h.contains("moto")
+                            || h.contains("stylus")
+                            || h.contains("motorola")
+                            || h.contains("samsung")
+                            || h.contains("galaxy")
+                            || h.contains("pixel")
+                            || h.contains("iphone")
+                            || h.contains("ipad")
+                    };
+                    if !is_confirmed_phone(device.hostname.as_deref()) {
+                        return false;
+                    }
+                }
+
+                // Upgrade from generic/inferred to specific/refined
+                if is_generic(&existing) && !is_generic(&incoming) {
+                    return true;
+                }
+
+                // If both are specific/refined, allow allowed corrections
                 matches!(
                     incoming.as_str(),
                     "smart watering device"
@@ -1577,7 +1633,7 @@ impl DeviceTracker {
         }
 
         if let Some(t) = device_type
-            && Self::should_replace_device_type(device.device_type.as_deref(), &t)
+            && Self::should_replace_device_type(device, &t)
         {
             if device.device_type.as_deref() != Some(&t) {
                 device.device_type = Some(t.clone());
@@ -1627,7 +1683,7 @@ impl DeviceTracker {
 
         // Update device type
         if let Some(ref t) = packet.device_type
-            && Self::should_replace_device_type(device.device_type.as_deref(), t)
+            && Self::should_replace_device_type(device, t)
         {
             device.device_type = Some(t.clone());
             updated += 1;
@@ -1674,7 +1730,7 @@ impl DeviceTracker {
         }
 
         // Set Lightbulb as device type if not set
-        if Self::should_replace_device_type(device.device_type.as_deref(), "Lightbulb") {
+        if Self::should_replace_device_type(device, "Lightbulb") {
             device.device_type = Some("Lightbulb".to_string());
             updated += 1;
         }
@@ -1740,7 +1796,7 @@ impl DeviceTracker {
         }
 
         // Set the final device type
-        if Self::should_replace_device_type(device.device_type.as_deref(), dev_type) {
+        if Self::should_replace_device_type(device, dev_type) {
             device.device_type = Some(dev_type.to_string());
             updated += 1;
         }
@@ -1786,7 +1842,7 @@ impl DeviceTracker {
         }
 
         // Set device type if not set
-        if Self::should_replace_device_type(device.device_type.as_deref(), "Home Automation") {
+        if Self::should_replace_device_type(device, "Home Automation") {
             device.device_type = Some("Home Automation".to_string());
             updated += 1;
         }
@@ -1852,7 +1908,7 @@ impl DeviceTracker {
         }
 
         // Set device type to "IP Camera"
-        if Self::should_replace_device_type(device.device_type.as_deref(), "IP Camera") {
+        if Self::should_replace_device_type(device, "IP Camera") {
             device.device_type = Some("IP Camera".to_string());
             updated += 1;
         }
@@ -1915,7 +1971,7 @@ impl DeviceTracker {
         }
 
         // Set device type to "IoT Device"
-        if Self::should_replace_device_type(device.device_type.as_deref(), "IoT Device") {
+        if Self::should_replace_device_type(device, "IoT Device") {
             device.device_type = Some("IoT Device".to_string());
             updated += 1;
         }
@@ -1981,7 +2037,7 @@ impl DeviceTracker {
         } else {
             "Media Server"
         };
-        if Self::should_replace_device_type(device.device_type.as_deref(), dt) {
+        if Self::should_replace_device_type(device, dt) {
             device.device_type = Some(dt.to_string());
             updated += 1;
         }
@@ -2147,14 +2203,14 @@ impl DeviceTracker {
             }
 
             if let Some(dt) = device_type_from_hostname
-                && Self::should_replace_device_type(device.device_type.as_deref(), dt)
+                && Self::should_replace_device_type(device, dt)
             {
                 device.device_type = Some(dt.to_string());
             }
 
             if let Some(v) = device.vendor.as_deref()
                 && let Some(dt) = Self::detect_device_type_from_vendor(v)
-                && Self::should_replace_device_type(device.device_type.as_deref(), dt)
+                && Self::should_replace_device_type(device, dt)
             {
                 device.device_type = Some(dt.to_string());
             }
