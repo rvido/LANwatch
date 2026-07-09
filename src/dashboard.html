@@ -726,7 +726,10 @@
             }
 
             filtered.forEach(d => {
-                const name = d.hostname || d.vendor || "Unknown Device";
+                let name = d.hostname || d.vendor || "Unknown Device";
+                if (!d.hostname && d.vendor === "Private MAC Address") {
+                    name = `Private Device (${d.mac_address.slice(-8)})`.toUpperCase();
+                }
                 const type = d.device_type || "Generic Device";
                 const ip = d.ip_address === "0.0.0.0" ? "IPv6-Only / NDP" : d.ip_address;
                 const mac = d.mac_address;
@@ -773,7 +776,11 @@
 
         function showDeviceDetails(device) {
             document.getElementById('modal-icon-box').innerHTML = getIconForType(device.device_type);
-            document.getElementById('modal-title').textContent = device.hostname || device.vendor || "Unknown Device";
+            let title = device.hostname || device.vendor || "Unknown Device";
+            if (!device.hostname && device.vendor === "Private MAC Address") {
+                title = `Private Device (${device.mac_address.slice(-8)})`.toUpperCase();
+            }
+            document.getElementById('modal-title').textContent = title;
             document.getElementById('modal-subtitle').textContent = `${device.device_type || 'Generic Device'} / ${device.vendor || 'Unknown Vendor'}`;
             
             const ipVal = device.ip_address === "0.0.0.0" ? "IPv6-Only / NDP" : device.ip_address;
