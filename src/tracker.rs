@@ -899,14 +899,6 @@ impl DeviceTracker {
             }
         }
 
-        // Also check questions for service browsing (queries indicate device capabilities)
-        for question in &packet.questions {
-            let service_type = question.name.trim_end_matches(".local");
-            if service_type.starts_with('_') && seen_services.insert(service_type) {
-                services.push(service_type);
-            }
-        }
-
         // Extract IoT-specific metadata (Matter, HAP)
         let iot_meta = crate::parser::iot::extract_iot_metadata(&services, &txt_attrs);
 
