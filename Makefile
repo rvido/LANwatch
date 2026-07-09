@@ -25,11 +25,11 @@ release: update
 
 ## release-aarch64: Cross-compile the release binary for ARM64 (aarch64-unknown-linux-gnu) using cross/docker
 release-aarch64: update
-	CROSS_ENV_PASSTHROUGH="CFLAGS RUSTFLAGS" CFLAGS="-w" RUSTFLAGS="" cross build --target aarch64-unknown-linux-gnu --release --all-features
+	CROSS_ENV_PASSTHROUGH="CFLAGS RUSTFLAGS" CFLAGS="-w" RUSTFLAGS="-A linker_messages" cross build --target aarch64-unknown-linux-gnu --release --all-features
 
 ## release-aarch64-static: Cross-compile the release binary for ARM64 (aarch64-unknown-linux-musl) using cross/docker
 release-aarch64-static: update
-	CROSS_ENV_PASSTHROUGH="CFLAGS RUSTFLAGS" CFLAGS="-w" RUSTFLAGS="" cross build --target aarch64-unknown-linux-musl --release --all-features
+	CROSS_ENV_PASSTHROUGH="CFLAGS RUSTFLAGS" CFLAGS="-w" RUSTFLAGS="-A linker_messages" cross build --target aarch64-unknown-linux-musl --release --all-features
 
 ## test: Run unit tests with all features enabled
 test:

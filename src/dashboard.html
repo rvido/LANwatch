@@ -784,8 +784,8 @@
             document.getElementById('modal-subtitle').textContent = `${device.device_type || 'Generic Device'} / ${device.vendor || 'Unknown Vendor'}`;
             
             const ipVal = device.ip_address === "0.0.0.0" ? "IPv6-Only / NDP" : device.ip_address;
-            document.getElementById('modal-ip').innerHTML = `${ipVal} <button class="copy-btn" onclick="navigator.clipboard.writeText('${ipVal}')">Copy</button>`;
-            document.getElementById('modal-mac').innerHTML = `${device.mac_address} <button class="copy-btn" onclick="navigator.clipboard.writeText('${device.mac_address}')">Copy</button>`;
+            document.getElementById('modal-ip').innerHTML = `${ipVal} <button class="copy-btn" onclick="copyText(this, '${ipVal}')">Copy</button>`;
+            document.getElementById('modal-mac').innerHTML = `${device.mac_address} <button class="copy-btn" onclick="copyText(this, '${device.mac_address}')">Copy</button>`;
             
             document.getElementById('modal-type').textContent = device.device_type || "Generic Device";
             document.getElementById('modal-last-active').textContent = device.last_seen ? formatDate(device.last_seen) : "N/A";
@@ -815,6 +815,55 @@
                 overlay.classList.remove('active');
                 setTimeout(() => overlay.style.display = 'none', 300);
             }
+        }
+
+        function copyText(el, text) {
+            const originalText = el.textContent;
+            const performCopy = () => {
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    return navigator.clipboard.writeText(text);
+                } else {
+                    const textArea = document.createElement("textarea");
+                    textArea.value = text;
+                    textArea.style.top = "0";
+                    textArea.style.left = "0";
+                    textArea.style.position = "fixed";
+                    document.body.appendChild(textArea);
+                    textArea.focus();
+                    textArea.select();
+                    let success = false;
+                    try {
+                        success = document.execCommand('copy');
+                    } catch (err) {
+                        console.error("Fallback copy failed", err);
+                    }
+                    document.body.removeChild(textArea);
+                    if (success) {
+                        return Promise.resolve();
+                    } else {
+                        return Promise.reject("Fallback copy failed");
+                    }
+                }
+            };
+
+            performCopy()
+                .then(() => {
+                    el.textContent = "Copied!";
+                    el.style.background = "#22c55e";
+                    setTimeout(() => {
+                        el.textContent = originalText;
+                        el.style.background = "";
+                    }, 1500);
+                })
+                .catch(err => {
+                    console.error("Failed to copy:", err);
+                    el.textContent = "Error";
+                    el.style.background = "#ef4444";
+                    setTimeout(() => {
+                        el.textContent = originalText;
+                        el.style.background = "";
+                    }, 1500);
+                });
         }
 
         function closeModal(event) {
