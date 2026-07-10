@@ -28,6 +28,21 @@ use crate::types::{CdpPacket, LldpPacket};
 // Imports from dhcp parser module for helper functions
 use crate::parser::dhcp::{extract_mac_from_duid, format_duid_identifier};
 
+fn is_confirmed_phone(hostname: Option<&str>) -> bool {
+    let Some(h) = hostname else {
+        return false;
+    };
+    let h = h.to_lowercase();
+    h.contains("moto")
+        || h.contains("stylus")
+        || h.contains("motorola")
+        || h.contains("samsung")
+        || h.contains("galaxy")
+        || h.contains("pixel")
+        || h.contains("iphone")
+        || h.contains("ipad")
+}
+
 /// Device tracker that maintains a list of seen devices and saves to SQLite
 pub struct DeviceTracker {
     pub(crate) devices: HashMap<String, DeviceInfo>,
@@ -151,6 +166,18 @@ impl DeviceTracker {
                         break;
                     }
                 }
+                if let Some(dt) = &detected {
+                    if is_confirmed_phone(device.hostname.as_deref()) {
+                        let dt_lower = dt.to_lowercase();
+                        if !dt_lower.contains("phone")
+                            && !dt_lower.contains("iphone")
+                            && !dt_lower.contains("mobile")
+                            && !dt_lower.contains("tablet")
+                        {
+                            detected = None;
+                        }
+                    }
+                }
                 detected
             } else {
                 None
@@ -192,10 +219,13 @@ impl DeviceTracker {
 
         // Mark changed devices as dirty to trigger DB saving
         if !changed_devices.is_empty() {
-            let mut dirty = self.dirty_devices.lock().unwrap();
-            for mac in changed_devices {
-                dirty.insert(mac);
-            }
+            {
+                let mut dirty = self.dirty_devices.lock().unwrap();
+                for mac in changed_devices {
+                    dirty.insert(mac);
+                }
+            } // Lock is dropped here
+
             // If auto-save is enabled, flush changes
             if self.auto_save {
                 let _ = self.save_to_db();
@@ -1123,7 +1153,22 @@ impl DeviceTracker {
             }
 
             // Set device type if detected
-            if let Some(t) = device_type
+            let mut dt_to_apply = device_type.clone();
+            if let Some(ref dt) = dt_to_apply {
+                let effective_hostname = first_hostname.or(device.hostname.as_deref());
+                if is_confirmed_phone(effective_hostname) {
+                    let dt_lower = dt.to_lowercase();
+                    if !dt_lower.contains("phone")
+                        && !dt_lower.contains("iphone")
+                        && !dt_lower.contains("mobile")
+                        && !dt_lower.contains("tablet")
+                    {
+                        dt_to_apply = None;
+                    }
+                }
+            }
+
+            if let Some(t) = dt_to_apply
                 && Self::should_replace_device_type(device, &t)
             {
                 // Protect Eero devices from being overwritten by other device types
@@ -1466,6 +1511,20 @@ impl DeviceTracker {
             None => true,
             Some(existing) if existing.eq_ignore_ascii_case(incoming) => false,
             Some(existing) => {
+                // If the incoming vendor is from a confirmed phone, allow the correction
+                // (e.g. replacing generic "Google" or "Apple" with the actual phone manufacturer).
+                if incoming.eq_ignore_ascii_case("Motorola")
+                    || incoming.eq_ignore_ascii_case("Samsung")
+                    || incoming.eq_ignore_ascii_case("Apple")
+                    || incoming.eq_ignore_ascii_case("Google")
+                {
+                    if existing.eq_ignore_ascii_case("Google")
+                        || existing.eq_ignore_ascii_case("Apple")
+                    {
+                        return true;
+                    }
+                }
+
                 if existing.eq_ignore_ascii_case("Google")
                     && incoming.eq_ignore_ascii_case("Rachio")
                 {
@@ -1502,23 +1561,12 @@ impl DeviceTracker {
                     )
                 };
 
-                let is_confirmed_phone = |h: Option<&str>| -> bool {
-                    let Some(h) = h else {
-                        return false;
-                    };
-                    let h = h.to_lowercase();
-                    h.contains("moto")
-                        || h.contains("stylus")
-                        || h.contains("motorola")
-                        || h.contains("samsung")
-                        || h.contains("galaxy")
-                        || h.contains("pixel")
-                        || h.contains("iphone")
-                        || h.contains("ipad")
-                };
-
                 // Do not downgrade a device classified via mDNS/SSDP cast services (like Chromecast) to a generic Android Phone
-                if existing == "chromecast" && incoming == "android phone" {
+                // UNLESS the hostname explicitly confirms it is a specific mobile device.
+                if existing == "chromecast"
+                    && incoming == "android phone"
+                    && !is_confirmed_phone(device.hostname.as_deref())
+                {
                     let has_cast_service = device
                         .services
                         .iter()

@@ -1021,6 +1021,45 @@ mod tests {
     }
 
     #[test]
+    fn test_device_tracker_reclassifies_phone_from_chromecast_on_startup_and_mdns() {
+        let temp_path = "/tmp/lanwatch_test_phone_startup_reclassify.db";
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}-journal", temp_path));
+        let _ = std::fs::remove_file(format!("{}-wal", temp_path));
+        let _ = std::fs::remove_file(format!("{}-shm", temp_path));
+
+        let mut tracker = DeviceTracker::new(temp_path).unwrap();
+
+        // 1. Put a device that is classified as Chromecast but has a phone hostname in the tracker
+        let mut device = DeviceInfo::new(
+            "f6:b8:c0:de:63:9b".to_string(),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 5, 14)),
+            Some("moto-g-stylus-2025".to_string()),
+        );
+        device.device_type = Some("Chromecast".to_string());
+        device.vendor = Some("Google".to_string());
+        device.services.push("_googlecast._tcp.local".to_string());
+        tracker.devices.insert(device.mac_address.clone(), device);
+
+        // 2. Load service registry
+        #[cfg(feature = "mdns")]
+        tracker.set_service_registry(MdnsServiceRegistry::with_defaults());
+
+        // 3. Trigger re-classification (mimicking startup behavior)
+        tracker.reclassify_all();
+
+        // 4. Verify it was corrected to Android Phone / Motorola!
+        let device = tracker.devices().get("f6:b8:c0:de:63:9b").unwrap();
+        assert_eq!(device.device_type.as_deref(), Some("Android Phone"));
+        assert_eq!(device.vendor.as_deref(), Some("Motorola"));
+
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}-journal", temp_path));
+        let _ = std::fs::remove_file(format!("{}-wal", temp_path));
+        let _ = std::fs::remove_file(format!("{}-shm", temp_path));
+    }
+
+    #[test]
     fn test_device_tracker_does_not_downgrade_chromecast_to_android_phone_from_dhcp() {
         let temp_path = "/tmp/lanwatch_test_chromecast_downgrade.csv";
         let _ = std::fs::remove_file(temp_path);
