@@ -974,6 +974,53 @@ mod tests {
     }
 
     #[test]
+    fn test_device_tracker_does_not_override_phone_with_chromecast_via_mdns() {
+        let temp_path = "/tmp/lanwatch_test_phone_mdns.csv";
+        let _ = std::fs::remove_file(temp_path);
+
+        let mut tracker = DeviceTracker::new(temp_path).unwrap();
+
+        // 1. Initially seen as Motorola Phone
+        let mut device = DeviceInfo::new(
+            "f6:b8:c0:de:63:9b".to_string(),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 5, 14)),
+            Some("moto-g-stylus-2025".to_string()),
+        );
+        device.device_type = Some("Android Phone".to_string());
+        device.vendor = Some("Motorola".to_string());
+        tracker.devices.insert(device.mac_address.clone(), device);
+
+        // 2. Try to update via mDNS with Google Cast service (which would normally identify as Chromecast)
+        #[cfg(feature = "mdns")]
+        {
+            let packet = crate::parser::mdns::MdnsPacket {
+                source_mac: "f6:b8:c0:de:63:9b".to_string(),
+                source_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 5, 14)),
+                dest_ip: IpAddr::V4(Ipv4Addr::new(224, 0, 0, 251)),
+                transaction_id: 1234,
+                is_response: true,
+                questions: vec![],
+                answers: vec![crate::parser::mdns::MdnsRecord {
+                    name: "_googlecast._tcp.local".to_string(),
+                    record_type: crate::parser::mdns::MdnsRecordType::Ptr,
+                    ttl: 120,
+                    data: crate::parser::mdns::MdnsRecordData::Ptr("moto-g-stylus-2025".to_string()),
+                }],
+                authority: vec![],
+                additional: vec![],
+            };
+            tracker.update_from_mdns(&packet);
+
+            // 3. Verify it remains an Android Phone (Motorola), and was NOT changed to Chromecast / Google!
+            let device = tracker.devices().get("f6:b8:c0:de:63:9b").unwrap();
+            assert_eq!(device.device_type.as_deref(), Some("Android Phone"));
+            assert_eq!(device.vendor.as_deref(), Some("Motorola"));
+        }
+
+        let _ = std::fs::remove_file(temp_path);
+    }
+
+    #[test]
     fn test_device_tracker_does_not_downgrade_chromecast_to_android_phone_from_dhcp() {
         let temp_path = "/tmp/lanwatch_test_chromecast_downgrade.csv";
         let _ = std::fs::remove_file(temp_path);
@@ -2498,6 +2545,16 @@ mod tests {
             DeviceTracker::detect_device_type_from_hostname(Some("playstation-5")),
             Some("Game Console")
         );
+
+        // Test Inspiron laptop mapping
+        assert_eq!(
+            DeviceTracker::detect_vendor_from_hostname(Some("VD-Inspiron")),
+            Some("Dell")
+        );
+        assert_eq!(
+            DeviceTracker::detect_device_type_from_hostname(Some("VD-Inspiron")),
+            Some("Laptop")
+        );
     }
 
     #[test]
@@ -2971,7 +3028,7 @@ mod tests {
                 IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
                 None,
             );
-            tracker.save_to_csv().unwrap();
+            tracker.save_to_db().unwrap();
             assert!(Path::new(temp_path).exists());
 
             // Disable auto_save to test flush logic
@@ -2993,7 +3050,7 @@ mod tests {
             }
 
             // Flush to save the updated state
-            tracker.flush_to_csv().unwrap();
+            tracker.flush_to_db().unwrap();
 
             // Verify that after flushing, the file has the updated IP
             {

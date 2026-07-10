@@ -35,6 +35,32 @@ pub fn detect_vendor_from_hostname(hostname: Option<&str>) -> Option<&'static st
         return Some("Lenovo");
     }
 
+    if hostname.contains("dell")
+        || hostname.contains("inspiron")
+        || hostname.contains("latitude")
+        || hostname.contains("xps")
+        || hostname.contains("precision")
+        || hostname.contains("alienware")
+    {
+        return Some("Dell");
+    }
+
+    if hostname.contains("asus") || hostname.contains("zenbook") || hostname.contains("vivobook") {
+        return Some("Asus");
+    }
+
+    if hostname.contains("acer")
+        || hostname.contains("aspire")
+        || hostname.contains("predator")
+        || hostname.contains("swift")
+    {
+        return Some("Acer");
+    }
+
+    if hostname.contains("surface") {
+        return Some("Microsoft");
+    }
+
     // Google/Nest devices often use WICED platform
     if hostname.starts_with("wiced-hap") || hostname.contains("nest") {
         return Some("Google");
@@ -177,6 +203,18 @@ pub fn detect_device_type_from_hostname(hostname: Option<&str>) -> Option<&'stat
         || hostname.contains("thinkpad")
         || hostname.contains("ideapad")
         || hostname.contains("yoga")
+        || hostname.contains("inspiron")
+        || hostname.contains("latitude")
+        || hostname.contains("xps")
+        || hostname.contains("precision")
+        || hostname.contains("alienware")
+        || hostname.contains("zenbook")
+        || hostname.contains("vivobook")
+        || hostname.contains("spectre")
+        || hostname.contains("envy")
+        || hostname.contains("elitebook")
+        || hostname.contains("probook")
+        || hostname.contains("surface")
     {
         return Some("Laptop");
     }

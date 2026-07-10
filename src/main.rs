@@ -27,10 +27,10 @@ const DEFAULT_DB_PATH: &str = "devices.db";
 const DEFAULT_API_ADDR: &str = "127.0.0.1:8080";
 const DEFAULT_OUI_DOWNLOAD_PATH: &str = "ieee-oui.txt";
 // Tuned defaults for bursty LAN discovery traffic (mDNS/SSDP).
-// Aim: absorb short bursts while keeping CSV/API state latency low.
+// Aim: absorb short bursts while keeping DB/API state latency low.
 const EVENT_CHANNEL_CAPACITY: usize = 4096;
-const CSV_FLUSH_BATCH_SIZE: usize = 32;
-const CSV_FLUSH_INTERVAL_MS: u64 = 300;
+const DB_FLUSH_BATCH_SIZE: usize = 32;
+const DB_FLUSH_INTERVAL_MS: u64 = 300;
 
 fn main() {
     // Parse command line arguments
@@ -115,15 +115,18 @@ fn main() {
     }
 
     println!(
-        "Loaded {} existing devices from CSV",
+        "Loaded {} existing devices from database",
         tracker.device_count()
     );
     println!(
         "Batching: queue_capacity={}, flush_batch_size={}, flush_interval_ms={}",
-        EVENT_CHANNEL_CAPACITY, CSV_FLUSH_BATCH_SIZE, CSV_FLUSH_INTERVAL_MS
+        EVENT_CHANNEL_CAPACITY, DB_FLUSH_BATCH_SIZE, DB_FLUSH_INTERVAL_MS
     );
 
-    // Use batched CSV flushing through worker threads to reduce write amplification.
+    // Re-evaluate and correct any database entries using the latest classification rules on startup
+    tracker.reclassify_all();
+
+    // Use batched DB flushing through worker threads to reduce write amplification.
     tracker.set_auto_save(false);
 
     // Wrap tracker in Arc<RwLock> for thread-safe sharing
@@ -237,7 +240,7 @@ fn start_dhcp_worker(
     tracker: Arc<RwLock<DeviceTracker>>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        let flush_interval = Duration::from_millis(CSV_FLUSH_INTERVAL_MS);
+        let flush_interval = Duration::from_millis(DB_FLUSH_INTERVAL_MS);
         let mut pending_updates = 0usize;
         let mut last_flush = Instant::now();
 
@@ -292,7 +295,7 @@ fn start_dhcp_worker(
                 Err(RecvTimeoutError::Disconnected) => break,
             }
 
-            if pending_updates >= CSV_FLUSH_BATCH_SIZE
+            if pending_updates >= DB_FLUSH_BATCH_SIZE
                 || (pending_updates > 0 && last_flush.elapsed() >= flush_interval)
             {
                 flush_tracker(&tracker, pending_updates);
@@ -315,7 +318,7 @@ fn start_network_worker(
     _enable_ssdp: bool,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        let flush_interval = Duration::from_millis(CSV_FLUSH_INTERVAL_MS);
+        let flush_interval = Duration::from_millis(DB_FLUSH_INTERVAL_MS);
         let mut pending_updates = 0usize;
         let mut last_flush = Instant::now();
 
@@ -556,7 +559,7 @@ fn start_network_worker(
                 Err(RecvTimeoutError::Disconnected) => break,
             }
 
-            if pending_updates >= CSV_FLUSH_BATCH_SIZE
+            if pending_updates >= DB_FLUSH_BATCH_SIZE
                 || (pending_updates > 0 && last_flush.elapsed() >= flush_interval)
             {
                 flush_tracker(&tracker, pending_updates);
@@ -575,16 +578,16 @@ fn flush_tracker(tracker: &Arc<RwLock<DeviceTracker>>, pending_updates: usize) {
     let tracker = match tracker.read() {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("Error acquiring lock for CSV flush: {}", e);
+            eprintln!("Error acquiring lock for DB flush: {}", e);
             return;
         }
     };
 
-    if let Err(e) = tracker.flush_to_csv() {
-        eprintln!("Warning: Failed to flush CSV: {}", e);
+    if let Err(e) = tracker.flush_to_db() {
+        eprintln!("Warning: Failed to flush DB: {}", e);
     } else {
         println!(
-            "-> [CSV Flushed] batched updates: {}, Total devices: {}",
+            "-> [DB Flushed] batched updates: {}, Total devices: {}",
             pending_updates,
             tracker.device_count()
         );
@@ -597,7 +600,7 @@ fn print_ndp_packet(mac: &str, ip: &std::net::IpAddr, is_new_or_updated: bool, t
     println!("Sender MAC: {}", mac);
     println!("Sender IP:  {}", ip);
     if is_new_or_updated {
-        println!("-> [CSV Updated] Total devices: {}", total);
+        println!("-> [DB Updated] Total devices: {}", total);
     }
     println!("------------------------------");
 }
@@ -619,7 +622,7 @@ fn print_lldp_packet(packet: &lanwatch::LldpPacket, is_new_or_updated: bool, tot
         println!("Mgmt IP:     {}", ip);
     }
     if is_new_or_updated {
-        println!("-> [CSV Updated] Total devices: {}", total);
+        println!("-> [DB Updated] Total devices: {}", total);
     }
     println!("------------------------------");
 }
@@ -632,7 +635,7 @@ fn print_lifx_packet(packet: &lanwatch::LifxPacket, is_new_or_updated: bool, tot
     println!("Target MAC: {}", packet.target_mac);
     println!("Msg Type:   {}", packet.msg_type);
     if is_new_or_updated {
-        println!("-> [CSV Updated] Total devices: {}", total);
+        println!("-> [DB Updated] Total devices: {}", total);
     }
     println!("------------------------------");
 }
@@ -648,7 +651,7 @@ fn print_coap_packet(packet: &lanwatch::CoapPacket, is_new_or_updated: bool, tot
         println!("Payload:    {}", payload);
     }
     if is_new_or_updated {
-        println!("-> [CSV Updated] Total devices: {}", total);
+        println!("-> [DB Updated] Total devices: {}", total);
     }
     println!("------------------------------");
 }
@@ -666,7 +669,7 @@ fn print_knx_packet(packet: &lanwatch::KnxPacket, is_new_or_updated: bool, total
         println!("Serial:     {}", serial);
     }
     if is_new_or_updated {
-        println!("-> [CSV Updated] Total devices: {}", total);
+        println!("-> [DB Updated] Total devices: {}", total);
     }
     println!("------------------------------");
 }
@@ -685,7 +688,7 @@ fn print_cctv_packet(packet: &lanwatch::CctvPacket, is_new_or_updated: bool, tot
     }
     println!("Protocol:   {}", packet.protocol);
     if is_new_or_updated {
-        println!("-> [CSV Updated] Total devices: {}", total);
+        println!("-> [DB Updated] Total devices: {}", total);
     }
     println!("------------------------------");
 }
@@ -698,7 +701,7 @@ fn print_mqtt_packet(packet: &lanwatch::MqttPacket, is_new_or_updated: bool, tot
     println!("Client ID:  {}", packet.client_id);
     println!("Protocol:   {}", packet.protocol);
     if is_new_or_updated {
-        println!("-> [CSV Updated] Total devices: {}", total);
+        println!("-> [DB Updated] Total devices: {}", total);
     }
     println!("------------------------------");
 }
@@ -721,7 +724,7 @@ fn print_gdm_packet(packet: &lanwatch::GdmPacket, is_new_or_updated: bool, total
         println!("Port:       {}", port);
     }
     if is_new_or_updated {
-        println!("-> [CSV Updated] Total devices: {}", total);
+        println!("-> [DB Updated] Total devices: {}", total);
     }
     println!("------------------------------");
 }
@@ -743,7 +746,7 @@ fn print_cdp_packet(packet: &lanwatch::CdpPacket, is_new_or_updated: bool, total
         println!("Mgmt IP:     {}", ip);
     }
     if is_new_or_updated {
-        println!("-> [CSV Updated] Total devices: {}", total);
+        println!("-> [DB Updated] Total devices: {}", total);
     }
     println!("------------------------------");
 }
@@ -754,7 +757,7 @@ fn print_arp_packet(mac: &str, ip: &std::net::IpAddr, is_new_or_updated: bool, t
     println!("Sender MAC: {}", mac);
     println!("Sender IP:  {}", ip);
     if is_new_or_updated {
-        println!("-> [CSV Updated] Total devices: {}", total);
+        println!("-> [DB Updated] Total devices: {}", total);
     }
     println!("------------------------------");
 }
@@ -775,7 +778,7 @@ fn print_dhcpv4_packet(packet: &lanwatch::Dhcpv4Packet, is_new_or_updated: bool,
         println!("-> Req IP: {}", req_ip);
     }
     if is_new_or_updated {
-        println!("-> [CSV Updated] Total devices: {}", total);
+        println!("-> [DB Updated] Total devices: {}", total);
     }
     println!("------------------------------");
 }
@@ -813,7 +816,7 @@ fn print_dhcpv6_packet(packet: &lanwatch::Dhcpv6Packet, is_new_or_updated: bool,
         }
     }
     if is_new_or_updated {
-        println!("-> [CSV Updated] Total devices: {}", total);
+        println!("-> [DB Updated] Total devices: {}", total);
     }
     println!("------------------------------");
 }
@@ -859,7 +862,7 @@ fn print_mdns_packet(packet: &lanwatch::MdnsPacket, updated_count: usize, total:
 
     if updated_count > 0 {
         println!(
-            "-> [CSV Updated] {} device(s), Total: {}",
+            "-> [DB Updated] {} device(s), Total: {}",
             updated_count, total
         );
     }
@@ -896,7 +899,7 @@ fn print_llmnr_packet(packet: &lanwatch::MdnsPacket, updated_count: usize, total
 
     if updated_count > 0 {
         println!(
-            "-> [CSV Updated] {} device(s), Total: {}",
+            "-> [DB Updated] {} device(s), Total: {}",
             updated_count, total
         );
     }
@@ -920,7 +923,7 @@ fn print_nbns_packet(packet: &lanwatch::NbnsPacket, updated_count: usize, total:
 
     if updated_count > 0 {
         println!(
-            "-> [CSV Updated] {} device(s), Total: {}",
+            "-> [DB Updated] {} device(s), Total: {}",
             updated_count, total
         );
     }
@@ -953,7 +956,7 @@ fn print_ssdp_packet(packet: &SsdpPacket, updated_count: usize, total: usize) {
 
     if updated_count > 0 {
         println!(
-            "-> [CSV Updated] {} device(s), Total: {}",
+            "-> [DB Updated] {} device(s), Total: {}",
             updated_count, total
         );
     }
@@ -975,7 +978,7 @@ fn print_wsd_packet(packet: &lanwatch::WsdPacket, updated_count: usize, total: u
 
     if updated_count > 0 {
         println!(
-            "-> [CSV Updated] {} device(s), Total: {}",
+            "-> [DB Updated] {} device(s), Total: {}",
             updated_count, total
         );
     }

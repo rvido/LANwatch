@@ -893,6 +893,9 @@ impl MdnsQuerier {
             "_ipp._tcp.local",              // IPP printers
             "_hap._tcp.local",              // HomeKit accessories
             "_homekit._tcp.local",          // HomeKit
+            "_matter._tcp.local",           // Matter commissioned devices
+            "_matter._udp.local",           // Matter operational/other devices
+            "_matterc._udp.local",          // Matter commissionable devices
         ];
 
         for service in services {

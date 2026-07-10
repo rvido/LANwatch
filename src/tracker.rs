@@ -31,7 +31,7 @@ use crate::parser::dhcp::{extract_mac_from_duid, format_duid_identifier};
 /// Device tracker that maintains a list of seen devices and saves to SQLite
 pub struct DeviceTracker {
     pub(crate) devices: HashMap<String, DeviceInfo>,
-    pub(crate) csv_path: String,
+    pub(crate) db_path: String,
     pub(crate) auto_save: bool,
     /// OUI registry for MAC address vendor lookup
     pub(crate) oui_registry: Option<OuiRegistry>,
@@ -47,11 +47,11 @@ impl DeviceTracker {
     /// Creates a new device tracker, loading existing data from the specified SQLite database file.
     ///
     /// # Arguments
-    /// * `csv_path` - The path to the database file used for persistence.
-    pub fn new<P: AsRef<Path>>(csv_path: P) -> std::io::Result<Self> {
-        let csv_path_str = csv_path.as_ref().to_string_lossy().to_string();
+    /// * `db_path` - The path to the database file used for persistence.
+    pub fn new<P: AsRef<Path>>(db_path: P) -> std::io::Result<Self> {
+        let db_path_str = db_path.as_ref().to_string_lossy().to_string();
 
-        let conn = Connection::open(&csv_path_str)
+        let conn = Connection::open(&db_path_str)
             .map_err(|e| std::io::Error::other(format!("Failed to open SQLite database: {}", e)))?;
 
         // Enable WAL mode and normal synchronous writes
@@ -84,7 +84,7 @@ impl DeviceTracker {
 
         let mut tracker = Self {
             devices: HashMap::new(),
-            csv_path: csv_path_str,
+            db_path: db_path_str,
             auto_save: true,
             oui_registry: None,
             #[cfg(feature = "mdns")]
@@ -118,6 +118,89 @@ impl DeviceTracker {
     #[cfg(feature = "mdns")]
     pub fn service_registry(&self) -> Option<&MdnsServiceRegistry> {
         self.service_registry.as_ref()
+    }
+
+    /// Re-evaluates classification (device_type, vendor) for all loaded devices
+    /// using current hostname rules, OUI registry, and mDNS service registry.
+    pub fn reclassify_all(&mut self) {
+        let mut changed_devices = Vec::new();
+
+        for device in self.devices.values_mut() {
+            let mut changed = false;
+
+            // 1. Hostname-based vendor & type
+            let hostname_vendor = Self::detect_vendor_from_hostname(device.hostname.as_deref());
+            let hostname_device_type =
+                Self::detect_device_type_from_hostname(device.hostname.as_deref());
+
+            // 2. OUI-based vendor
+            let mut oui_vendor = None;
+            if let Some(registry) = &self.oui_registry {
+                oui_vendor = registry.lookup(&device.mac_address);
+            }
+
+            // 3. mDNS service-based type
+            #[cfg(feature = "mdns")]
+            let service_device_type = if let Some(registry) = &self.service_registry {
+                let services_slice: Vec<&str> =
+                    device.services.iter().map(|s| s.as_str()).collect();
+                let mut detected = None;
+                for s in services_slice {
+                    if let Some(dt) = registry.get_device_type(s) {
+                        detected = Some(dt.to_string());
+                        break;
+                    }
+                }
+                detected
+            } else {
+                None
+            };
+            #[cfg(not(feature = "mdns"))]
+            let service_device_type: Option<String> = None;
+
+            // Re-evaluate device type
+            let incoming_type =
+                service_device_type.or_else(|| hostname_device_type.map(|t| t.to_string()));
+
+            if let Some(t) = incoming_type {
+                if device.device_type.as_deref() != Some(&t) {
+                    if Self::should_replace_device_type(device, &t) {
+                        device.device_type = Some(t);
+                        changed = true;
+                    }
+                }
+            }
+
+            // Re-evaluate vendor
+            let incoming_vendor = hostname_vendor
+                .map(|v| v.to_string())
+                .or_else(|| oui_vendor.map(|v| v.to_string()));
+
+            if let Some(v) = incoming_vendor {
+                if device.vendor.as_deref() != Some(&v) {
+                    if Self::should_replace_vendor(device.vendor.as_deref(), &v, oui_vendor) {
+                        device.vendor = Some(v);
+                        changed = true;
+                    }
+                }
+            }
+
+            if changed {
+                changed_devices.push(device.mac_address.clone());
+            }
+        }
+
+        // Mark changed devices as dirty to trigger DB saving
+        if !changed_devices.is_empty() {
+            let mut dirty = self.dirty_devices.lock().unwrap();
+            for mac in changed_devices {
+                dirty.insert(mac);
+            }
+            // If auto-save is enabled, flush changes
+            if self.auto_save {
+                let _ = self.save_to_db();
+            }
+        }
     }
 
     /// Load devices from existing SQLite database file
@@ -196,7 +279,7 @@ impl DeviceTracker {
     }
 
     /// Persists all current device information to the SQLite database file.
-    pub fn save_to_csv(&self) -> std::io::Result<()> {
+    pub fn save_to_db(&self) -> std::io::Result<()> {
         let dirty = {
             let mut guard = self.dirty_devices.lock().unwrap();
             std::mem::take(&mut *guard)
@@ -280,8 +363,8 @@ impl DeviceTracker {
     }
 
     /// Explicitly flushes the current in-memory device state to the database file.
-    pub fn flush_to_csv(&self) -> std::io::Result<()> {
-        self.save_to_csv()
+    pub fn flush_to_db(&self) -> std::io::Result<()> {
+        self.save_to_db()
     }
 
     /// Returns a vector of all tracked devices pre-sorted by `last_seen` descending from the SQL database.
@@ -475,7 +558,7 @@ impl DeviceTracker {
                 self.dirty_devices.lock().unwrap().insert(mac.clone());
                 changed = true;
                 if self.auto_save {
-                    let _ = self.save_to_csv();
+                    let _ = self.save_to_db();
                 }
             }
         }
@@ -618,7 +701,7 @@ impl DeviceTracker {
                 self.dirty_devices.lock().unwrap().insert(mac.clone());
                 changed = true;
                 if self.auto_save {
-                    let _ = self.save_to_csv();
+                    let _ = self.save_to_db();
                 }
             }
         }
@@ -699,7 +782,7 @@ impl DeviceTracker {
                 self.dirty_devices.lock().unwrap().insert(mac.clone());
                 changed = true;
                 if self.auto_save {
-                    let _ = self.save_to_csv();
+                    let _ = self.save_to_db();
                 }
             }
         }
@@ -768,7 +851,7 @@ impl DeviceTracker {
                 self.dirty_devices.lock().unwrap().insert(mac.clone());
                 changed = true;
                 if self.auto_save {
-                    let _ = self.save_to_csv();
+                    let _ = self.save_to_db();
                 }
             }
         }
@@ -1102,7 +1185,7 @@ impl DeviceTracker {
         }
 
         if updated > 0 && self.auto_save {
-            let _ = self.save_to_csv();
+            let _ = self.save_to_db();
         }
 
         self.dirty_devices
@@ -1194,7 +1277,7 @@ impl DeviceTracker {
         if updated > 0 {
             self.dirty_devices.lock().unwrap().insert(mac.clone());
             if self.auto_save {
-                let _ = self.save_to_csv();
+                let _ = self.save_to_db();
             }
         }
 
@@ -1419,6 +1502,21 @@ impl DeviceTracker {
                     )
                 };
 
+                let is_confirmed_phone = |h: Option<&str>| -> bool {
+                    let Some(h) = h else {
+                        return false;
+                    };
+                    let h = h.to_lowercase();
+                    h.contains("moto")
+                        || h.contains("stylus")
+                        || h.contains("motorola")
+                        || h.contains("samsung")
+                        || h.contains("galaxy")
+                        || h.contains("pixel")
+                        || h.contains("iphone")
+                        || h.contains("ipad")
+                };
+
                 // Do not downgrade a device classified via mDNS/SSDP cast services (like Chromecast) to a generic Android Phone
                 if existing == "chromecast" && incoming == "android phone" {
                     let has_cast_service = device
@@ -1433,27 +1531,17 @@ impl DeviceTracker {
                 // Do not downgrade a device with active mDNS/SSDP discovery services to a generic class,
                 // UNLESS the hostname explicitly confirms it is a specific mobile device (e.g. Moto, Samsung, iPhone).
                 if !is_generic(&existing) && is_generic(&incoming) {
-                    let is_confirmed_phone = |h: Option<&str>| -> bool {
-                        let Some(h) = h else {
-                            return false;
-                        };
-                        let h = h.to_lowercase();
-                        h.contains("moto")
-                            || h.contains("stylus")
-                            || h.contains("motorola")
-                            || h.contains("samsung")
-                            || h.contains("galaxy")
-                            || h.contains("pixel")
-                            || h.contains("iphone")
-                            || h.contains("ipad")
-                    };
                     if !is_confirmed_phone(device.hostname.as_deref()) {
                         return false;
                     }
                 }
 
-                // Upgrade from generic/inferred to specific/refined
+                // Upgrade from generic/inferred to specific/refined,
+                // UNLESS the device is a confirmed mobile phone/tablet (in which case do not override it with a smart/media type).
                 if is_generic(&existing) && !is_generic(&incoming) {
+                    if is_confirmed_phone(device.hostname.as_deref()) {
+                        return false;
+                    }
                     return true;
                 }
 
@@ -1636,7 +1724,7 @@ impl DeviceTracker {
         device.last_seen = SystemTime::now();
 
         if updated > 0 && self.auto_save {
-            let _ = self.save_to_csv();
+            let _ = self.save_to_db();
         }
 
         self.dirty_devices.lock().unwrap().insert(mac.to_string());
@@ -1684,7 +1772,7 @@ impl DeviceTracker {
         device.last_seen = SystemTime::now();
 
         if updated > 0 && self.auto_save {
-            let _ = self.save_to_csv();
+            let _ = self.save_to_db();
         }
 
         if updated > 0 {
@@ -1737,7 +1825,7 @@ impl DeviceTracker {
         device.last_seen = SystemTime::now();
 
         if updated > 0 && self.auto_save {
-            let _ = self.save_to_csv();
+            let _ = self.save_to_db();
         }
 
         if updated > 0 {
@@ -1796,7 +1884,7 @@ impl DeviceTracker {
         device.last_seen = SystemTime::now();
 
         if updated > 0 && self.auto_save {
-            let _ = self.save_to_csv();
+            let _ = self.save_to_db();
         }
 
         if updated > 0 {
@@ -1862,7 +1950,7 @@ impl DeviceTracker {
         device.last_seen = SystemTime::now();
 
         if updated > 0 && self.auto_save {
-            let _ = self.save_to_csv();
+            let _ = self.save_to_db();
         }
 
         if updated > 0 {
@@ -1932,7 +2020,7 @@ impl DeviceTracker {
         device.last_seen = SystemTime::now();
 
         if updated > 0 && self.auto_save {
-            let _ = self.save_to_csv();
+            let _ = self.save_to_db();
         }
 
         if updated > 0 {
@@ -1981,7 +2069,7 @@ impl DeviceTracker {
         device.last_seen = SystemTime::now();
 
         if updated > 0 && self.auto_save {
-            let _ = self.save_to_csv();
+            let _ = self.save_to_db();
         }
 
         if updated > 0 {
@@ -2056,7 +2144,7 @@ impl DeviceTracker {
         device.last_seen = SystemTime::now();
 
         if updated > 0 && self.auto_save {
-            let _ = self.save_to_csv();
+            let _ = self.save_to_db();
         }
 
         if updated > 0 {
@@ -2235,7 +2323,7 @@ impl DeviceTracker {
         self.dirty_devices.lock().unwrap().insert(mac.to_string());
 
         if result && self.auto_save {
-            let _ = self.save_to_csv();
+            let _ = self.save_to_db();
         }
 
         result
@@ -2277,8 +2365,8 @@ impl DeviceTracker {
     }
 
     /// Returns the path to the CSV file used for persistence.
-    pub fn csv_path(&self) -> &str {
-        &self.csv_path
+    pub fn db_path(&self) -> &str {
+        &self.db_path
     }
 
     /// Returns a JSON-formatted string of all tracked devices.
@@ -2299,6 +2387,6 @@ impl DeviceTracker {
 
 impl Drop for DeviceTracker {
     fn drop(&mut self) {
-        let _ = self.save_to_csv();
+        let _ = self.save_to_db();
     }
 }

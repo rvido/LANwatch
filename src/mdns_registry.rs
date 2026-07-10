@@ -258,6 +258,24 @@ impl MdnsServiceRegistry {
             Some("Xiaomi"),
             Some("IoT Device"),
         );
+        self.add_full(
+            "_matter._tcp",
+            "Matter Commissioned Device",
+            None,
+            Some("Smart Home Device"),
+        );
+        self.add_full(
+            "_matter._udp",
+            "Matter Operational Device",
+            None,
+            Some("Smart Home Device"),
+        );
+        self.add_full(
+            "_matterc._udp",
+            "Matter Commissionable Device",
+            None,
+            Some("Smart Home Device"),
+        );
 
         // NAS / Storage
         self.add_full(
