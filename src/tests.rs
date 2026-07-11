@@ -690,6 +690,49 @@ mod tests {
     }
 
     #[test]
+    fn test_device_tracker_classifies_thermostat_from_custom_oui() {
+        let temp_path = "/tmp/lanwatch_test_thermostat_custom_oui.csv";
+        let _ = std::fs::remove_file(temp_path);
+
+        let mut tracker = DeviceTracker::new(temp_path).unwrap();
+        
+        let mut registry = OuiRegistry::new();
+        registry.add("3c:31:74", "Google Nest Thermostat");
+        tracker.set_oui_registry(registry);
+
+        tracker.update_device("3c:31:74:e2:af:8a", "192.168.7.204".parse().unwrap(), None);
+
+        let device = tracker.devices().get("3c:31:74:e2:af:8a").unwrap();
+        assert_eq!(device.vendor.as_deref(), Some("Google Nest Thermostat"));
+        assert_eq!(device.device_type.as_deref(), Some("Thermostat"));
+
+        let _ = std::fs::remove_file(temp_path);
+    }
+
+    #[test]
+    fn test_device_tracker_upgrades_generic_matter_to_thermostat() {
+        let temp_path = "/tmp/lanwatch_test_matter_upgrade.csv";
+        let _ = std::fs::remove_file(temp_path);
+
+        let mut tracker = DeviceTracker::new(temp_path).unwrap();
+        let mut device = DeviceInfo::new(
+            "3c:31:74:e2:af:8a".to_string(),
+            "192.168.7.204".parse().unwrap(),
+            None,
+        );
+        device.device_type = Some("Matter Smart Device".to_string());
+        device.vendor = Some("Google".to_string());
+        tracker.devices.insert(device.mac_address.clone(), device);
+
+        tracker.update_device("3c:31:74:e2:af:8a", "192.168.7.204".parse().unwrap(), Some("Nest-Thermostat-AF8A"));
+
+        let device = tracker.devices().get("3c:31:74:e2:af:8a").unwrap();
+        assert_eq!(device.device_type.as_deref(), Some("Thermostat"));
+
+        let _ = std::fs::remove_file(temp_path);
+    }
+
+    #[test]
     fn test_device_tracker_reclassifies_roborock_from_loaded_csv() {
         let temp_path = "/tmp/lanwatch_test_roborock_reclassify.csv";
         let _ = std::fs::remove_file(temp_path);
@@ -3226,6 +3269,11 @@ mod tests {
         assert_eq!(meta.vendor.as_deref(), Some("Google"));
         assert_eq!(meta.device_type.as_deref(), Some("Matter Smart Device"));
         assert_eq!(meta.model.as_deref(), Some("Matter Device (VID: 0x10B1, PID: 0x0001)"));
+
+        // Test with dt = 769 (Thermostat)
+        txt.insert("dt".to_string(), "769");
+        let meta2 = extract_iot_metadata(&services, &txt);
+        assert_eq!(meta2.device_type.as_deref(), Some("Thermostat"));
     }
 
     #[test]

@@ -147,6 +147,32 @@ pub fn extract_iot_metadata(services: &[&str], txt_attrs: &HashMap<String, &str>
         } else {
             meta.model = Some("Matter Device".to_string());
         }
+
+        if let Some(dt) = txt_attrs.get("dt") {
+            let parsed_dt = if dt.starts_with("0x") || dt.starts_with("0X") {
+                u32::from_str_radix(&dt[2..], 16).ok()
+            } else {
+                dt.parse::<u32>().ok()
+            };
+            if let Some(d) = parsed_dt {
+                match d {
+                    769 => meta.device_type = Some("Thermostat".to_string()),
+                    256 | 257 | 268 | 269 => meta.device_type = Some("Smart Light".to_string()),
+                    266 | 267 => meta.device_type = Some("Smart Plug".to_string()),
+                    15 | 16 => meta.device_type = Some("Switch".to_string()),
+                    90 => meta.device_type = Some("Door Lock".to_string()),
+                    768 => meta.device_type = Some("Sensor".to_string()),
+                    772 => meta.device_type = Some("Humidity Sensor".to_string()),
+                    774 => meta.device_type = Some("Occupancy Sensor".to_string()),
+                    775 => meta.device_type = Some("Contact Sensor".to_string()),
+                    10 | 113 => meta.device_type = Some("Air Conditioner".to_string()),
+                    43 => meta.device_type = Some("Air Purifier".to_string()),
+                    18 => meta.device_type = Some("Video Doorbell".to_string()),
+                    34 => meta.device_type = Some("Chromecast".to_string()),
+                    _ => {}
+                }
+            }
+        }
     }
     // 2. HomeKit (HAP) Protocol Identification
     else if services.iter().any(|s| s.contains("_hap")) {

@@ -1554,6 +1554,11 @@ impl DeviceTracker {
                             | "linux"
                             | "iot device"
                             | "smart home device"
+                            | "matter smart device"
+                            | "homekit device"
+                            | "homekit accessory"
+                            | "knx device"
+                            | "coap device"
                     )
                 };
 
@@ -2226,6 +2231,9 @@ impl DeviceTracker {
         if v.contains("arlo") {
             return Some("Security Camera");
         }
+        if v.contains("ecobee") || v.contains("honeywell") || v.contains("thermostat") {
+            return Some("Thermostat");
+        }
         if v.contains("nest") {
             return Some("Smart Home Device");
         }
@@ -2241,9 +2249,6 @@ impl DeviceTracker {
         }
         if v.contains("sonos") {
             return Some("Speaker");
-        }
-        if v.contains("ecobee") || v.contains("honeywell") {
-            return Some("Thermostat");
         }
 
         if v.contains("ubiquiti")
