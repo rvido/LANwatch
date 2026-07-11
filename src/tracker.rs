@@ -166,16 +166,16 @@ impl DeviceTracker {
                         break;
                     }
                 }
-                if let Some(dt) = &detected {
-                    if is_confirmed_phone(device.hostname.as_deref()) {
-                        let dt_lower = dt.to_lowercase();
-                        if !dt_lower.contains("phone")
-                            && !dt_lower.contains("iphone")
-                            && !dt_lower.contains("mobile")
-                            && !dt_lower.contains("tablet")
-                        {
-                            detected = None;
-                        }
+                if let Some(dt) = &detected
+                    && is_confirmed_phone(device.hostname.as_deref())
+                {
+                    let dt_lower = dt.to_lowercase();
+                    if !dt_lower.contains("phone")
+                        && !dt_lower.contains("iphone")
+                        && !dt_lower.contains("mobile")
+                        && !dt_lower.contains("tablet")
+                    {
+                        detected = None;
                     }
                 }
                 detected
@@ -189,13 +189,12 @@ impl DeviceTracker {
             let incoming_type =
                 service_device_type.or_else(|| hostname_device_type.map(|t| t.to_string()));
 
-            if let Some(t) = incoming_type {
-                if device.device_type.as_deref() != Some(&t) {
-                    if Self::should_replace_device_type(device, &t) {
-                        device.device_type = Some(t);
-                        changed = true;
-                    }
-                }
+            if let Some(t) = incoming_type
+                && device.device_type.as_deref() != Some(&t)
+                && Self::should_replace_device_type(device, &t)
+            {
+                device.device_type = Some(t);
+                changed = true;
             }
 
             // Re-evaluate vendor
@@ -203,13 +202,12 @@ impl DeviceTracker {
                 .map(|v| v.to_string())
                 .or_else(|| oui_vendor.map(|v| v.to_string()));
 
-            if let Some(v) = incoming_vendor {
-                if device.vendor.as_deref() != Some(&v) {
-                    if Self::should_replace_vendor(device.vendor.as_deref(), &v, oui_vendor) {
-                        device.vendor = Some(v);
-                        changed = true;
-                    }
-                }
+            if let Some(v) = incoming_vendor
+                && device.vendor.as_deref() != Some(&v)
+                && Self::should_replace_vendor(device.vendor.as_deref(), &v, oui_vendor)
+            {
+                device.vendor = Some(v);
+                changed = true;
             }
 
             if changed {
@@ -1513,16 +1511,14 @@ impl DeviceTracker {
             Some(existing) => {
                 // If the incoming vendor is from a confirmed phone, allow the correction
                 // (e.g. replacing generic "Google" or "Apple" with the actual phone manufacturer).
-                if incoming.eq_ignore_ascii_case("Motorola")
+                if (incoming.eq_ignore_ascii_case("Motorola")
                     || incoming.eq_ignore_ascii_case("Samsung")
                     || incoming.eq_ignore_ascii_case("Apple")
-                    || incoming.eq_ignore_ascii_case("Google")
+                    || incoming.eq_ignore_ascii_case("Google"))
+                    && (existing.eq_ignore_ascii_case("Google")
+                        || existing.eq_ignore_ascii_case("Apple"))
                 {
-                    if existing.eq_ignore_ascii_case("Google")
-                        || existing.eq_ignore_ascii_case("Apple")
-                    {
-                        return true;
-                    }
+                    return true;
                 }
 
                 if existing.eq_ignore_ascii_case("Google")
@@ -1578,10 +1574,11 @@ impl DeviceTracker {
 
                 // Do not downgrade a device with active mDNS/SSDP discovery services to a generic class,
                 // UNLESS the hostname explicitly confirms it is a specific mobile device (e.g. Moto, Samsung, iPhone).
-                if !is_generic(&existing) && is_generic(&incoming) {
-                    if !is_confirmed_phone(device.hostname.as_deref()) {
-                        return false;
-                    }
+                if !is_generic(&existing)
+                    && is_generic(&incoming)
+                    && !is_confirmed_phone(device.hostname.as_deref())
+                {
+                    return false;
                 }
 
                 // Upgrade from generic/inferred to specific/refined,
