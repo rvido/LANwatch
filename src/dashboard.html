@@ -508,9 +508,11 @@
             </div>
             <div class="modal-details">
                 <div class="details-grid">
-                    <div class="detail-item">
-                        <span class="detail-label">IP Address</span>
-                        <span class="detail-value" id="modal-ip">Unspecified</span>
+                    <div class="detail-item" style="grid-column: span 2;">
+                        <span class="detail-label">IP Addresses</span>
+                        <div id="modal-ip-list" style="display: flex; flex-direction: column; gap: 0.5rem; margin-top: 0.25rem; width: 100%;">
+                            <!-- Dynamically populated IP rows -->
+                        </div>
                     </div>
                     <div class="detail-item">
                         <span class="detail-label">MAC Address</span>
@@ -542,6 +544,16 @@
     </div>
 
     <script>
+        function isIpv4(ip) {
+            if (!ip || ip === "0.0.0.0" || ip === "::") return false;
+            return ip.includes('.');
+        }
+
+        function isIpv6(ip) {
+            if (!ip || ip === "::") return false;
+            return ip.includes(':');
+        }
+
         let devicesData = [];
         let currentCategory = 'all';
         let lastRenderedKeys = '';
@@ -698,10 +710,15 @@
             const search = document.getElementById('search').value.toLowerCase().trim();
             const filtered = devicesData.filter(d => {
                 const matchesFilter = matchesCategory(d, currentCategory);
+                const matchesIpv6 = (d.ipv6_addresses || []).some(addr => 
+                    addr.toLowerCase().includes(search)
+                ) || (d.ipv6_address || '').toLowerCase().includes(search);
+
                 const matchesSearch = 
                     (d.hostname || '').toLowerCase().includes(search) ||
                     (d.mac_address || '').toLowerCase().includes(search) ||
                     (d.ip_address || '').toLowerCase().includes(search) ||
+                    matchesIpv6 ||
                     (d.device_type || '').toLowerCase().includes(search) ||
                     (d.vendor || '').toLowerCase().includes(search) ||
                     (d.system_description || '').toLowerCase().includes(search);
@@ -709,7 +726,7 @@
             });
 
             // Diff check: only rebuild grid DOM if the matched keys/values have changed
-            const currentMatchedKeys = filtered.map(d => `${d.mac_address}-${d.ip_address}-${d.hostname}-${d.device_type}`).join('|');
+            const currentMatchedKeys = filtered.map(d => `${d.mac_address}-${d.ip_address}-${d.ipv6_address}-${(d.ipv6_addresses || []).length}-${d.hostname}-${d.device_type}`).join('|');
             if (currentMatchedKeys === lastRenderedKeys) {
                 return;
             }
@@ -731,9 +748,65 @@
                     name = `Private Device (${d.mac_address.slice(-8)})`.toUpperCase();
                 }
                 const type = d.device_type || "Generic Device";
-                const ip = d.ip_address === "0.0.0.0" ? "IPv6-Only / NDP" : d.ip_address;
                 const mac = d.mac_address;
                 const vendor = d.vendor || "Unknown Vendor";
+
+                const ip = d.ip_address;
+                const showIpv4 = isIpv4(ip);
+                
+                // Collect unique IPv6 addresses
+                let ipv6List = [];
+                if (isIpv6(ip)) {
+                    ipv6List.push(ip);
+                }
+                if (d.ipv6_address && isIpv6(d.ipv6_address)) {
+                    if (!ipv6List.includes(d.ipv6_address)) {
+                        ipv6List.push(d.ipv6_address);
+                    }
+                }
+                if (d.ipv6_addresses && Array.isArray(d.ipv6_addresses)) {
+                    d.ipv6_addresses.forEach(addr => {
+                        if (addr && isIpv6(addr) && !ipv6List.includes(addr)) {
+                            ipv6List.push(addr);
+                        }
+                    });
+                }
+
+                let metaRowsHtml = '';
+                if (showIpv4) {
+                    metaRowsHtml += `
+                        <div class="meta-row">
+                            <span class="meta-label">IPv4</span>
+                            <span class="meta-val">${ip}</span>
+                        </div>
+                    `;
+                }
+
+                if (ipv6List.length > 0) {
+                    const primaryIpv6 = ipv6List[0];
+                    const countBadge = ipv6List.length > 1 ? ` <span style="font-size: 0.7rem; color: var(--primary); background: var(--primary-glow); padding: 0.1rem 0.3rem; border-radius: 4px; font-weight: bold; border: 1px solid rgba(139, 92, 246, 0.2)">+${ipv6List.length - 1}</span>` : '';
+                    
+                    let displayIpv6 = primaryIpv6;
+                    if (displayIpv6.length > 20) {
+                        displayIpv6 = displayIpv6.slice(0, 18) + '...';
+                    }
+
+                    metaRowsHtml += `
+                        <div class="meta-row" title="${ipv6List.join('\n')}">
+                            <span class="meta-label">IPv6</span>
+                            <span class="meta-val">${displayIpv6}${countBadge}</span>
+                        </div>
+                    `;
+                }
+
+                if (!showIpv4 && ipv6List.length === 0) {
+                    metaRowsHtml += `
+                        <div class="meta-row">
+                            <span class="meta-label">IP</span>
+                            <span class="meta-val">Unspecified</span>
+                        </div>
+                    `;
+                }
 
                 const card = document.createElement('div');
                 card.className = 'device-card';
@@ -751,10 +824,7 @@
                         <span class="device-vendor">${vendor}</span>
                     </div>
                     <div class="device-meta">
-                        <div class="meta-row">
-                            <span class="meta-label">IP</span>
-                            <span class="meta-val">${ip}</span>
-                        </div>
+                        ${metaRowsHtml}
                         <div class="meta-row">
                             <span class="meta-label">MAC</span>
                             <span class="meta-val">${mac}</span>
@@ -782,9 +852,77 @@
             }
             document.getElementById('modal-title').textContent = title;
             document.getElementById('modal-subtitle').textContent = `${device.device_type || 'Generic Device'} / ${device.vendor || 'Unknown Vendor'}`;
+            const ipListContainer = document.getElementById('modal-ip-list');
+            ipListContainer.innerHTML = '';
+
+            const showIpv4 = isIpv4(device.ip_address);
             
-            const ipVal = device.ip_address === "0.0.0.0" ? "IPv6-Only / NDP" : device.ip_address;
-            document.getElementById('modal-ip').innerHTML = `${ipVal} <button class="copy-btn" onclick="copyText(this, '${ipVal}')">Copy</button>`;
+            // Collect unique IPv6 addresses
+            let ipv6List = [];
+            if (isIpv6(device.ip_address)) {
+                ipv6List.push(device.ip_address);
+            }
+            if (device.ipv6_address && isIpv6(device.ipv6_address)) {
+                if (!ipv6List.includes(device.ipv6_address)) {
+                    ipv6List.push(device.ipv6_address);
+                }
+            }
+            if (device.ipv6_addresses && Array.isArray(device.ipv6_addresses)) {
+                device.ipv6_addresses.forEach(addr => {
+                    if (addr && isIpv6(addr) && !ipv6List.includes(addr)) {
+                        ipv6List.push(addr);
+                    }
+                });
+            }
+
+            if (showIpv4) {
+                const ipVal = device.ip_address;
+                const row = document.createElement('div');
+                row.style.display = 'flex';
+                row.style.justifyContent = 'space-between';
+                row.style.alignItems = 'center';
+                row.style.padding = '0.25rem 0';
+                row.innerHTML = `
+                    <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.9rem; color: var(--text);">
+                        <span style="color: var(--text-muted); font-size: 0.75rem; text-transform: uppercase; font-weight: bold; margin-right: 0.5rem; background: rgba(255,255,255,0.05); padding: 0.1rem 0.3rem; border-radius: 4px;">IPv4</span>
+                        ${ipVal}
+                    </span>
+                    <button class="copy-btn" onclick="copyText(this, '${ipVal}')">Copy</button>
+                `;
+                ipListContainer.appendChild(row);
+            }
+
+            ipv6List.forEach(addr => {
+                const row = document.createElement('div');
+                row.style.display = 'flex';
+                row.style.justifyContent = 'space-between';
+                row.style.alignItems = 'center';
+                row.style.padding = '0.25rem 0';
+                
+                let typeStr = 'IPv6';
+                const lower = addr.toLowerCase();
+                if (lower.startsWith('fe80:')) {
+                    typeStr = 'IPv6 Link-Local';
+                } else if (lower.startsWith('fc') || lower.startsWith('fd')) {
+                    typeStr = 'IPv6 Unique Local';
+                } else {
+                    typeStr = 'IPv6 Global';
+                }
+
+                row.innerHTML = `
+                    <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.9rem; color: var(--text);">
+                        <span style="color: var(--primary); font-size: 0.75rem; text-transform: uppercase; font-weight: bold; margin-right: 0.5rem; background: var(--primary-glow); padding: 0.1rem 0.3rem; border-radius: 4px;">${typeStr}</span>
+                        ${addr}
+                    </span>
+                    <button class="copy-btn" onclick="copyText(this, '${addr}')">Copy</button>
+                `;
+                ipListContainer.appendChild(row);
+            });
+
+            if (!showIpv4 && ipv6List.length === 0) {
+                ipListContainer.innerHTML = `<span class="detail-value" style="color: var(--text-muted);">Unspecified</span>`;
+            }
+
             document.getElementById('modal-mac').innerHTML = `${device.mac_address} <button class="copy-btn" onclick="copyText(this, '${device.mac_address}')">Copy</button>`;
             
             document.getElementById('modal-type').textContent = device.device_type || "Generic Device";
