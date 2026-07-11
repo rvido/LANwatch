@@ -250,6 +250,7 @@ curl http://localhost:3000/health
       "mac_address": "AA:BB:CC:DD:EE:FF",
       "ip_address": "192.168.1.100",
       "ipv6_address": "fe80::1",
+      "ipv6_addresses": ["fe80::1", "2001:db8::1"],
       "hostname": "mydevice",
       "services": ["_http._tcp", "_airplay._tcp"],
       "vendor": "Apple",
@@ -264,6 +265,11 @@ curl http://localhost:3000/health
 ### Web Dashboard
 
 LANwatch features a premium web-based dashboard accessible directly at `http://localhost:8080/` (or the custom address configured via the `--api` flag) when running the sniffer. The dashboard dynamically updates as devices are discovered, offering search filtering, category tabs, and detailed inspection views.
+
+**Key UI Features:**
+- **Simultaneous IPv4 & IPv6 Tracking**: Displays both IPv4 and multiple IPv6 addresses (link-local, local, global unicast) for each device tile, including a themed badge for additional detected IPv6 addresses.
+- **Scope-based IP Classification**: In the inspection drawer, addresses are clearly organized and labeled by scope (`IPv4`, `IPv6 Link-Local`, `IPv6 Unique Local`, `IPv6 Global`).
+- **Secure Context Clipboard Fallback**: Integrated copy-to-clipboard buttons for all IP and MAC addresses that work seamlessly in both secure contexts (HTTPS/localhost) and insecure contexts (HTTP/remote IP) with visual green success animations.
 
 ![Device Inspection Info](assets/lanwatch_dashboard_device_info_blurred.jpg)
 
