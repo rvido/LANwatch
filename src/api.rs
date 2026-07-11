@@ -353,3 +353,157 @@ pub fn start_api_server(
         server.run();
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::device::DeviceInfo;
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    fn get_http_body(response: &str) -> &str {
+        if let Some(pos) = response.find("\r\n\r\n") {
+            &response[pos + 4..]
+        } else {
+            response
+        }
+    }
+
+    #[test]
+    fn test_api_server_endpoints() {
+        let temp_db = "/tmp/lanwatch_test_api.db";
+        let _ = std::fs::remove_file(temp_db);
+        let _ = std::fs::remove_file(format!("{}-journal", temp_db));
+        let _ = std::fs::remove_file(format!("{}-wal", temp_db));
+        let _ = std::fs::remove_file(format!("{}-shm", temp_db));
+
+        let tracker = Arc::new(RwLock::new(DeviceTracker::new(temp_db).unwrap()));
+
+        // Insert a dummy device
+        {
+            let mut guard = tracker.write().unwrap();
+            let mut device = DeviceInfo::new(
+                "aa:bb:cc:dd:ee:ff".to_string(),
+                "192.168.1.100".parse().unwrap(),
+                Some("test-device".to_string()),
+            );
+            device.device_type = Some("Laptop".to_string());
+            device.vendor = Some("Dell".to_string());
+            let mac = device.mac_address.clone();
+            guard.devices.insert(mac.clone(), device);
+            guard.dirty_devices.lock().unwrap().insert(mac);
+            guard.save_to_db().unwrap();
+        }
+
+        // Bind to a free port dynamically allocated by the OS
+        let api_server = ApiServer::new("127.0.0.1:0", Arc::clone(&tracker)).unwrap();
+        let bound_addr = api_server.server.server_addr().to_string();
+
+        // Run the server loop in a separate thread so it doesn't block the test
+        let server_clone = api_server.clone();
+        let _server_handle = std::thread::spawn(move || {
+            for request in server_clone.server.incoming_requests() {
+                let response = server_clone.handle_request(&request);
+                let _ = request.respond(response);
+            }
+        });
+
+        // 1. Test /health
+        {
+            let mut stream = TcpStream::connect(&bound_addr).unwrap();
+            stream
+                .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            let body = get_http_body(&response);
+            assert!(body.contains("\"status\":\"ok\""));
+        }
+
+        // 2. Test /devices/count
+        {
+            let mut stream = TcpStream::connect(&bound_addr).unwrap();
+            stream
+                .write_all(
+                    b"GET /devices/count HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            let body = get_http_body(&response);
+            assert!(body.contains("\"count\":1"));
+        }
+
+        // 3. Test /devices
+        {
+            let mut stream = TcpStream::connect(&bound_addr).unwrap();
+            stream
+                .write_all(b"GET /devices HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            let body = get_http_body(&response);
+            println!("BODY: {:?}", body);
+            assert!(body.contains("\"mac_address\":\"aa:bb:cc:dd:ee:ff\""));
+            assert!(body.contains("\"hostname\":\"test-device\""));
+        }
+
+        // 4. Test /devices/aa:bb:cc:dd:ee:ff
+        {
+            let mut stream = TcpStream::connect(&bound_addr).unwrap();
+            stream.write_all(b"GET /devices/aa:bb:cc:dd:ee:ff HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            let body = get_http_body(&response);
+            assert!(body.contains("\"mac_address\":\"aa:bb:cc:dd:ee:ff\""));
+        }
+
+        // 5. Test /devices/unknown (404)
+        {
+            let mut stream = TcpStream::connect(&bound_addr).unwrap();
+            stream.write_all(b"GET /devices/11:22:33:44:55:66 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            let body = get_http_body(&response);
+            assert!(body.contains("\"success\":false"));
+        }
+
+        // 6. Test /invalid-path (404)
+        {
+            let mut stream = TcpStream::connect(&bound_addr).unwrap();
+            stream
+                .write_all(
+                    b"GET /invalid-path HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            assert!(response.contains("404 Not Found"));
+        }
+
+        // 7. Test / (Root serves dashboard)
+        {
+            let mut stream = TcpStream::connect(&bound_addr).unwrap();
+            stream
+                .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            let body = get_http_body(&response);
+            assert!(body.contains("<!DOCTYPE html>"));
+        }
+
+        // 8. Test parse_query_params
+        let (limit, offset) = ApiServer::parse_query_params("/devices?limit=10&offset=5");
+        assert_eq!(limit, Some(10));
+        assert_eq!(offset, 5);
+
+        // Terminate the server to stop the thread loop
+        drop(api_server);
+
+        let _ = std::fs::remove_file(temp_db);
+        let _ = std::fs::remove_file(format!("{}-journal", temp_db));
+        let _ = std::fs::remove_file(format!("{}-wal", temp_db));
+        let _ = std::fs::remove_file(format!("{}-shm", temp_db));
+    }
+}
