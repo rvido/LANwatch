@@ -43,6 +43,90 @@ fn is_confirmed_phone(hostname: Option<&str>) -> bool {
         || h.contains("ipad")
 }
 
+struct ModelRule {
+    pattern: &'static str,
+    vendor: &'static str,
+    device_type: &'static str,
+}
+
+const MODEL_RULES: &[ModelRule] = &[
+    ModelRule {
+        pattern: "appletv",
+        vendor: "Apple",
+        device_type: "Apple TV",
+    },
+    ModelRule {
+        pattern: "apple tv",
+        vendor: "Apple",
+        device_type: "Apple TV",
+    },
+    ModelRule {
+        pattern: "macbook",
+        vendor: "Apple",
+        device_type: "Mac",
+    },
+    ModelRule {
+        pattern: "imac",
+        vendor: "Apple",
+        device_type: "Mac",
+    },
+    ModelRule {
+        pattern: "macmini",
+        vendor: "Apple",
+        device_type: "Mac",
+    },
+    ModelRule {
+        pattern: "macpro",
+        vendor: "Apple",
+        device_type: "Mac",
+    },
+    ModelRule {
+        pattern: "chromecast",
+        vendor: "Google",
+        device_type: "Media Player",
+    },
+    ModelRule {
+        pattern: "hp ",
+        vendor: "HP",
+        device_type: "Printer",
+    },
+    ModelRule {
+        pattern: "laserjet",
+        vendor: "HP",
+        device_type: "Printer",
+    },
+    ModelRule {
+        pattern: "officejet",
+        vendor: "HP",
+        device_type: "Printer",
+    },
+    ModelRule {
+        pattern: "deskjet",
+        vendor: "HP",
+        device_type: "Printer",
+    },
+    ModelRule {
+        pattern: "epson",
+        vendor: "Epson",
+        device_type: "Printer",
+    },
+    ModelRule {
+        pattern: "canon",
+        vendor: "Canon",
+        device_type: "Printer",
+    },
+    ModelRule {
+        pattern: "brother",
+        vendor: "Brother",
+        device_type: "Printer",
+    },
+    ModelRule {
+        pattern: "sonos",
+        vendor: "Sonos",
+        device_type: "Smart Speaker",
+    },
+];
+
 /// Device tracker that maintains a list of seen devices and saves to SQLite
 pub struct DeviceTracker {
     pub(crate) devices: HashMap<String, DeviceInfo>,
@@ -874,8 +958,7 @@ impl DeviceTracker {
         let oui_vendor = self
             .oui_registry
             .as_ref()
-            .and_then(|registry| registry.lookup(&target_mac))
-            .map(str::to_string);
+            .and_then(|registry| registry.lookup(&target_mac));
 
         // Track the first hostname and addresses seen (defer String allocation)
         let mut first_hostname: Option<&str> = None;
@@ -942,9 +1025,9 @@ impl DeviceTracker {
         // Extract IoT-specific metadata (Matter, HAP)
         let iot_meta = crate::parser::iot::extract_iot_metadata(&services, &txt_attrs);
 
-        let mut txt_vendor = iot_meta.vendor.map(|c| c.into_owned());
-        let mut txt_device_type = iot_meta.device_type.map(|c| c.into_owned());
-        let txt_model = iot_meta.model.map(|c| c.into_owned());
+        let mut txt_vendor = iot_meta.vendor.as_deref();
+        let mut txt_device_type = iot_meta.device_type.as_deref();
+        let txt_model = iot_meta.model.as_ref();
 
         if txt_vendor.is_none()
             && txt_device_type.is_none()
@@ -960,48 +1043,23 @@ impl DeviceTracker {
             } else {
                 model
             };
-            if m.contains("appletv") || m.contains("apple tv") {
-                txt_vendor = Some("Apple".to_string());
-                txt_device_type = Some("Apple TV".to_string());
-            } else if m.contains("macbook")
-                || m.contains("imac")
-                || m.contains("macmini")
-                || m.contains("macpro")
-            {
-                txt_vendor = Some("Apple".to_string());
-                txt_device_type = Some("Mac".to_string());
-            } else if m.contains("chromecast") {
-                txt_vendor = Some("Google".to_string());
-                txt_device_type = Some("Media Player".to_string());
-            } else if m.contains("hp ")
-                || m.contains("laserjet")
-                || m.contains("officejet")
-                || m.contains("deskjet")
-            {
-                txt_vendor = Some("HP".to_string());
-                txt_device_type = Some("Printer".to_string());
-            } else if m.contains("epson") {
-                txt_vendor = Some("Epson".to_string());
-                txt_device_type = Some("Printer".to_string());
-            } else if m.contains("canon") {
-                txt_vendor = Some("Canon".to_string());
-                txt_device_type = Some("Printer".to_string());
-            } else if m.contains("brother") {
-                txt_vendor = Some("Brother".to_string());
-                txt_device_type = Some("Printer".to_string());
-            } else if m.contains("sonos") {
-                txt_vendor = Some("Sonos".to_string());
-                txt_device_type = Some("Smart Speaker".to_string());
+
+            for rule in MODEL_RULES {
+                if m.contains(rule.pattern) {
+                    txt_vendor = Some(rule.vendor);
+                    txt_device_type = Some(rule.device_type);
+                    break;
+                }
             }
         }
 
         // Determine vendor and device type from services and hostname (before borrowing device)
         let vendor = Self::detect_vendor_from_hostname(first_hostname)
-            .or(txt_vendor.as_deref())
+            .or(txt_vendor)
             .or_else(|| self.detect_vendor_from_services(&services))
             .map(str::to_string);
         let device_type = Self::detect_device_type_from_hostname(first_hostname)
-            .or(txt_device_type.as_deref())
+            .or(txt_device_type)
             .or_else(|| self.detect_device_type_from_services(&services))
             .map(str::to_string);
 
@@ -1049,9 +1107,9 @@ impl DeviceTracker {
             }
 
             // Set vendor if detected (or fall back to OUI vendor)
-            let vendor_to_apply = vendor.or_else(|| oui_vendor.clone());
+            let vendor_to_apply = vendor.as_deref().or(oui_vendor);
             if let Some(v) = vendor_to_apply
-                && Self::should_replace_vendor(device.vendor.as_deref(), &v, oui_vendor.as_deref())
+                && Self::should_replace_vendor(device.vendor.as_deref(), v, oui_vendor)
             {
                 // Protect Eero devices from being overwritten by other vendors
                 let is_eero = first_hostname
@@ -1068,20 +1126,19 @@ impl DeviceTracker {
                         .map(|v| v.eq_ignore_ascii_case("eero inc."))
                         .unwrap_or(false)
                     || oui_vendor
-                        .as_deref()
                         .map(|v| v.eq_ignore_ascii_case("eero inc."))
                         .unwrap_or(false);
-                if !is_eero || v.eq_ignore_ascii_case("eero inc.") {
-                    if device.vendor.as_deref() != Some(&v) {
-                        device.vendor = Some(v.clone());
-                    }
+                if (!is_eero || v.eq_ignore_ascii_case("eero inc."))
+                    && device.vendor.as_deref() != Some(v)
+                {
+                    device.vendor = Some(v.to_string());
                     updated += 1;
                 }
             }
 
             // Set device type if detected
-            let mut dt_to_apply = device_type.clone();
-            if let Some(ref dt) = dt_to_apply {
+            let mut dt_to_apply = device_type.as_deref();
+            if let Some(dt) = dt_to_apply {
                 let effective_hostname = first_hostname.or(device.hostname.as_deref());
                 if is_confirmed_phone(effective_hostname) {
                     let dt_lower = dt.to_lowercase();
@@ -1096,7 +1153,7 @@ impl DeviceTracker {
             }
 
             if let Some(t) = dt_to_apply
-                && Self::should_replace_device_type(device, &t)
+                && Self::should_replace_device_type(device, t)
             {
                 // Protect Eero devices from being overwritten by other device types
                 let is_eero = first_hostname
@@ -1113,19 +1170,18 @@ impl DeviceTracker {
                         .map(|v| v.eq_ignore_ascii_case("eero inc."))
                         .unwrap_or(false)
                     || oui_vendor
-                        .as_deref()
                         .map(|v| v.eq_ignore_ascii_case("eero inc."))
                         .unwrap_or(false);
-                if !is_eero || t.eq_ignore_ascii_case("Router") {
-                    if device.device_type.as_deref() != Some(&t) {
-                        device.device_type = Some(t.clone());
-                    }
+                if (!is_eero || t.eq_ignore_ascii_case("Router"))
+                    && device.device_type.as_deref() != Some(t)
+                {
+                    device.device_type = Some(t.to_string());
                     updated += 1;
                 }
             }
 
             // Set system description if IoT model is present
-            if let Some(ref desc) = txt_model {
+            if let Some(desc) = txt_model {
                 // Protect Eero devices from being overwritten by other system descriptions
                 let is_eero = first_hostname
                     .map(|h| h.to_ascii_lowercase().contains("eero"))
@@ -1141,13 +1197,12 @@ impl DeviceTracker {
                         .map(|v| v.eq_ignore_ascii_case("eero inc."))
                         .unwrap_or(false)
                     || oui_vendor
-                        .as_deref()
                         .map(|v| v.eq_ignore_ascii_case("eero inc."))
                         .unwrap_or(false);
                 if (!is_eero || desc.to_ascii_lowercase().contains("eero"))
-                    && device.system_description.as_ref() != Some(desc)
+                    && device.system_description.as_deref() != Some(desc.as_ref())
                 {
-                    device.system_description = Some(desc.clone());
+                    device.system_description = Some(desc.clone().into_owned());
                     updated += 1;
                 }
             }

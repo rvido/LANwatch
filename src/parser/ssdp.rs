@@ -187,120 +187,24 @@ impl<'a> SsdpPacketView<'a> {
 
     /// Detect vendor from SSDP fingerprints without allocating a combined string.
     pub fn detect_vendor_from_view(&self) -> Option<&'static str> {
-        if self.view_contains_any(&["apple", "airport", "airplay"]) {
-            return Some("Apple");
+        for rule in SSDP_VENDOR_RULES {
+            if self.view_contains_any(rule.patterns) {
+                return Some(rule.vendor);
+            }
         }
-        if self.view_contains_any(&["lenovo", "legion", "thinkpad", "ideapad", "yoga"]) {
-            return Some("Lenovo");
-        }
-        if self.view_contains_any(&["google", "chromecast", "android tv"]) {
-            return Some("Google");
-        }
-        if self.view_contains_any(&["amazon", "alexa", "fire tv"]) {
-            return Some("Amazon");
-        }
-        if self.view_contains_any(&["samsung"]) {
-            return Some("Samsung");
-        }
-        if self.view_contains_any(&["lg ", "lge"]) {
-            return Some("LG");
-        }
-        if self.view_contains_any(&["sony"]) {
-            return Some("Sony");
-        }
-        if self.view_contains_any(&["roku"]) {
-            return Some("Roku");
-        }
-        if self.view_contains_any(&["sonos"]) {
-            return Some("Sonos");
-        }
-        if self.view_contains_any(&["microsoft", "windows"]) {
-            return Some("Microsoft");
-        }
-        if self.view_contains_any(&["philips", "hue"]) {
-            return Some("Philips");
-        }
-        if self.view_contains_any(&["netgear"]) {
-            return Some("Netgear");
-        }
-        if self.view_contains_any(&["tp-link", "tplink"]) {
-            return Some("TP-Link");
-        }
-        if self.view_contains_any(&["ubiquiti", "unifi"]) {
-            return Some("Ubiquiti");
-        }
-        if self.view_contains_any(&["d-link"]) {
-            return Some("D-Link");
-        }
-        if self.view_contains_any(&["bose"]) {
-            return Some("Bose");
-        }
-        if self.view_contains_any(&["denon"]) {
-            return Some("Denon");
-        }
-        if self.view_contains_any(&["yamaha"]) {
-            return Some("Yamaha");
-        }
-        if self.view_contains_any(&["synology"]) {
-            return Some("Synology");
-        }
-        if self.view_contains_any(&["qnap"]) {
-            return Some("QNAP");
-        }
-
         None
     }
 
     /// Detect device type from SSDP fingerprints without allocating a combined string.
     pub fn detect_device_type_from_view(&self) -> Option<&'static str> {
-        if self.view_contains_any(&["mediarenderer", "renderer"]) {
-            return Some("Media Renderer");
+        for rule in SSDP_DEVICE_TYPE_RULES {
+            let matches_any = self.view_contains_any(rule.any_patterns);
+            let matches_extra =
+                rule.extra_patterns.is_empty() || self.view_contains_any(rule.extra_patterns);
+            if matches_any && matches_extra {
+                return Some(rule.device_type);
+            }
         }
-        if self.view_contains_any(&["lenovo", "legion", "thinkpad", "ideapad", "yoga"]) {
-            return Some("Laptop");
-        }
-        if self.view_contains_any(&[
-            "googlecast",
-            "dial-multiscreen-org",
-            "internetgatewaydevice",
-        ]) && self.view_contains_any(&["windows", "rvd_", "pc", "lenovo", "legion"])
-        {
-            return Some("Laptop");
-        }
-        if self.view_contains_any(&["mediaserver"]) {
-            return Some("Media Server");
-        }
-        if self.view_contains_any(&["internetgatewaydevice", "wanconnectiondevice", "router"]) {
-            return Some("Router");
-        }
-        if self.view_contains_any(&["printer", "print"]) {
-            return Some("Printer");
-        }
-        if self.view_contains_any(&["scanner"]) {
-            return Some("Scanner");
-        }
-        if self.view_contains_any(&["television", "tvdevice", "smarttv"]) {
-            return Some("TV");
-        }
-        if self.view_contains_any(&["camera", "ipcamera"]) {
-            return Some("IP Camera");
-        }
-        if self.view_contains_any(&["speaker", "soundbar"]) {
-            return Some("Speaker");
-        }
-        if self.view_contains_any(&["gameconsole", "xbox", "playstation"]) {
-            return Some("Gaming Console");
-        }
-        if self.view_contains_any(&["set-top", "settop"]) {
-            return Some("Set Top Box");
-        }
-        if self.view_contains_any(&["nas", "storage"]) {
-            return Some("NAS");
-        }
-        if self.view_contains_any(&["bridge", "light", "bulb", "homekit"]) {
-            return Some("Smart Home Device");
-        }
-
         None
     }
 
@@ -318,6 +222,177 @@ impl<'a> SsdpPacketView<'a> {
             .any(|needle| contains_ascii_case_insensitive(haystack, needle))
     }
 }
+
+struct SsdpVendorRule {
+    patterns: &'static [&'static str],
+    vendor: &'static str,
+}
+
+const SSDP_VENDOR_RULES: &[SsdpVendorRule] = &[
+    SsdpVendorRule {
+        patterns: &["apple", "airport", "airplay"],
+        vendor: "Apple",
+    },
+    SsdpVendorRule {
+        patterns: &["lenovo", "legion", "thinkpad", "ideapad", "yoga"],
+        vendor: "Lenovo",
+    },
+    SsdpVendorRule {
+        patterns: &["google", "chromecast", "android tv"],
+        vendor: "Google",
+    },
+    SsdpVendorRule {
+        patterns: &["amazon", "alexa", "fire tv"],
+        vendor: "Amazon",
+    },
+    SsdpVendorRule {
+        patterns: &["samsung"],
+        vendor: "Samsung",
+    },
+    SsdpVendorRule {
+        patterns: &["lg ", "lge"],
+        vendor: "LG",
+    },
+    SsdpVendorRule {
+        patterns: &["sony"],
+        vendor: "Sony",
+    },
+    SsdpVendorRule {
+        patterns: &["roku"],
+        vendor: "Roku",
+    },
+    SsdpVendorRule {
+        patterns: &["sonos"],
+        vendor: "Sonos",
+    },
+    SsdpVendorRule {
+        patterns: &["microsoft", "windows"],
+        vendor: "Microsoft",
+    },
+    SsdpVendorRule {
+        patterns: &["philips", "hue"],
+        vendor: "Philips",
+    },
+    SsdpVendorRule {
+        patterns: &["netgear"],
+        vendor: "Netgear",
+    },
+    SsdpVendorRule {
+        patterns: &["tp-link", "tplink"],
+        vendor: "TP-Link",
+    },
+    SsdpVendorRule {
+        patterns: &["ubiquiti", "unifi"],
+        vendor: "Ubiquiti",
+    },
+    SsdpVendorRule {
+        patterns: &["d-link"],
+        vendor: "D-Link",
+    },
+    SsdpVendorRule {
+        patterns: &["bose"],
+        vendor: "Bose",
+    },
+    SsdpVendorRule {
+        patterns: &["denon"],
+        vendor: "Denon",
+    },
+    SsdpVendorRule {
+        patterns: &["yamaha"],
+        vendor: "Yamaha",
+    },
+    SsdpVendorRule {
+        patterns: &["synology"],
+        vendor: "Synology",
+    },
+    SsdpVendorRule {
+        patterns: &["qnap"],
+        vendor: "QNAP",
+    },
+];
+
+struct SsdpDeviceTypeRule {
+    any_patterns: &'static [&'static str],
+    extra_patterns: &'static [&'static str],
+    device_type: &'static str,
+}
+
+const SSDP_DEVICE_TYPE_RULES: &[SsdpDeviceTypeRule] = &[
+    SsdpDeviceTypeRule {
+        any_patterns: &["mediarenderer", "renderer"],
+        extra_patterns: &[],
+        device_type: "Media Renderer",
+    },
+    SsdpDeviceTypeRule {
+        any_patterns: &["lenovo", "legion", "thinkpad", "ideapad", "yoga"],
+        extra_patterns: &[],
+        device_type: "Laptop",
+    },
+    SsdpDeviceTypeRule {
+        any_patterns: &[
+            "googlecast",
+            "dial-multiscreen-org",
+            "internetgatewaydevice",
+        ],
+        extra_patterns: &["windows", "rvd_", "pc", "lenovo", "legion"],
+        device_type: "Laptop",
+    },
+    SsdpDeviceTypeRule {
+        any_patterns: &["mediaserver"],
+        extra_patterns: &[],
+        device_type: "Media Server",
+    },
+    SsdpDeviceTypeRule {
+        any_patterns: &["internetgatewaydevice", "wanconnectiondevice", "router"],
+        extra_patterns: &[],
+        device_type: "Router",
+    },
+    SsdpDeviceTypeRule {
+        any_patterns: &["printer", "print"],
+        extra_patterns: &[],
+        device_type: "Printer",
+    },
+    SsdpDeviceTypeRule {
+        any_patterns: &["scanner"],
+        extra_patterns: &[],
+        device_type: "Scanner",
+    },
+    SsdpDeviceTypeRule {
+        any_patterns: &["television", "tvdevice", "smarttv"],
+        extra_patterns: &[],
+        device_type: "TV",
+    },
+    SsdpDeviceTypeRule {
+        any_patterns: &["camera", "ipcamera"],
+        extra_patterns: &[],
+        device_type: "IP Camera",
+    },
+    SsdpDeviceTypeRule {
+        any_patterns: &["speaker", "soundbar"],
+        extra_patterns: &[],
+        device_type: "Speaker",
+    },
+    SsdpDeviceTypeRule {
+        any_patterns: &["gameconsole", "xbox", "playstation"],
+        extra_patterns: &[],
+        device_type: "Gaming Console",
+    },
+    SsdpDeviceTypeRule {
+        any_patterns: &["set-top", "settop"],
+        extra_patterns: &[],
+        device_type: "Set Top Box",
+    },
+    SsdpDeviceTypeRule {
+        any_patterns: &["nas", "storage"],
+        extra_patterns: &[],
+        device_type: "NAS",
+    },
+    SsdpDeviceTypeRule {
+        any_patterns: &["bridge", "light", "bulb", "homekit"],
+        extra_patterns: &[],
+        device_type: "Smart Home Device",
+    },
+];
 
 fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
     let haystack = haystack.as_bytes();

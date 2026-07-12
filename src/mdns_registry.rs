@@ -402,171 +402,28 @@ impl MdnsServiceRegistry {
     fn detect_device_type_from_description(description: &str) -> Option<&'static str> {
         let desc_lower = description.to_lowercase();
 
-        // Streaming devices
-        if desc_lower.contains("chromecast") || desc_lower.contains("chrome cast") {
-            return Some("Chromecast");
+        for rule in DEVICE_TYPE_RULES {
+            let matches_any = rule.any_patterns.is_empty()
+                || rule.any_patterns.iter().any(|p| desc_lower.contains(p));
+            let matches_all = rule.all_patterns.is_empty()
+                || rule.all_patterns.iter().all(|p| desc_lower.contains(p));
+            if matches_any && matches_all {
+                return Some(rule.device_type);
+            }
         }
-        if desc_lower.contains("apple tv") || desc_lower.contains("appletv") {
-            return Some("Apple TV");
-        }
-        if desc_lower.contains("fire tv") || desc_lower.contains("firetv") {
-            return Some("Fire TV");
-        }
-        if desc_lower.contains("airplay") {
-            return Some("Media Streamer");
-        }
-        if desc_lower.contains("android tv") {
-            return Some("Android TV");
-        }
-        if desc_lower.contains("tivo") {
-            return Some("DVR");
-        }
-
-        // Mobile devices
-        if desc_lower.contains("iphone")
-            || desc_lower.contains("ipad")
-            || desc_lower.contains("ios device")
-        {
-            return Some("Apple iPhone");
-        }
-        if desc_lower.contains("mobile device") {
-            return Some("Mobile Device");
-        }
-
-        // Printers & Scanners
-        if desc_lower.contains("printer") || desc_lower.contains("printing") {
-            return Some("Printer");
-        }
-        if desc_lower.contains("scanner") || desc_lower.contains("scanning") {
-            return Some("Scanner");
-        }
-
-        // Network equipment
-        if desc_lower.contains("router") || desc_lower.contains("base station") {
-            return Some("Router");
-        }
-        if desc_lower.contains("switch") {
-            return Some("Router/Switch");
-        }
-        if desc_lower.contains("nas")
-            || desc_lower.contains("network attached storage")
-            || desc_lower.contains("readynas")
-        {
-            return Some("NAS");
-        }
-
-        // Smart home
-        if desc_lower.contains("homekit") && desc_lower.contains("accessory") {
-            return Some("Smart Home Device");
-        }
-        if desc_lower.contains("homekit") {
-            return Some("Smart Home Hub");
-        }
-        if desc_lower.contains("smart light") || desc_lower.contains("hue") {
-            return Some("Smart Light");
-        }
-        if desc_lower.contains("smart speaker") || desc_lower.contains("speaker") {
-            return Some("Speaker");
-        }
-
-        // Cameras
-        if desc_lower.contains("camera") || desc_lower.contains("ip cam") {
-            return Some("IP Camera");
-        }
-
-        // Servers
-        if desc_lower.contains("file sharing") || desc_lower.contains("file server") {
-            return Some("File Server");
-        }
-        if desc_lower.contains("web server") || desc_lower.contains("http") {
-            return Some("Server");
-        }
-        if desc_lower.contains("ssh") || desc_lower.contains("ftp") || desc_lower.contains("telnet")
-        {
-            return Some("Server");
-        }
-
-        // Development
-        if desc_lower.contains("arduino") {
-            return Some("Microcontroller");
-        }
-        if desc_lower.contains("raspberry") {
-            return Some("Raspberry Pi");
-        }
-        if desc_lower.contains("jenkins") {
-            return Some("CI Server");
-        }
-
-        // Desktop/Workstation
-        if desc_lower.contains("screen sharing")
-            || desc_lower.contains("remote desktop")
-            || desc_lower.contains("vnc")
-        {
-            return Some("Desktop");
-        }
-        if desc_lower.contains("workstation") || desc_lower.contains("workgroup") {
-            return Some("Desktop");
-        }
-
-        // Media servers
-        if desc_lower.contains("itunes")
-            || desc_lower.contains("media server")
-            || desc_lower.contains("plex")
-        {
-            return Some("Media Server");
-        }
-        if desc_lower.contains("spotify") {
-            return Some("Speaker");
-        }
-
-        // Gaming
-        if desc_lower.contains("gamestream") || desc_lower.contains("nvidia shield") {
-            return Some("Gaming Device");
-        }
-
         None
     }
 
     /// Detect vendor from description text
     fn detect_vendor_from_description(description: &str) -> Option<&'static str> {
         let desc_lower = description.to_lowercase();
-        if desc_lower.contains("apple")
-            || desc_lower.contains("osx")
-            || desc_lower.contains("itunes")
-            || desc_lower.contains("iphone")
-            || desc_lower.contains("ipad")
-        {
-            Some("Apple")
-        } else if desc_lower.contains("google")
-            || desc_lower.contains("chrome")
-            || desc_lower.contains("android")
-        {
-            Some("Google")
-        } else if desc_lower.contains("amazon")
-            || desc_lower.contains("fire tv")
-            || desc_lower.contains("alexa")
-        {
-            Some("Amazon")
-        } else if desc_lower.contains("samsung") {
-            Some("Samsung")
-        } else if desc_lower.contains("nvidia") {
-            Some("NVIDIA")
-        } else if desc_lower.contains("hp") {
-            Some("HP")
-        } else if desc_lower.contains("canon") {
-            Some("Canon")
-        } else if desc_lower.contains("ubuntu")
-            || desc_lower.contains("linux")
-            || desc_lower.contains("raspberry")
-        {
-            Some("Linux")
-        } else if desc_lower.contains("cisco") {
-            Some("Cisco")
-        } else if desc_lower.contains("netgear") {
-            Some("Netgear")
-        } else {
-            None
+
+        for rule in VENDOR_RULES {
+            if rule.patterns.iter().any(|p| desc_lower.contains(p)) {
+                return Some(rule.vendor);
+            }
         }
+        None
     }
 
     /// Normalize a service type (lowercase, ensure .local suffix removed)
@@ -614,3 +471,212 @@ impl MdnsServiceRegistry {
         self.services.is_empty()
     }
 }
+
+struct DeviceTypeRule {
+    any_patterns: &'static [&'static str],
+    all_patterns: &'static [&'static str],
+    device_type: &'static str,
+}
+
+const DEVICE_TYPE_RULES: &[DeviceTypeRule] = &[
+    // Streaming devices
+    DeviceTypeRule {
+        any_patterns: &["chromecast", "chrome cast"],
+        all_patterns: &[],
+        device_type: "Chromecast",
+    },
+    DeviceTypeRule {
+        any_patterns: &["apple tv", "appletv"],
+        all_patterns: &[],
+        device_type: "Apple TV",
+    },
+    DeviceTypeRule {
+        any_patterns: &["fire tv", "firetv"],
+        all_patterns: &[],
+        device_type: "Fire TV",
+    },
+    DeviceTypeRule {
+        any_patterns: &["airplay"],
+        all_patterns: &[],
+        device_type: "Media Streamer",
+    },
+    DeviceTypeRule {
+        any_patterns: &["android tv"],
+        all_patterns: &[],
+        device_type: "Android TV",
+    },
+    DeviceTypeRule {
+        any_patterns: &["tivo"],
+        all_patterns: &[],
+        device_type: "DVR",
+    },
+    // Mobile devices
+    DeviceTypeRule {
+        any_patterns: &["iphone", "ipad", "ios device"],
+        all_patterns: &[],
+        device_type: "Apple iPhone",
+    },
+    DeviceTypeRule {
+        any_patterns: &["mobile device"],
+        all_patterns: &[],
+        device_type: "Mobile Device",
+    },
+    // Printers & Scanners
+    DeviceTypeRule {
+        any_patterns: &["printer", "printing"],
+        all_patterns: &[],
+        device_type: "Printer",
+    },
+    DeviceTypeRule {
+        any_patterns: &["scanner", "scanning"],
+        all_patterns: &[],
+        device_type: "Scanner",
+    },
+    // Network equipment
+    DeviceTypeRule {
+        any_patterns: &["router", "base station"],
+        all_patterns: &[],
+        device_type: "Router",
+    },
+    DeviceTypeRule {
+        any_patterns: &["switch"],
+        all_patterns: &[],
+        device_type: "Router/Switch",
+    },
+    DeviceTypeRule {
+        any_patterns: &["nas", "network attached storage", "readynas"],
+        all_patterns: &[],
+        device_type: "NAS",
+    },
+    // Smart home
+    DeviceTypeRule {
+        any_patterns: &[],
+        all_patterns: &["homekit", "accessory"],
+        device_type: "Smart Home Device",
+    },
+    DeviceTypeRule {
+        any_patterns: &["homekit"],
+        all_patterns: &[],
+        device_type: "Smart Home Hub",
+    },
+    DeviceTypeRule {
+        any_patterns: &["smart light", "hue"],
+        all_patterns: &[],
+        device_type: "Smart Light",
+    },
+    DeviceTypeRule {
+        any_patterns: &["smart speaker", "speaker"],
+        all_patterns: &[],
+        device_type: "Speaker",
+    },
+    // Cameras
+    DeviceTypeRule {
+        any_patterns: &["camera", "ip cam"],
+        all_patterns: &[],
+        device_type: "IP Camera",
+    },
+    // Servers
+    DeviceTypeRule {
+        any_patterns: &["file sharing", "file server"],
+        all_patterns: &[],
+        device_type: "File Server",
+    },
+    DeviceTypeRule {
+        any_patterns: &["web server", "http", "ssh", "ftp", "telnet"],
+        all_patterns: &[],
+        device_type: "Server",
+    },
+    // Development
+    DeviceTypeRule {
+        any_patterns: &["arduino"],
+        all_patterns: &[],
+        device_type: "Microcontroller",
+    },
+    DeviceTypeRule {
+        any_patterns: &["raspberry"],
+        all_patterns: &[],
+        device_type: "Raspberry Pi",
+    },
+    DeviceTypeRule {
+        any_patterns: &["jenkins"],
+        all_patterns: &[],
+        device_type: "CI Server",
+    },
+    // Desktop/Workstation
+    DeviceTypeRule {
+        any_patterns: &[
+            "screen sharing",
+            "remote desktop",
+            "vnc",
+            "workstation",
+            "workgroup",
+        ],
+        all_patterns: &[],
+        device_type: "Desktop",
+    },
+    // Media servers
+    DeviceTypeRule {
+        any_patterns: &["itunes", "media server", "plex"],
+        all_patterns: &[],
+        device_type: "Media Server",
+    },
+    DeviceTypeRule {
+        any_patterns: &["spotify"],
+        all_patterns: &[],
+        device_type: "Speaker",
+    },
+    // Gaming
+    DeviceTypeRule {
+        any_patterns: &["gamestream", "nvidia shield"],
+        all_patterns: &[],
+        device_type: "Gaming Device",
+    },
+];
+
+struct VendorRule {
+    patterns: &'static [&'static str],
+    vendor: &'static str,
+}
+
+const VENDOR_RULES: &[VendorRule] = &[
+    VendorRule {
+        patterns: &["apple", "osx", "itunes", "iphone", "ipad"],
+        vendor: "Apple",
+    },
+    VendorRule {
+        patterns: &["google", "chrome", "android"],
+        vendor: "Google",
+    },
+    VendorRule {
+        patterns: &["amazon", "fire tv", "alexa"],
+        vendor: "Amazon",
+    },
+    VendorRule {
+        patterns: &["samsung"],
+        vendor: "Samsung",
+    },
+    VendorRule {
+        patterns: &["nvidia"],
+        vendor: "NVIDIA",
+    },
+    VendorRule {
+        patterns: &["hp"],
+        vendor: "HP",
+    },
+    VendorRule {
+        patterns: &["canon"],
+        vendor: "Canon",
+    },
+    VendorRule {
+        patterns: &["ubuntu", "linux", "raspberry"],
+        vendor: "Linux",
+    },
+    VendorRule {
+        patterns: &["cisco"],
+        vendor: "Cisco",
+    },
+    VendorRule {
+        patterns: &["netgear"],
+        vendor: "Netgear",
+    },
+];
