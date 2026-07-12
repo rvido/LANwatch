@@ -395,81 +395,10 @@ impl DeviceTracker {
         self.save_to_db()
     }
 
-    /// Returns a vector of all tracked devices pre-sorted by `last_seen` descending from the SQL database.
+    /// Returns a vector of all tracked devices pre-sorted by `last_seen` descending.
     pub fn get_devices_sorted(&self) -> Vec<DeviceInfo> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = match conn.prepare(
-            "SELECT mac_address, ip_address, ipv6_address, ipv6_addresses, hostname,
-                    system_description, services, vendor, device_type, first_seen, last_seen
-             FROM devices
-             ORDER BY last_seen DESC;",
-        ) {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-
-        let device_iter = match stmt.query_map([], |row| {
-            let mac_address: String = row.get(0)?;
-            let ip_address_str: String = row.get(1)?;
-            let ipv6_address_str: Option<String> = row.get(2)?;
-            let ipv6_addresses_str: Option<String> = row.get(3)?;
-            let hostname: Option<String> = row.get(4)?;
-            let system_description: Option<String> = row.get(5)?;
-            let services_str: Option<String> = row.get(6)?;
-            let vendor: Option<String> = row.get(7)?;
-            let device_type: Option<String> = row.get(8)?;
-            let first_seen_str: String = row.get(9)?;
-            let last_seen_str: String = row.get(10)?;
-
-            let ip_address: IpAddr = ip_address_str
-                .parse()
-                .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
-            let ipv6_address: Option<IpAddr> = ipv6_address_str.and_then(|s| s.parse().ok());
-            let mut ipv6_addresses = Vec::new();
-            if let Some(s) = ipv6_addresses_str {
-                for ip in s.split(';') {
-                    if let Ok(ipv6) = ip.parse() {
-                        ipv6_addresses.push(ipv6);
-                    }
-                }
-            }
-
-            let mut services = Vec::new();
-            if let Some(s) = services_str {
-                for service in s.split(';') {
-                    if !service.is_empty() {
-                        services.push(service.to_string());
-                    }
-                }
-            }
-
-            let first_seen =
-                crate::device::parse_timestamp(&first_seen_str).unwrap_or_else(SystemTime::now);
-            let last_seen =
-                crate::device::parse_timestamp(&last_seen_str).unwrap_or_else(SystemTime::now);
-
-            Ok(DeviceInfo {
-                mac_address,
-                ip_address,
-                ipv6_address,
-                ipv6_addresses,
-                hostname,
-                system_description,
-                services,
-                vendor,
-                device_type,
-                first_seen,
-                last_seen,
-            })
-        }) {
-            Ok(it) => it,
-            Err(_) => return Vec::new(),
-        };
-
-        let mut list = Vec::new();
-        for device in device_iter.flatten() {
-            list.push(device);
-        }
+        let mut list: Vec<DeviceInfo> = self.devices.values().cloned().collect();
+        list.sort_unstable_by(|a, b| b.last_seen.cmp(&a.last_seen));
         list
     }
 
