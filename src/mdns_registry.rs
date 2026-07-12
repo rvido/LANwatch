@@ -326,7 +326,7 @@ impl MdnsServiceRegistry {
     /// Add a service to the registry (without device_type, for backward compatibility)
     pub fn add(&mut self, service_type: &str, description: &str, vendor: Option<&str>) {
         let device_type = Self::detect_device_type_from_description(description);
-        self.add_full(service_type, description, vendor, device_type.as_deref());
+        self.add_full(service_type, description, vendor, device_type);
     }
 
     /// Adds a service to the registry with explicit vendor and device type metadata.
@@ -391,12 +391,7 @@ impl MdnsServiceRegistry {
             let vendor = Self::detect_vendor_from_description(&description);
             let device_type = Self::detect_device_type_from_description(&description);
 
-            self.add_full(
-                service_type,
-                &description,
-                vendor.as_deref(),
-                device_type.as_deref(),
-            );
+            self.add_full(service_type, &description, vendor, device_type);
             count += 1;
         }
 
@@ -404,27 +399,27 @@ impl MdnsServiceRegistry {
     }
 
     /// Detect device type from description text
-    fn detect_device_type_from_description(description: &str) -> Option<String> {
+    fn detect_device_type_from_description(description: &str) -> Option<&'static str> {
         let desc_lower = description.to_lowercase();
 
         // Streaming devices
         if desc_lower.contains("chromecast") || desc_lower.contains("chrome cast") {
-            return Some("Chromecast".to_string());
+            return Some("Chromecast");
         }
         if desc_lower.contains("apple tv") || desc_lower.contains("appletv") {
-            return Some("Apple TV".to_string());
+            return Some("Apple TV");
         }
         if desc_lower.contains("fire tv") || desc_lower.contains("firetv") {
-            return Some("Fire TV".to_string());
+            return Some("Fire TV");
         }
         if desc_lower.contains("airplay") {
-            return Some("Media Streamer".to_string());
+            return Some("Media Streamer");
         }
         if desc_lower.contains("android tv") {
-            return Some("Android TV".to_string());
+            return Some("Android TV");
         }
         if desc_lower.contains("tivo") {
-            return Some("DVR".to_string());
+            return Some("DVR");
         }
 
         // Mobile devices
@@ -432,74 +427,74 @@ impl MdnsServiceRegistry {
             || desc_lower.contains("ipad")
             || desc_lower.contains("ios device")
         {
-            return Some("Apple iPhone".to_string());
+            return Some("Apple iPhone");
         }
         if desc_lower.contains("mobile device") {
-            return Some("Mobile Device".to_string());
+            return Some("Mobile Device");
         }
 
         // Printers & Scanners
         if desc_lower.contains("printer") || desc_lower.contains("printing") {
-            return Some("Printer".to_string());
+            return Some("Printer");
         }
         if desc_lower.contains("scanner") || desc_lower.contains("scanning") {
-            return Some("Scanner".to_string());
+            return Some("Scanner");
         }
 
         // Network equipment
         if desc_lower.contains("router") || desc_lower.contains("base station") {
-            return Some("Router".to_string());
+            return Some("Router");
         }
         if desc_lower.contains("switch") {
-            return Some("Router/Switch".to_string());
+            return Some("Router/Switch");
         }
         if desc_lower.contains("nas")
             || desc_lower.contains("network attached storage")
             || desc_lower.contains("readynas")
         {
-            return Some("NAS".to_string());
+            return Some("NAS");
         }
 
         // Smart home
         if desc_lower.contains("homekit") && desc_lower.contains("accessory") {
-            return Some("Smart Home Device".to_string());
+            return Some("Smart Home Device");
         }
         if desc_lower.contains("homekit") {
-            return Some("Smart Home Hub".to_string());
+            return Some("Smart Home Hub");
         }
         if desc_lower.contains("smart light") || desc_lower.contains("hue") {
-            return Some("Smart Light".to_string());
+            return Some("Smart Light");
         }
         if desc_lower.contains("smart speaker") || desc_lower.contains("speaker") {
-            return Some("Speaker".to_string());
+            return Some("Speaker");
         }
 
         // Cameras
         if desc_lower.contains("camera") || desc_lower.contains("ip cam") {
-            return Some("IP Camera".to_string());
+            return Some("IP Camera");
         }
 
         // Servers
         if desc_lower.contains("file sharing") || desc_lower.contains("file server") {
-            return Some("File Server".to_string());
+            return Some("File Server");
         }
         if desc_lower.contains("web server") || desc_lower.contains("http") {
-            return Some("Server".to_string());
+            return Some("Server");
         }
         if desc_lower.contains("ssh") || desc_lower.contains("ftp") || desc_lower.contains("telnet")
         {
-            return Some("Server".to_string());
+            return Some("Server");
         }
 
         // Development
         if desc_lower.contains("arduino") {
-            return Some("Microcontroller".to_string());
+            return Some("Microcontroller");
         }
         if desc_lower.contains("raspberry") {
-            return Some("Raspberry Pi".to_string());
+            return Some("Raspberry Pi");
         }
         if desc_lower.contains("jenkins") {
-            return Some("CI Server".to_string());
+            return Some("CI Server");
         }
 
         // Desktop/Workstation
@@ -507,10 +502,10 @@ impl MdnsServiceRegistry {
             || desc_lower.contains("remote desktop")
             || desc_lower.contains("vnc")
         {
-            return Some("Desktop".to_string());
+            return Some("Desktop");
         }
         if desc_lower.contains("workstation") || desc_lower.contains("workgroup") {
-            return Some("Desktop".to_string());
+            return Some("Desktop");
         }
 
         // Media servers
@@ -518,22 +513,22 @@ impl MdnsServiceRegistry {
             || desc_lower.contains("media server")
             || desc_lower.contains("plex")
         {
-            return Some("Media Server".to_string());
+            return Some("Media Server");
         }
         if desc_lower.contains("spotify") {
-            return Some("Speaker".to_string());
+            return Some("Speaker");
         }
 
         // Gaming
         if desc_lower.contains("gamestream") || desc_lower.contains("nvidia shield") {
-            return Some("Gaming Device".to_string());
+            return Some("Gaming Device");
         }
 
         None
     }
 
     /// Detect vendor from description text
-    fn detect_vendor_from_description(description: &str) -> Option<String> {
+    fn detect_vendor_from_description(description: &str) -> Option<&'static str> {
         let desc_lower = description.to_lowercase();
         if desc_lower.contains("apple")
             || desc_lower.contains("osx")
@@ -541,34 +536,34 @@ impl MdnsServiceRegistry {
             || desc_lower.contains("iphone")
             || desc_lower.contains("ipad")
         {
-            Some("Apple".to_string())
+            Some("Apple")
         } else if desc_lower.contains("google")
             || desc_lower.contains("chrome")
             || desc_lower.contains("android")
         {
-            Some("Google".to_string())
+            Some("Google")
         } else if desc_lower.contains("amazon")
             || desc_lower.contains("fire tv")
             || desc_lower.contains("alexa")
         {
-            Some("Amazon".to_string())
+            Some("Amazon")
         } else if desc_lower.contains("samsung") {
-            Some("Samsung".to_string())
+            Some("Samsung")
         } else if desc_lower.contains("nvidia") {
-            Some("NVIDIA".to_string())
+            Some("NVIDIA")
         } else if desc_lower.contains("hp") {
-            Some("HP".to_string())
+            Some("HP")
         } else if desc_lower.contains("canon") {
-            Some("Canon".to_string())
+            Some("Canon")
         } else if desc_lower.contains("ubuntu")
             || desc_lower.contains("linux")
             || desc_lower.contains("raspberry")
         {
-            Some("Linux".to_string())
+            Some("Linux")
         } else if desc_lower.contains("cisco") {
-            Some("Cisco".to_string())
+            Some("Cisco")
         } else if desc_lower.contains("netgear") {
-            Some("Netgear".to_string())
+            Some("Netgear")
         } else {
             None
         }

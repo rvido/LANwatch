@@ -186,78 +186,78 @@ impl<'a> SsdpPacketView<'a> {
     }
 
     /// Detect vendor from SSDP fingerprints without allocating a combined string.
-    pub fn detect_vendor_from_view(&self) -> Option<String> {
+    pub fn detect_vendor_from_view(&self) -> Option<&'static str> {
         if self.view_contains_any(&["apple", "airport", "airplay"]) {
-            return Some("Apple".to_string());
+            return Some("Apple");
         }
         if self.view_contains_any(&["lenovo", "legion", "thinkpad", "ideapad", "yoga"]) {
-            return Some("Lenovo".to_string());
+            return Some("Lenovo");
         }
         if self.view_contains_any(&["google", "chromecast", "android tv"]) {
-            return Some("Google".to_string());
+            return Some("Google");
         }
         if self.view_contains_any(&["amazon", "alexa", "fire tv"]) {
-            return Some("Amazon".to_string());
+            return Some("Amazon");
         }
         if self.view_contains_any(&["samsung"]) {
-            return Some("Samsung".to_string());
+            return Some("Samsung");
         }
         if self.view_contains_any(&["lg ", "lge"]) {
-            return Some("LG".to_string());
+            return Some("LG");
         }
         if self.view_contains_any(&["sony"]) {
-            return Some("Sony".to_string());
+            return Some("Sony");
         }
         if self.view_contains_any(&["roku"]) {
-            return Some("Roku".to_string());
+            return Some("Roku");
         }
         if self.view_contains_any(&["sonos"]) {
-            return Some("Sonos".to_string());
+            return Some("Sonos");
         }
         if self.view_contains_any(&["microsoft", "windows"]) {
-            return Some("Microsoft".to_string());
+            return Some("Microsoft");
         }
         if self.view_contains_any(&["philips", "hue"]) {
-            return Some("Philips".to_string());
+            return Some("Philips");
         }
         if self.view_contains_any(&["netgear"]) {
-            return Some("Netgear".to_string());
+            return Some("Netgear");
         }
         if self.view_contains_any(&["tp-link", "tplink"]) {
-            return Some("TP-Link".to_string());
+            return Some("TP-Link");
         }
         if self.view_contains_any(&["ubiquiti", "unifi"]) {
-            return Some("Ubiquiti".to_string());
+            return Some("Ubiquiti");
         }
         if self.view_contains_any(&["d-link"]) {
-            return Some("D-Link".to_string());
+            return Some("D-Link");
         }
         if self.view_contains_any(&["bose"]) {
-            return Some("Bose".to_string());
+            return Some("Bose");
         }
         if self.view_contains_any(&["denon"]) {
-            return Some("Denon".to_string());
+            return Some("Denon");
         }
         if self.view_contains_any(&["yamaha"]) {
-            return Some("Yamaha".to_string());
+            return Some("Yamaha");
         }
         if self.view_contains_any(&["synology"]) {
-            return Some("Synology".to_string());
+            return Some("Synology");
         }
         if self.view_contains_any(&["qnap"]) {
-            return Some("QNAP".to_string());
+            return Some("QNAP");
         }
 
         None
     }
 
     /// Detect device type from SSDP fingerprints without allocating a combined string.
-    pub fn detect_device_type_from_view(&self) -> Option<String> {
+    pub fn detect_device_type_from_view(&self) -> Option<&'static str> {
         if self.view_contains_any(&["mediarenderer", "renderer"]) {
-            return Some("Media Renderer".to_string());
+            return Some("Media Renderer");
         }
         if self.view_contains_any(&["lenovo", "legion", "thinkpad", "ideapad", "yoga"]) {
-            return Some("Laptop".to_string());
+            return Some("Laptop");
         }
         if self.view_contains_any(&[
             "googlecast",
@@ -265,40 +265,40 @@ impl<'a> SsdpPacketView<'a> {
             "internetgatewaydevice",
         ]) && self.view_contains_any(&["windows", "rvd_", "pc", "lenovo", "legion"])
         {
-            return Some("Laptop".to_string());
+            return Some("Laptop");
         }
         if self.view_contains_any(&["mediaserver"]) {
-            return Some("Media Server".to_string());
+            return Some("Media Server");
         }
         if self.view_contains_any(&["internetgatewaydevice", "wanconnectiondevice", "router"]) {
-            return Some("Router".to_string());
+            return Some("Router");
         }
         if self.view_contains_any(&["printer", "print"]) {
-            return Some("Printer".to_string());
+            return Some("Printer");
         }
         if self.view_contains_any(&["scanner"]) {
-            return Some("Scanner".to_string());
+            return Some("Scanner");
         }
         if self.view_contains_any(&["television", "tvdevice", "smarttv"]) {
-            return Some("TV".to_string());
+            return Some("TV");
         }
         if self.view_contains_any(&["camera", "ipcamera"]) {
-            return Some("IP Camera".to_string());
+            return Some("IP Camera");
         }
         if self.view_contains_any(&["speaker", "soundbar"]) {
-            return Some("Speaker".to_string());
+            return Some("Speaker");
         }
         if self.view_contains_any(&["gameconsole", "xbox", "playstation"]) {
-            return Some("Gaming Console".to_string());
+            return Some("Gaming Console");
         }
         if self.view_contains_any(&["set-top", "settop"]) {
-            return Some("Set Top Box".to_string());
+            return Some("Set Top Box");
         }
         if self.view_contains_any(&["nas", "storage"]) {
-            return Some("NAS".to_string());
+            return Some("NAS");
         }
         if self.view_contains_any(&["bridge", "light", "bulb", "homekit"]) {
-            return Some("Smart Home Device".to_string());
+            return Some("Smart Home Device");
         }
 
         None

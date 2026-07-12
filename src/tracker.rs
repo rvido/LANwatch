@@ -997,13 +997,13 @@ impl DeviceTracker {
 
         // Determine vendor and device type from services and hostname (before borrowing device)
         let vendor = Self::detect_vendor_from_hostname(first_hostname)
-            .map(str::to_string)
-            .or_else(|| txt_vendor.clone())
-            .or_else(|| self.detect_vendor_from_services(&services));
+            .or_else(|| txt_vendor.as_deref())
+            .or_else(|| self.detect_vendor_from_services(&services))
+            .map(str::to_string);
         let device_type = Self::detect_device_type_from_hostname(first_hostname)
-            .map(str::to_string)
-            .or_else(|| txt_device_type.clone())
-            .or_else(|| self.detect_device_type_from_services(&services));
+            .or_else(|| txt_device_type.as_deref())
+            .or_else(|| self.detect_device_type_from_services(&services))
+            .map(str::to_string);
 
         let ipv6_addr = first_ipv6;
 
@@ -1346,7 +1346,7 @@ impl DeviceTracker {
 
     /// Detect vendor from a list of services
     #[cfg(feature = "mdns")]
-    fn detect_vendor_from_services(&self, services: &[&str]) -> Option<String> {
+    fn detect_vendor_from_services(&self, services: &[&str]) -> Option<&str> {
         let mut has_printer_services = false;
         let mut has_scanner_services = false;
 
@@ -1378,7 +1378,7 @@ impl DeviceTracker {
                     if is_peripheral && vendor.eq_ignore_ascii_case("apple") {
                         continue;
                     }
-                    return Some(vendor.to_string());
+                    return Some(vendor);
                 }
             }
         }
@@ -1393,19 +1393,19 @@ impl DeviceTracker {
             };
             if s.contains("googlecast") || s.contains("googlezone") || s.contains("androidtvremote")
             {
-                return Some("Google".to_string());
+                return Some("Google");
             }
             if s.contains("amzn-wplay") {
-                return Some("Amazon".to_string());
+                return Some("Amazon");
             }
             if s.contains("spotify") {
-                return Some("Spotify".to_string());
+                return Some("Spotify");
             }
             if s.contains("nvstream") {
-                return Some("NVIDIA".to_string());
+                return Some("NVIDIA");
             }
             if s.contains("eero") {
-                return Some("eero inc.".to_string());
+                return Some("eero inc.");
             }
             if !is_peripheral
                 && (s.contains("airplay")
@@ -1423,7 +1423,7 @@ impl DeviceTracker {
                     || s.contains("hap._tcp")
                     || s.contains("appletv"))
             {
-                return Some("Apple".to_string());
+                return Some("Apple");
             }
         }
         None
@@ -1548,7 +1548,7 @@ impl DeviceTracker {
 
     /// Detect device type from a list of services
     #[cfg(feature = "mdns")]
-    fn detect_device_type_from_services(&self, services: &[&str]) -> Option<String> {
+    fn detect_device_type_from_services(&self, services: &[&str]) -> Option<&str> {
         for service in services {
             let owned;
             let s = if service.bytes().any(|b| b.is_ascii_uppercase()) {
@@ -1558,39 +1558,39 @@ impl DeviceTracker {
                 service
             };
             if s.contains("googlecast") || s.contains("googlezone") {
-                return Some("Chromecast".to_string());
+                return Some("Chromecast");
             }
             if s.contains("appletv") || s.contains("mediaremotetv") {
-                return Some("Apple TV".to_string());
+                return Some("Apple TV");
             }
             if s.contains("_remotepairing") || s.contains("_atc") || s.contains("_rdlink") {
-                return Some("Apple iPhone".to_string());
+                return Some("Apple iPhone");
             }
             if s.contains("airplay") || s.contains("raop") {
-                return Some("AirPlay Device".to_string());
+                return Some("AirPlay Device");
             }
             if s.contains("amzn-wplay") {
-                return Some("Fire TV".to_string());
+                return Some("Fire TV");
             }
             if s.contains("eero") {
-                return Some("Router".to_string());
+                return Some("Router");
             }
             if s.contains("_printer")
                 || s.contains("_ipp")
                 || s.contains("_pdl-datastream")
                 || s.contains("_print-caps")
             {
-                return Some("Printer".to_string());
+                return Some("Printer");
             }
             if s.contains("_scanner") || s.contains("_uscan") {
-                return Some("Scanner".to_string());
+                return Some("Scanner");
             }
         }
 
         if let Some(registry) = &self.service_registry {
             for service in services {
                 if let Some(device_type) = registry.get_device_type(service) {
-                    return Some(device_type.to_string());
+                    return Some(device_type);
                 }
             }
         }
@@ -1604,19 +1604,19 @@ impl DeviceTracker {
                 service
             };
             if s.contains("_smb") || s.contains("_afpovertcp") || s.contains("_nfs") {
-                return Some("NAS".to_string());
+                return Some("NAS");
             }
             if s.contains("_homekit") || s.contains("_hap") {
-                return Some("Smart Home Device".to_string());
+                return Some("Smart Home Device");
             }
             if s.contains("androidtvremote") {
-                return Some("Android TV".to_string());
+                return Some("Android TV");
             }
             if s.contains("nvstream") {
-                return Some("NVIDIA Shield".to_string());
+                return Some("NVIDIA Shield");
             }
             if s.contains("spotify") {
-                return Some("Spotify Connect Device".to_string());
+                return Some("Spotify Connect Device");
             }
         }
         None
@@ -1636,8 +1636,7 @@ impl DeviceTracker {
         let oui_vendor = self
             .oui_registry
             .as_ref()
-            .and_then(|registry| registry.lookup(mac))
-            .map(str::to_string);
+            .and_then(|registry| registry.lookup(mac));
 
         let vendor = packet.detect_vendor_from_view();
         let device_type = packet.detect_device_type_from_view();
@@ -1681,23 +1680,23 @@ impl DeviceTracker {
         }
 
         // Set vendor if detected (or fall back to OUI vendor)
-        let vendor_to_apply = vendor.or_else(|| oui_vendor.clone());
+        let vendor_to_apply = vendor.or(oui_vendor);
         if let Some(v) = vendor_to_apply
-            && Self::should_replace_vendor(device.vendor.as_deref(), &v, oui_vendor.as_deref())
+            && Self::should_replace_vendor(device.vendor.as_deref(), v, oui_vendor)
         {
-            if device.vendor.as_deref() != Some(&v) {
-                device.vendor = Some(v.clone());
+            if device.vendor.as_deref() != Some(v) {
+                device.vendor = Some(v.to_string());
+                updated += 1;
             }
-            updated += 1;
         }
 
         if let Some(t) = device_type
-            && Self::should_replace_device_type(device, &t)
+            && Self::should_replace_device_type(device, t)
         {
-            if device.device_type.as_deref() != Some(&t) {
-                device.device_type = Some(t.clone());
+            if device.device_type.as_deref() != Some(t) {
+                device.device_type = Some(t.to_string());
+                updated += 1;
             }
-            updated += 1;
         }
 
         device.last_seen = SystemTime::now();
