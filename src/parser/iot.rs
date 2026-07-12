@@ -5,6 +5,7 @@
 
 //! IoT and Smart Home protocol parsers (LIFX, HomeKit HAP, Matter).
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 /// LIFX UDP discovery port
@@ -79,26 +80,29 @@ pub fn parse_lifx_payload(
 
 /// Parsed IoT metadata from mDNS discovery.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct IotMetadata {
+pub struct IotMetadata<'a> {
     /// Inferred vendor name
-    pub vendor: Option<String>,
+    pub vendor: Option<Cow<'a, str>>,
     /// Inferred device type
-    pub device_type: Option<String>,
+    pub device_type: Option<Cow<'a, str>>,
     /// Specific model name/information
-    pub model: Option<String>,
+    pub model: Option<Cow<'a, str>>,
     /// Status description (e.g. "Unpaired / Pairing Mode")
-    pub status: Option<String>,
+    pub status: Option<Cow<'a, str>>,
 }
 
 /// Extracts IoT metadata from mDNS services and TXT attributes.
 ///
 /// Supports Matter and HomeKit (HAP) protocols.
-pub fn extract_iot_metadata(services: &[&str], txt_attrs: &HashMap<String, &str>) -> IotMetadata {
+pub fn extract_iot_metadata<'a>(
+    services: &[&str],
+    txt_attrs: &HashMap<String, &'a str>,
+) -> IotMetadata<'a> {
     let mut meta = IotMetadata::default();
 
     // 1. Matter Protocol Identification
     if services.iter().any(|s| s.contains("_matter")) {
-        meta.device_type = Some("Matter Smart Device".to_string());
+        meta.device_type = Some(Cow::Borrowed("Matter Smart Device"));
 
         let mut vid_str = None;
         let mut pid_str = None;
@@ -113,24 +117,24 @@ pub fn extract_iot_metadata(services: &[&str], txt_attrs: &HashMap<String, &str>
 
             if let Some(v) = parsed_vid {
                 meta.vendor = match v {
-                    0x10B1 => Some("Google".to_string()),
-                    0x1141 => Some("Apple".to_string()),
-                    0x121A => Some("Amazon".to_string()),
-                    0x111D => Some("Samsung".to_string()),
-                    0x100B => Some("Signify (Philips Hue)".to_string()),
-                    0x1224 => Some("Eve Systems".to_string()),
-                    0x115C => Some("Aqara".to_string()),
-                    0x118C => Some("IKEA".to_string()),
-                    0x1339 => Some("Nanoleaf".to_string()),
-                    0x10F2 => Some("Tuya".to_string()),
-                    0x120F => Some("Somfy".to_string()),
-                    0x135A => Some("TP-Link".to_string()),
-                    0x120D => Some("Lutron".to_string()),
-                    0x130B => Some("Yale".to_string()),
-                    0x1325 => Some("Schneider Electric".to_string()),
-                    0x1249 => Some("LeGrand".to_string()),
-                    0x135E => Some("Belkin".to_string()),
-                    0x139B => Some("Bosch".to_string()),
+                    0x10B1 => Some(Cow::Borrowed("Google")),
+                    0x1141 => Some(Cow::Borrowed("Apple")),
+                    0x121A => Some(Cow::Borrowed("Amazon")),
+                    0x111D => Some(Cow::Borrowed("Samsung")),
+                    0x100B => Some(Cow::Borrowed("Signify (Philips Hue)")),
+                    0x1224 => Some(Cow::Borrowed("Eve Systems")),
+                    0x115C => Some(Cow::Borrowed("Aqara")),
+                    0x118C => Some(Cow::Borrowed("IKEA")),
+                    0x1339 => Some(Cow::Borrowed("Nanoleaf")),
+                    0x10F2 => Some(Cow::Borrowed("Tuya")),
+                    0x120F => Some(Cow::Borrowed("Somfy")),
+                    0x135A => Some(Cow::Borrowed("TP-Link")),
+                    0x120D => Some(Cow::Borrowed("Lutron")),
+                    0x130B => Some(Cow::Borrowed("Yale")),
+                    0x1325 => Some(Cow::Borrowed("Schneider Electric")),
+                    0x1249 => Some(Cow::Borrowed("LeGrand")),
+                    0x135E => Some(Cow::Borrowed("Belkin")),
+                    0x139B => Some(Cow::Borrowed("Bosch")),
                     _ => None,
                 };
             }
@@ -141,11 +145,14 @@ pub fn extract_iot_metadata(services: &[&str], txt_attrs: &HashMap<String, &str>
         }
 
         if let (Some(v), Some(p)) = (vid_str, pid_str) {
-            meta.model = Some(format!("Matter Device (VID: {}, PID: {})", v, p));
+            meta.model = Some(Cow::Owned(format!(
+                "Matter Device (VID: {}, PID: {})",
+                v, p
+            )));
         } else if let Some(v) = vid_str {
-            meta.model = Some(format!("Matter Device (VID: {})", v));
+            meta.model = Some(Cow::Owned(format!("Matter Device (VID: {})", v)));
         } else {
-            meta.model = Some("Matter Device".to_string());
+            meta.model = Some(Cow::Borrowed("Matter Device"));
         }
 
         if let Some(dt) = txt_attrs.get("dt") {
@@ -156,19 +163,19 @@ pub fn extract_iot_metadata(services: &[&str], txt_attrs: &HashMap<String, &str>
             };
             if let Some(d) = parsed_dt {
                 match d {
-                    769 => meta.device_type = Some("Thermostat".to_string()),
-                    256 | 257 | 268 | 269 => meta.device_type = Some("Smart Light".to_string()),
-                    266 | 267 => meta.device_type = Some("Smart Plug".to_string()),
-                    15 | 16 => meta.device_type = Some("Switch".to_string()),
-                    90 => meta.device_type = Some("Door Lock".to_string()),
-                    768 => meta.device_type = Some("Sensor".to_string()),
-                    772 => meta.device_type = Some("Humidity Sensor".to_string()),
-                    774 => meta.device_type = Some("Occupancy Sensor".to_string()),
-                    775 => meta.device_type = Some("Contact Sensor".to_string()),
-                    10 | 113 => meta.device_type = Some("Air Conditioner".to_string()),
-                    43 => meta.device_type = Some("Air Purifier".to_string()),
-                    18 => meta.device_type = Some("Video Doorbell".to_string()),
-                    34 => meta.device_type = Some("Chromecast".to_string()),
+                    769 => meta.device_type = Some(Cow::Borrowed("Thermostat")),
+                    256 | 257 | 268 | 269 => meta.device_type = Some(Cow::Borrowed("Smart Light")),
+                    266 | 267 => meta.device_type = Some(Cow::Borrowed("Smart Plug")),
+                    15 | 16 => meta.device_type = Some(Cow::Borrowed("Switch")),
+                    90 => meta.device_type = Some(Cow::Borrowed("Door Lock")),
+                    768 => meta.device_type = Some(Cow::Borrowed("Sensor")),
+                    772 => meta.device_type = Some(Cow::Borrowed("Humidity Sensor")),
+                    774 => meta.device_type = Some(Cow::Borrowed("Occupancy Sensor")),
+                    775 => meta.device_type = Some(Cow::Borrowed("Contact Sensor")),
+                    10 | 113 => meta.device_type = Some(Cow::Borrowed("Air Conditioner")),
+                    43 => meta.device_type = Some(Cow::Borrowed("Air Purifier")),
+                    18 => meta.device_type = Some(Cow::Borrowed("Video Doorbell")),
+                    34 => meta.device_type = Some(Cow::Borrowed("Chromecast")),
                     _ => {}
                 }
             }
@@ -177,69 +184,69 @@ pub fn extract_iot_metadata(services: &[&str], txt_attrs: &HashMap<String, &str>
     // 2. HomeKit (HAP) Protocol Identification
     else if services.iter().any(|s| s.contains("_hap")) {
         if let Some(md) = txt_attrs.get("md") {
-            meta.model = Some((*md).to_string());
+            meta.model = Some(Cow::Borrowed(*md));
 
             let model_lower = md.to_lowercase();
             if model_lower.starts_with("eve") {
-                meta.vendor = Some("Eve Systems".to_string());
+                meta.vendor = Some(Cow::Borrowed("Eve Systems"));
             } else if model_lower.starts_with("nanoleaf") {
-                meta.vendor = Some("Nanoleaf".to_string());
+                meta.vendor = Some(Cow::Borrowed("Nanoleaf"));
             } else if model_lower.starts_with("aqara") {
-                meta.vendor = Some("Aqara".to_string());
+                meta.vendor = Some(Cow::Borrowed("Aqara"));
             } else if model_lower.starts_with("koogeek") {
-                meta.vendor = Some("Koogeek".to_string());
+                meta.vendor = Some(Cow::Borrowed("Koogeek"));
             } else if model_lower.starts_with("wemo") {
-                meta.vendor = Some("Belkin (Wemo)".to_string());
+                meta.vendor = Some(Cow::Borrowed("Belkin (Wemo)"));
             } else if model_lower.starts_with("ecobee") {
-                meta.vendor = Some("ecobee".to_string());
+                meta.vendor = Some(Cow::Borrowed("ecobee"));
             } else if model_lower.starts_with("hue") || model_lower.contains("philips") {
-                meta.vendor = Some("Signify (Philips Hue)".to_string());
+                meta.vendor = Some(Cow::Borrowed("Signify (Philips Hue)"));
             }
         }
 
         if let Some(ci) = txt_attrs.get("ci") {
             meta.device_type = match *ci {
-                "1" => Some("HomeKit Accessory".to_string()),
-                "2" => Some("Bridge".to_string()),
-                "3" => Some("Fan".to_string()),
-                "4" => Some("Garage Door".to_string()),
-                "5" => Some("Lightbulb".to_string()),
-                "6" => Some("Lock".to_string()),
-                "7" => Some("Outlet".to_string()),
-                "8" => Some("Switch".to_string()),
-                "9" => Some("Thermostat".to_string()),
-                "10" => Some("Sensor".to_string()),
-                "11" => Some("Security System".to_string()),
-                "12" => Some("Door".to_string()),
-                "13" => Some("Window".to_string()),
-                "14" => Some("Window Covering".to_string()),
-                "15" => Some("Switch".to_string()),
-                "17" => Some("IP Camera".to_string()),
-                "18" => Some("Video Doorbell".to_string()),
-                "19" => Some("Air Purifier".to_string()),
-                "20" => Some("Heater".to_string()),
-                "21" => Some("Cooler".to_string()),
-                "22" => Some("Humidifier".to_string()),
-                "23" => Some("Dehumidifier".to_string()),
-                "24" => Some("Apple TV".to_string()),
-                "28" => Some("Sprinkler".to_string()),
-                "29" => Some("Faucet".to_string()),
-                "30" => Some("Shower System".to_string()),
-                "32" => Some("Television".to_string()),
-                "33" => Some("Target Controller".to_string()),
-                _ => Some("HomeKit Device".to_string()),
+                "1" => Some(Cow::Borrowed("HomeKit Accessory")),
+                "2" => Some(Cow::Borrowed("Bridge")),
+                "3" => Some(Cow::Borrowed("Fan")),
+                "4" => Some(Cow::Borrowed("Garage Door")),
+                "5" => Some(Cow::Borrowed("Lightbulb")),
+                "6" => Some(Cow::Borrowed("Lock")),
+                "7" => Some(Cow::Borrowed("Outlet")),
+                "8" => Some(Cow::Borrowed("Switch")),
+                "9" => Some(Cow::Borrowed("Thermostat")),
+                "10" => Some(Cow::Borrowed("Sensor")),
+                "11" => Some(Cow::Borrowed("Security System")),
+                "12" => Some(Cow::Borrowed("Door")),
+                "13" => Some(Cow::Borrowed("Window")),
+                "14" => Some(Cow::Borrowed("Window Covering")),
+                "15" => Some(Cow::Borrowed("Switch")),
+                "17" => Some(Cow::Borrowed("IP Camera")),
+                "18" => Some(Cow::Borrowed("Video Doorbell")),
+                "19" => Some(Cow::Borrowed("Air Purifier")),
+                "20" => Some(Cow::Borrowed("Heater")),
+                "21" => Some(Cow::Borrowed("Cooler")),
+                "22" => Some(Cow::Borrowed("Humidifier")),
+                "23" => Some(Cow::Borrowed("Dehumidifier")),
+                "24" => Some(Cow::Borrowed("Apple TV")),
+                "28" => Some(Cow::Borrowed("Sprinkler")),
+                "29" => Some(Cow::Borrowed("Faucet")),
+                "30" => Some(Cow::Borrowed("Shower System")),
+                "32" => Some(Cow::Borrowed("Television")),
+                "33" => Some(Cow::Borrowed("Target Controller")),
+                _ => Some(Cow::Borrowed("HomeKit Device")),
             };
         } else {
-            meta.device_type = Some("HomeKit Device".to_string());
+            meta.device_type = Some(Cow::Borrowed("HomeKit Device"));
         }
 
         if let Some(sf) = txt_attrs.get("sf")
             && let Ok(flags) = sf.parse::<u32>()
         {
             if flags & 1 != 0 {
-                meta.status = Some("Unpaired / Pairing Mode".to_string());
+                meta.status = Some(Cow::Borrowed("Unpaired / Pairing Mode"));
             } else {
-                meta.status = Some("Paired".to_string());
+                meta.status = Some(Cow::Borrowed("Paired"));
             }
         }
     }

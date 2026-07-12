@@ -1013,9 +1013,9 @@ impl DeviceTracker {
         // Extract IoT-specific metadata (Matter, HAP)
         let iot_meta = crate::parser::iot::extract_iot_metadata(&services, &txt_attrs);
 
-        let mut txt_vendor = iot_meta.vendor.clone();
-        let mut txt_device_type = iot_meta.device_type.clone();
-        let txt_model = iot_meta.model.clone();
+        let mut txt_vendor = iot_meta.vendor.map(|c| c.into_owned());
+        let mut txt_device_type = iot_meta.device_type.map(|c| c.into_owned());
+        let txt_model = iot_meta.model.map(|c| c.into_owned());
 
         if txt_vendor.is_none()
             && txt_device_type.is_none()
