@@ -398,7 +398,7 @@ impl DeviceTracker {
     /// Returns a vector of all tracked devices pre-sorted by `last_seen` descending.
     pub fn get_devices_sorted(&self) -> Vec<DeviceInfo> {
         let mut list: Vec<DeviceInfo> = self.devices.values().cloned().collect();
-        list.sort_unstable_by(|a, b| b.last_seen.cmp(&a.last_seen));
+        list.sort_unstable_by_key(|b| std::cmp::Reverse(b.last_seen));
         list
     }
 
@@ -997,11 +997,11 @@ impl DeviceTracker {
 
         // Determine vendor and device type from services and hostname (before borrowing device)
         let vendor = Self::detect_vendor_from_hostname(first_hostname)
-            .or_else(|| txt_vendor.as_deref())
+            .or(txt_vendor.as_deref())
             .or_else(|| self.detect_vendor_from_services(&services))
             .map(str::to_string);
         let device_type = Self::detect_device_type_from_hostname(first_hostname)
-            .or_else(|| txt_device_type.as_deref())
+            .or(txt_device_type.as_deref())
             .or_else(|| self.detect_device_type_from_services(&services))
             .map(str::to_string);
 
@@ -1683,20 +1683,18 @@ impl DeviceTracker {
         let vendor_to_apply = vendor.or(oui_vendor);
         if let Some(v) = vendor_to_apply
             && Self::should_replace_vendor(device.vendor.as_deref(), v, oui_vendor)
+            && device.vendor.as_deref() != Some(v)
         {
-            if device.vendor.as_deref() != Some(v) {
-                device.vendor = Some(v.to_string());
-                updated += 1;
-            }
+            device.vendor = Some(v.to_string());
+            updated += 1;
         }
 
         if let Some(t) = device_type
             && Self::should_replace_device_type(device, t)
+            && device.device_type.as_deref() != Some(t)
         {
-            if device.device_type.as_deref() != Some(t) {
-                device.device_type = Some(t.to_string());
-                updated += 1;
-            }
+            device.device_type = Some(t.to_string());
+            updated += 1;
         }
 
         device.last_seen = SystemTime::now();

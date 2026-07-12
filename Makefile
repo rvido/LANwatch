@@ -56,7 +56,7 @@ clippy:
 	$(CARGO) clippy --all-targets --all-features -- -D warnings
 
 ## check: Check codebase quickly
-check:
+check: fmt fmt-check clippy
 	$(CARGO) check --all-features
 
 ## examples: Build all example binaries with all features enabled
