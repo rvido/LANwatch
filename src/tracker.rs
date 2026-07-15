@@ -43,12 +43,14 @@ fn is_confirmed_phone(hostname: Option<&str>) -> bool {
         || h.contains("ipad")
 }
 
+#[cfg(feature = "mdns")]
 struct ModelRule {
     pattern: &'static str,
     vendor: &'static str,
     device_type: &'static str,
 }
 
+#[cfg(feature = "mdns")]
 const MODEL_RULES: &[ModelRule] = &[
     ModelRule {
         pattern: "appletv",
