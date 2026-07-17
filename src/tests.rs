@@ -606,6 +606,125 @@ mod tests {
     }
 
     #[test]
+    fn test_manual_override_beats_dhcp_windows_fingerprint() {
+        // Reproduces the SimpliSafe video doorbell case: an AMPAK-module device
+        // whose DHCP Parameter Request List contains option 249 is misclassified
+        // as a Windows PC. A manual override must win and stay pinned.
+        let temp_path = "/tmp/lanwatch_test_override_simplisafe.csv";
+        let _ = std::fs::remove_file(temp_path);
+
+        let mut tracker = DeviceTracker::new(temp_path).unwrap();
+        tracker.set_oui_registry(OuiRegistry::new());
+
+        let mac = "c0:84:7d:b8:58:5e";
+        let make_packet = || Dhcpv4Packet {
+            source_ip: Ipv4Addr::new(192, 168, 4, 126),
+            dest_ip: Ipv4Addr::new(255, 255, 255, 255),
+            source_port: 68,
+            dest_port: 67,
+            operation: Dhcpv4Operation::BootRequest,
+            client_mac: [0xC0, 0x84, 0x7D, 0xB8, 0x58, 0x5E],
+            message_type: Some(Dhcpv4MessageType::Discover),
+            hostname: Some("df263120689cae44c352eef0b01fb8b3".to_string()),
+            requested_ip: Some(Ipv4Addr::new(192, 168, 4, 126)),
+            // Option 249 (MS Classless Static Route) trips the Windows heuristic.
+            parameter_request_list: Some(vec![1, 3, 6, 15, 249]),
+            vendor_class_id: None,
+            vendor_specific_info: None,
+        };
+
+        // Without an override the DHCP fingerprint misclassifies it as Windows.
+        tracker.update_from_dhcpv4(&make_packet());
+        assert_eq!(
+            tracker.devices().get(mac).unwrap().device_type,
+            Some(DeviceType::PcWindows),
+            "precondition: DHCP option-249 fingerprint should yield PC/Windows"
+        );
+
+        // Register the override and apply it.
+        tracker.add_override(mac, Some(DeviceType::SecuritySystem), None);
+        assert!(tracker.apply_overrides() >= 1);
+        assert_eq!(
+            tracker.devices().get(mac).unwrap().device_type,
+            Some(DeviceType::SecuritySystem)
+        );
+
+        // A subsequent DHCP renewal must not clobber the pinned type.
+        tracker.update_from_dhcpv4(&make_packet());
+        tracker.apply_overrides();
+        assert_eq!(
+            tracker.devices().get(mac).unwrap().device_type,
+            Some(DeviceType::SecuritySystem),
+            "override must remain pinned across live DHCP updates"
+        );
+
+        let _ = std::fs::remove_file(temp_path);
+    }
+
+    #[test]
+    fn test_load_overrides_from_file() {
+        let temp_path = "/tmp/lanwatch_test_override_load.csv";
+        let overrides_path = "/tmp/lanwatch_test_overrides.txt";
+        let _ = std::fs::remove_file(temp_path);
+        std::fs::write(
+            overrides_path,
+            "# comment line\n\
+             c0:84:7d:b8:58:5e, Security System, SimpliSafe\n\
+             \n\
+             aa:bb:cc:dd:ee:ff,Printer\n",
+        )
+        .unwrap();
+
+        let mut tracker = DeviceTracker::new(temp_path).unwrap();
+        let loaded = tracker.load_overrides_from_file(overrides_path).unwrap();
+        assert_eq!(loaded, 2);
+        assert_eq!(tracker.override_count(), 2);
+
+        // Seed both devices with wrong types, then enforce overrides.
+        for (mac, ip) in [
+            ("c0:84:7d:b8:58:5e", [192, 168, 4, 126]),
+            ("aa:bb:cc:dd:ee:ff", [192, 168, 4, 200]),
+        ] {
+            let device = DeviceInfo::new(
+                mac.to_string(),
+                IpAddr::V4(Ipv4Addr::new(ip[0], ip[1], ip[2], ip[3])),
+                None,
+            );
+            let key = device.mac_address.clone();
+            tracker.devices.insert(key, device);
+        }
+        tracker.apply_overrides();
+
+        assert_eq!(
+            tracker
+                .devices()
+                .get("c0:84:7d:b8:58:5e")
+                .unwrap()
+                .device_type,
+            Some(DeviceType::SecuritySystem)
+        );
+        assert_eq!(
+            tracker
+                .devices()
+                .get("c0:84:7d:b8:58:5e")
+                .unwrap()
+                .vendor,
+            Some(Vendor::from("SimpliSafe"))
+        );
+        assert_eq!(
+            tracker
+                .devices()
+                .get("aa:bb:cc:dd:ee:ff")
+                .unwrap()
+                .device_type,
+            Some(DeviceType::Printer)
+        );
+
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(overrides_path);
+    }
+
+    #[test]
     fn test_device_tracker_reclassifies_rachio_from_loaded_csv() {
         let temp_path = "/tmp/lanwatch_test_rachio_reclassify.csv";
         let _ = std::fs::remove_file(temp_path);

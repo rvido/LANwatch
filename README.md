@@ -24,6 +24,7 @@ A Rust library and CLI tool for network device discovery and tracking via DHCP, 
 - **WS-Discovery (WSD) Sniffing** (optional): Passive sniffing of SOAP XML multicast probe traffic on UDP port 3702 to discover network hardware, PCs, and IP Cameras. Gated under `ssdp` feature.
 - **mDNS TXT Record Parsing**: Extracts model, md, and ty metadata from DNS-SD records to identify specific hardware devices (Apple TV, Chromecast, Sonos speakers, and printer models)
 - **Device Classification**: Expanded classification engine mapping hostnames, mDNS TXT metadata, and service fingerprints to specific device types and vendors (Roku, Sonos, Apple TV, Google Chromecast, ESP32 IoT, Raspberry Pi, Synology NAS, Playstation, Xbox, Nintendo, smart plugs, printers, etc.)
+- **Manual Classification Overrides**: Pin a device's type (and optionally vendor) by MAC address via `--override` or an overrides file, for devices with no reliable passive signature. Overrides always win over heuristics and persist across live updates.
 - **Smart Home & IoT Discovery**: Extracts model and vendor metadata from HomeKit (HAP) and Matter service advertisements (Google, Apple, Amazon, Eve, Signify/Philips Hue, Aqara, IKEA, Nanoleaf, Tuya, Somfy, TP-Link, Lutron, Yale, Belkin, Bosch, etc.)
 - **Specialized IoT & Constrained Protocols**: Captures and parses CoAP (Constrained Application Protocol) on UDP port 5683, KNXnet/IP building automation traffic on UDP port 3671, and MQTT/MQTT-SN on TCP/UDP port 1883 to dynamically identify sensors, smart lights, smart plugs, and home automation systems
 - **Media Server & Player Discovery**: Parses Plex GDM (Good Day Mate) XML/HTTP-like discovery broadcasts on UDP ports 32410, 32412, and 32414 to locate and identify Plex Media Servers and Players
@@ -99,6 +100,12 @@ sudo cargo run --features mdns -- en0 --mdns-query
 
 # Enable SSDP with active M-SEARCH discovery probes
 sudo cargo run --features ssdp -- en0 --ssdp-query
+
+# Pin a specific device's type when it can't be auto-detected (repeatable)
+sudo cargo run -- en0 --override 'c0:84:7d:11:22:33=Security System'
+
+# Load per-device classification overrides from a file
+sudo cargo run -- en0 --overrides overrides.txt
 
 # Combine all options
 sudo cargo run --all-features -- en0 -o devices.db --api 0.0.0.0:8080 --mdns-query --ssdp-query -u oui.txt
@@ -205,6 +212,50 @@ https://standards-oui.ieee.org/oui/oui.txt
 
 **Vendor priority:** mDNS-detected vendors take precedence over OUI lookups, as mDNS provides
 more specific identification (e.g., "Google Chromecast" vs just "Google" from OUI).
+
+### Device Classification Overrides
+
+Some devices expose no reliable passive signature — no mDNS/SSDP services, an opaque hostname, and
+a MAC OUI belonging to a generic module maker rather than the product vendor. For example, a
+SimpliSafe video doorbell built on an AMPAK Wi-Fi module (OUI `c0:84:7d`) reports the vendor "AMPAK
+Technology, Inc." and, because its DHCP fingerprint requests option 249, is auto-classified as
+"PC/Windows". There is no safe automatic rule for such devices, so LANwatch lets you pin the
+classification manually by MAC address.
+
+A manual override always wins over heuristic classification. It is applied to existing database
+entries at startup and re-enforced during live capture, so subsequent DHCP renewals (or any other
+heuristic) cannot revert it.
+
+**Inline override (`--override`, repeatable):**
+
+```bash
+# Format: MAC=DeviceType
+sudo cargo run -- en0 --override 'c0:84:7d:11:22:33=Security System'
+
+# Pin several devices at once
+sudo cargo run -- en0 \
+  --override 'c0:84:7d:11:22:33=Security System' \
+  --override 'aa:bb:cc:dd:ee:ff=Printer'
+```
+
+**Override file (`--overrides`):**
+
+```bash
+sudo cargo run -- en0 --overrides overrides.txt
+```
+
+**Override file format:**
+
+```
+# Comment lines start with #
+# Format: MAC,DeviceType[,Vendor]   (Vendor is optional)
+c0:84:7d:11:22:33, Security System, SimpliSafe
+aa:bb:cc:dd:ee:ff, Printer
+```
+
+The MAC address is matched case-insensitively and accepts common separators. The device type should
+be a canonical type name (e.g. `Security System`, `Smart Doorbell`, `Security Camera`, `Printer`); an
+unrecognized name is preserved verbatim as a custom label. The optional third field pins the vendor.
 
 ### HTTP API
 

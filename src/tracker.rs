@@ -140,11 +140,27 @@ const MODEL_RULES: &[ModelRule] = &[
     },
 ];
 
+/// A manual, per-device classification override keyed on MAC address.
+///
+/// Used for devices that expose no reliable passive signature (e.g. a
+/// SimpliSafe video doorbell built on a generic AMPAK Wi-Fi module, which
+/// otherwise trips the DHCP option-249 heuristic and is mislabeled a Windows
+/// PC). An override always wins over heuristic classification.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeviceOverride {
+    /// Forced device type, if set.
+    pub device_type: Option<DeviceType>,
+    /// Forced vendor, if set.
+    pub vendor: Option<Vendor>,
+}
+
 /// Device tracker that maintains a list of seen devices and saves to SQLite
 pub struct DeviceTracker {
     pub(crate) devices: HashMap<String, DeviceInfo>,
     pub(crate) db_path: String,
     pub(crate) auto_save: bool,
+    /// Manual per-device classification overrides, keyed on normalized MAC.
+    pub(crate) overrides: HashMap<String, DeviceOverride>,
     /// OUI registry for MAC address vendor lookup
     pub(crate) oui_registry: Option<OuiRegistry>,
     #[cfg(feature = "mdns")]
@@ -203,6 +219,7 @@ impl DeviceTracker {
             devices: HashMap::new(),
             db_path: db_path_str,
             auto_save: true,
+            overrides: HashMap::new(),
             oui_registry: None,
             #[cfg(feature = "mdns")]
             service_registry: None,
@@ -219,6 +236,119 @@ impl DeviceTracker {
     /// Sets the OUI registry used to identify device manufacturers from MAC addresses.
     pub fn set_oui_registry(&mut self, registry: OuiRegistry) {
         self.oui_registry = Some(registry);
+    }
+
+    /// Registers a manual classification override for a single device.
+    ///
+    /// The MAC is normalized to the tracker's canonical form. Passing `None` for
+    /// a field leaves that field to heuristic classification. Overrides take
+    /// effect on the next [`DeviceTracker::apply_overrides`] call (invoked at the
+    /// end of [`DeviceTracker::reclassify_all`] and by the capture loop).
+    pub fn add_override(
+        &mut self,
+        mac: &str,
+        device_type: Option<DeviceType>,
+        vendor: Option<Vendor>,
+    ) {
+        let key = normalize_device_identifier(mac);
+        let entry = self.overrides.entry(key).or_default();
+        if device_type.is_some() {
+            entry.device_type = device_type;
+        }
+        if vendor.is_some() {
+            entry.vendor = vendor;
+        }
+    }
+
+    /// Returns the number of registered overrides.
+    pub fn override_count(&self) -> usize {
+        self.overrides.len()
+    }
+
+    /// Loads per-device overrides from a text file.
+    ///
+    /// Format: one entry per line, `MAC,DeviceType[,Vendor]`. Blank lines and
+    /// lines beginning with `#` are ignored. The device type must be a canonical
+    /// type name (e.g. `Security System`); an unknown name is preserved verbatim
+    /// as a custom label. Returns the number of overrides loaded.
+    ///
+    /// # Example file
+    /// ```text
+    /// # SimpliSafe video doorbell (AMPAK module, no passive signature)
+    /// c0:84:7d:b8:58:5e,Security System,SimpliSafe
+    /// ```
+    pub fn load_overrides_from_file<P: AsRef<Path>>(&mut self, path: P) -> std::io::Result<usize> {
+        let contents = std::fs::read_to_string(path)?;
+        let mut loaded = 0;
+
+        for raw_line in contents.lines() {
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            let mut fields = line.split(',').map(|f| f.trim());
+            let mac = match fields.next() {
+                Some(m) if !m.is_empty() => m,
+                _ => continue,
+            };
+            let device_type = fields
+                .next()
+                .filter(|t| !t.is_empty())
+                .map(DeviceType::from);
+            let vendor = fields.next().filter(|v| !v.is_empty()).map(Vendor::from);
+
+            if device_type.is_none() && vendor.is_none() {
+                continue;
+            }
+
+            self.add_override(mac, device_type, vendor);
+            loaded += 1;
+        }
+
+        Ok(loaded)
+    }
+
+    /// Applies all registered overrides to the currently tracked devices, forcing
+    /// the pinned type/vendor on any matching device.
+    ///
+    /// Only devices that actually differ from their override are touched (and
+    /// marked dirty for the next DB flush), so this is cheap to call repeatedly
+    /// from the capture loop. Returns the number of devices changed.
+    pub fn apply_overrides(&mut self) -> usize {
+        let mut changed = 0;
+
+        // Borrow the two maps as disjoint fields so the loop can mutate devices
+        // while reading overrides.
+        let overrides = &self.overrides;
+        let devices = &mut self.devices;
+
+        for (mac, ov) in overrides {
+            let Some(device) = devices.get_mut(mac) else {
+                continue;
+            };
+
+            let mut device_changed = false;
+            if let Some(dt) = &ov.device_type
+                && device.device_type.as_ref() != Some(dt)
+            {
+                device.device_type = Some(dt.clone());
+                device_changed = true;
+            }
+            if let Some(v) = &ov.vendor
+                && device.vendor.as_ref() != Some(v)
+            {
+                device.vendor = Some(v.clone());
+                device_changed = true;
+            }
+
+            if device_changed {
+                self.dirty_devices.lock().unwrap().insert(mac.clone());
+                changed += 1;
+            }
+        }
+
+        changed
     }
 
     /// Returns a reference to the active OUI registry, if set.
@@ -327,6 +457,11 @@ impl DeviceTracker {
             if self.auto_save {
                 let _ = self.save_to_db();
             }
+        }
+
+        // Manual overrides always win over heuristic classification.
+        if self.apply_overrides() > 0 && self.auto_save {
+            let _ = self.save_to_db();
         }
     }
 

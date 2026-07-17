@@ -7,7 +7,7 @@
 #[cfg(feature = "http-api")]
 use lanwatch::start_api_server;
 use lanwatch::{
-    DeviceTracker, DhcpEvent, DhcpSniffer, Dhcpv6Option, IEEE_OUI_URL, OuiRegistry,
+    DeviceTracker, DeviceType, DhcpEvent, DhcpSniffer, Dhcpv6Option, IEEE_OUI_URL, OuiRegistry,
     download_ieee_oui, list_interfaces,
 };
 #[cfg(feature = "mdns")]
@@ -112,6 +112,27 @@ fn main() {
         }
 
         tracker.set_service_registry(registry);
+    }
+
+    // Register manual per-device classification overrides.
+    {
+        if let Some(ref path) = config.overrides_file {
+            match tracker.load_overrides_from_file(path) {
+                Ok(count) => println!("Loaded {} device override(s) from {}", count, path),
+                Err(e) => eprintln!("Warning: Failed to load overrides file {}: {}", path, e),
+            }
+        }
+        for spec in &config.override_specs {
+            match parse_override_spec(spec) {
+                Some((mac, type_str)) => {
+                    tracker.add_override(mac, Some(DeviceType::from(type_str)), None);
+                }
+                None => eprintln!("Warning: Ignoring malformed --override '{}' (expected MAC=Type)", spec),
+            }
+        }
+        if tracker.override_count() > 0 {
+            println!("Active device overrides: {}", tracker.override_count());
+        }
     }
 
     println!(
@@ -290,6 +311,10 @@ fn start_dhcp_worker(
                             }
                         }
                     }
+
+                    // Re-pin any device that a heuristic just reclassified away
+                    // from its manual override.
+                    pending_updates += tracker.apply_overrides();
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
@@ -556,6 +581,10 @@ fn start_network_worker(
                             }
                         }
                     }
+
+                    // Re-pin any device that a heuristic just reclassified away
+                    // from its manual override.
+                    pending_updates += tracker.apply_overrides();
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
@@ -1012,6 +1041,10 @@ struct Config {
     #[cfg(feature = "ssdp")]
     ssdp_query: bool,
     oui_file: Option<String>,
+    /// Inline per-device classification overrides (`MAC=Type`).
+    override_specs: Vec<String>,
+    /// Path to a file of per-device classification overrides.
+    overrides_file: Option<String>,
 }
 
 fn parse_args(args: &[String]) -> Config {
@@ -1030,6 +1063,8 @@ fn parse_args(args: &[String]) -> Config {
     #[cfg(feature = "ssdp")]
     let mut ssdp_query = false;
     let mut oui_file: Option<String> = None;
+    let mut override_specs: Vec<String> = Vec::new();
+    let mut overrides_file: Option<String> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -1111,6 +1146,24 @@ fn parse_args(args: &[String]) -> Config {
                     std::process::exit(1);
                 }
             }
+            "--override" => {
+                if i + 1 < args.len() {
+                    override_specs.push(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    eprintln!("Error: --override requires a MAC=Type argument");
+                    std::process::exit(1);
+                }
+            }
+            "--overrides" => {
+                if i + 1 < args.len() {
+                    overrides_file = Some(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    eprintln!("Error: --overrides requires a file path");
+                    std::process::exit(1);
+                }
+            }
             "-h" | "--help" => {
                 print_usage();
                 std::process::exit(0);
@@ -1152,7 +1205,20 @@ fn parse_args(args: &[String]) -> Config {
         #[cfg(feature = "ssdp")]
         ssdp_query,
         oui_file,
+        override_specs,
+        overrides_file,
     }
+}
+
+/// Parses a single `MAC=Type` override spec into its components.
+fn parse_override_spec(spec: &str) -> Option<(&str, &str)> {
+    let (mac, device_type) = spec.split_once('=')?;
+    let mac = mac.trim();
+    let device_type = device_type.trim();
+    if mac.is_empty() || device_type.is_empty() {
+        return None;
+    }
+    Some((mac, device_type))
 }
 
 fn print_usage() {
@@ -1161,6 +1227,12 @@ fn print_usage() {
     println!("Options:");
     println!("  -o, --output <FILE>    Output database file path (default: devices.bin)");
     println!("  -u, --oui <FILE>       Load IEEE OUI database for vendor identification");
+    println!(
+        "  --override <MAC=Type>  Pin a device's type (e.g. c0:84:7d:b8:58:5e=\"Security System\"); repeatable"
+    );
+    println!(
+        "  --overrides <FILE>     Load per-device overrides (lines: MAC,DeviceType[,Vendor])"
+    );
     #[cfg(feature = "http-api")]
     {
         println!("  -a, --api <ADDR:PORT>  Start HTTP API server (e.g., 127.0.0.1:8080)");
