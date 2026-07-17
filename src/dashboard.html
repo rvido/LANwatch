@@ -544,6 +544,20 @@
     </div>
 
     <script>
+        // Escape values harvested from network packets before inserting them into
+        // innerHTML. Device names, vendors, and similar fields originate from
+        // untrusted LAN traffic (mDNS, SSDP, NBNS, ...), so rendering them raw
+        // would allow stored XSS in this dashboard.
+        function escapeHtml(value) {
+            if (value === null || value === undefined) return '';
+            return String(value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
         function isIpv4(ip) {
             if (!ip || ip === "0.0.0.0" || ip === "::") return false;
             return ip.includes('.');
@@ -777,7 +791,7 @@
                     metaRowsHtml += `
                         <div class="meta-row">
                             <span class="meta-label">IPv4</span>
-                            <span class="meta-val">${ip}</span>
+                            <span class="meta-val">${escapeHtml(ip)}</span>
                         </div>
                     `;
                 }
@@ -792,9 +806,9 @@
                     }
 
                     metaRowsHtml += `
-                        <div class="meta-row" title="${ipv6List.join('\n')}">
+                        <div class="meta-row" title="${escapeHtml(ipv6List.join('\n'))}">
                             <span class="meta-label">IPv6</span>
-                            <span class="meta-val">${displayIpv6}${countBadge}</span>
+                            <span class="meta-val">${escapeHtml(displayIpv6)}${countBadge}</span>
                         </div>
                     `;
                 }
@@ -817,17 +831,17 @@
                         <div class="device-icon-box">
                             ${getIconForType(type)}
                         </div>
-                        <span class="device-badge">${type}</span>
+                        <span class="device-badge">${escapeHtml(type)}</span>
                     </div>
                     <div class="device-info">
-                        <span class="device-name" title="${name}">${name}</span>
-                        <span class="device-vendor">${vendor}</span>
+                        <span class="device-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
+                        <span class="device-vendor">${escapeHtml(vendor)}</span>
                     </div>
                     <div class="device-meta">
                         ${metaRowsHtml}
                         <div class="meta-row">
                             <span class="meta-label">MAC</span>
-                            <span class="meta-val">${mac}</span>
+                            <span class="meta-val">${escapeHtml(mac)}</span>
                         </div>
                     </div>
                 `;
@@ -885,9 +899,9 @@
                 row.innerHTML = `
                     <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.9rem; color: var(--text);">
                         <span style="color: var(--text-muted); font-size: 0.75rem; text-transform: uppercase; font-weight: bold; margin-right: 0.5rem; background: rgba(255,255,255,0.05); padding: 0.1rem 0.3rem; border-radius: 4px;">IPv4</span>
-                        ${ipVal}
+                        ${escapeHtml(ipVal)}
                     </span>
-                    <button class="copy-btn" onclick="copyText(this, '${ipVal}')">Copy</button>
+                    <button class="copy-btn" data-copy="${escapeHtml(ipVal)}" onclick="copyText(this)">Copy</button>
                 `;
                 ipListContainer.appendChild(row);
             }
@@ -911,10 +925,10 @@
 
                 row.innerHTML = `
                     <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.9rem; color: var(--text);">
-                        <span style="color: var(--primary); font-size: 0.75rem; text-transform: uppercase; font-weight: bold; margin-right: 0.5rem; background: var(--primary-glow); padding: 0.1rem 0.3rem; border-radius: 4px;">${typeStr}</span>
-                        ${addr}
+                        <span style="color: var(--primary); font-size: 0.75rem; text-transform: uppercase; font-weight: bold; margin-right: 0.5rem; background: var(--primary-glow); padding: 0.1rem 0.3rem; border-radius: 4px;">${escapeHtml(typeStr)}</span>
+                        ${escapeHtml(addr)}
                     </span>
-                    <button class="copy-btn" onclick="copyText(this, '${addr}')">Copy</button>
+                    <button class="copy-btn" data-copy="${escapeHtml(addr)}" onclick="copyText(this)">Copy</button>
                 `;
                 ipListContainer.appendChild(row);
             });
@@ -923,7 +937,7 @@
                 ipListContainer.innerHTML = `<span class="detail-value" style="color: var(--text-muted);">Unspecified</span>`;
             }
 
-            document.getElementById('modal-mac').innerHTML = `${device.mac_address} <button class="copy-btn" onclick="copyText(this, '${device.mac_address}')">Copy</button>`;
+            document.getElementById('modal-mac').innerHTML = `${escapeHtml(device.mac_address)} <button class="copy-btn" data-copy="${escapeHtml(device.mac_address)}" onclick="copyText(this)">Copy</button>`;
             
             document.getElementById('modal-type').textContent = device.device_type || "Generic Device";
             document.getElementById('modal-last-active').textContent = device.last_seen ? formatDate(device.last_seen) : "N/A";
@@ -956,6 +970,12 @@
         }
 
         function copyText(el, text) {
+            // Prefer the value carried on the element's data-copy attribute; the
+            // browser decodes it from the (HTML-escaped) attribute, so no value
+            // can break out of an inline handler's JS string context.
+            if (text === undefined) {
+                text = el.dataset.copy || '';
+            }
             const originalText = el.textContent;
             const performCopy = () => {
                 if (navigator.clipboard && navigator.clipboard.writeText) {

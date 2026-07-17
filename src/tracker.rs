@@ -11,6 +11,8 @@ use std::time::SystemTime;
 
 use rusqlite::{Connection, params};
 
+#[cfg(any(feature = "mdns", feature = "ssdp"))]
+use crate::device::sanitize_display_string;
 use crate::device::{DeviceInfo, normalize_device_identifier, sanitize_hostname};
 use crate::oui::OuiRegistry;
 use crate::types::{DHCPV4_CLIENT_PORT, DeviceType, Dhcpv4Packet, Dhcpv6Packet, Vendor};
@@ -790,8 +792,12 @@ impl DeviceTracker {
         if let Some(device) = self.devices.get_mut(&mac) {
             let mut local_changed = false;
 
-            if let Some(ref desc) = packet.system_description {
-                if device.system_description.as_ref() != Some(desc) {
+            if let Some(desc) = packet
+                .system_description
+                .as_deref()
+                .and_then(sanitize_display_string)
+            {
+                if device.system_description.as_ref() != Some(&desc) {
                     device.system_description = Some(desc.clone());
                     local_changed = true;
                 }
@@ -872,10 +878,14 @@ impl DeviceTracker {
         if let Some(device) = self.devices.get_mut(&mac) {
             let mut local_changed = false;
 
-            if let Some(ref soft) = packet.software_version {
+            if let Some(soft) = packet
+                .software_version
+                .as_deref()
+                .and_then(sanitize_display_string)
+            {
                 let current_desc = device.system_description.as_ref();
-                if current_desc != Some(soft) {
-                    device.system_description = Some(soft.clone());
+                if current_desc != Some(&soft) {
+                    device.system_description = Some(soft);
                     local_changed = true;
                 }
             }
@@ -1090,8 +1100,9 @@ impl DeviceTracker {
             // Update hostname from the first seen A/AAAA
             if device.hostname.is_none()
                 && let Some(h) = first_hostname
+                && let Some(clean) = sanitize_display_string(h)
             {
-                device.hostname = Some(h.to_string());
+                device.hostname = Some(clean);
                 updated += 1;
             }
 
@@ -1275,8 +1286,10 @@ impl DeviceTracker {
             Self::index_device_ips(&mut self.ip_index, device);
 
             // Update hostname
-            if device.hostname.is_none() {
-                device.hostname = Some(packet.name.clone());
+            if device.hostname.is_none()
+                && let Some(clean) = sanitize_display_string(&packet.name)
+            {
+                device.hostname = Some(clean);
                 updated += 1;
             }
 
@@ -1936,9 +1949,10 @@ impl DeviceTracker {
 
         // Use friendly name as hostname
         if let Some(ref name) = packet.friendly_name
-            && device.hostname.as_ref() != Some(name)
+            && let Some(clean) = sanitize_display_string(name)
+            && device.hostname.as_ref() != Some(&clean)
         {
-            device.hostname = Some(name.clone());
+            device.hostname = Some(clean);
             updated += 1;
         }
 
@@ -2003,9 +2017,10 @@ impl DeviceTracker {
 
         // Hostname / Model
         if let Some(ref model) = packet.model
-            && device.hostname.as_ref() != Some(model)
+            && let Some(clean) = sanitize_display_string(model)
+            && device.hostname.as_ref() != Some(&clean)
         {
-            device.hostname = Some(model.clone());
+            device.hostname = Some(clean);
             updated += 1;
         }
 
@@ -2133,9 +2148,10 @@ impl DeviceTracker {
 
         // Hostname set to server/device name
         if let Some(ref name) = packet.name
-            && device.hostname.as_ref() != Some(name)
+            && let Some(clean) = sanitize_display_string(name)
+            && device.hostname.as_ref() != Some(&clean)
         {
-            device.hostname = Some(name.clone());
+            device.hostname = Some(clean);
             updated += 1;
         }
 

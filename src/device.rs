@@ -214,18 +214,23 @@ impl DeviceInfo {
             format_timestamp(self.last_seen),
             self.mac_address,
             self.ip_address,
-            self.ipv6_address
-                .map(|ip| ip.to_string())
-                .unwrap_or_default(),
-            self.hostname.as_deref().unwrap_or(""),
-            self.device_type
-                .as_ref()
-                .map(DeviceType::as_str)
-                .unwrap_or(""),
-            self.vendor.as_ref().map(Vendor::as_str).unwrap_or(""),
-            services_str,
-            self.system_description.as_deref().unwrap_or(""),
-            v6_addresses_str
+            escape_csv_field(
+                &self
+                    .ipv6_address
+                    .map(|ip| ip.to_string())
+                    .unwrap_or_default()
+            ),
+            escape_csv_field(self.hostname.as_deref().unwrap_or("")),
+            escape_csv_field(
+                self.device_type
+                    .as_ref()
+                    .map(DeviceType::as_str)
+                    .unwrap_or("")
+            ),
+            escape_csv_field(self.vendor.as_ref().map(Vendor::as_str).unwrap_or("")),
+            escape_csv_field(&services_str),
+            escape_csv_field(self.system_description.as_deref().unwrap_or("")),
+            escape_csv_field(&v6_addresses_str)
         )
     }
 
@@ -287,7 +292,7 @@ impl DeviceInfo {
             None
         };
         let services = if parts.len() > 8 {
-            let s = parts[8].trim_matches('"');
+            let s = unescape_csv_field(parts[8].trim_matches('"'));
             if s.is_empty() {
                 Vec::new()
             } else {
@@ -297,12 +302,8 @@ impl DeviceInfo {
             Vec::new()
         };
         let system_description = if parts.len() > 9 {
-            let desc = parts[9].trim_matches('"');
-            if desc.is_empty() {
-                None
-            } else {
-                Some(desc.to_string())
-            }
+            let desc = unescape_csv_field(parts[9].trim_matches('"'));
+            if desc.is_empty() { None } else { Some(desc) }
         } else {
             None
         };
@@ -588,6 +589,69 @@ pub(crate) fn sanitize_hostname(input: &str) -> Option<String> {
     } else {
         Some(cleaned)
     }
+}
+
+/// Sanitize a free-form, human-readable string (device/friendly name, model,
+/// system description) harvested from untrusted network packets.
+///
+/// Unlike [`sanitize_hostname`], this preserves spaces and printable Unicode so
+/// legitimate names like "Living Room TV" survive, while stripping control
+/// characters (including NUL, tab, and newline) that would otherwise corrupt
+/// downstream sinks such as CSV rows or terminal output. Context-specific
+/// escaping (HTML in the dashboard, quoting in CSV) is still applied at each
+/// output site; this is the input-sanitization layer of that defense.
+///
+/// Returns `None` if nothing printable remains. The result is capped at 255
+/// characters to bound memory and output size.
+#[cfg_attr(not(any(feature = "mdns", feature = "ssdp", test)), allow(dead_code))]
+pub(crate) fn sanitize_display_string(input: &str) -> Option<String> {
+    let cleaned: String = input
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(255)
+        .collect();
+
+    let cleaned = cleaned.trim().to_string();
+
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
+}
+
+/// Escape a text field for safe inclusion in an RFC 4180 quoted CSV field.
+///
+/// Doubles embedded double-quotes and neutralizes spreadsheet formula injection
+/// by prefixing a leading `=`, `+`, `-`, `@`, tab, or carriage-return with a
+/// single quote. The caller is responsible for wrapping the result in `"`.
+pub(crate) fn escape_csv_field(input: &str) -> String {
+    let needs_formula_guard = input
+        .chars()
+        .next()
+        .is_some_and(|c| matches!(c, '=' | '+' | '-' | '@' | '\t' | '\r'));
+
+    let mut out = String::with_capacity(input.len() + 2);
+    if needs_formula_guard {
+        out.push('\'');
+    }
+    for c in input.chars() {
+        if c == '"' {
+            out.push('"');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Reverse the quote-doubling applied by [`escape_csv_field`] on the inner
+/// (already quote-stripped) text of a CSV field.
+///
+/// The leading formula-guard apostrophe is intentionally not removed: it is a
+/// one-way safety transform, and stripping it would corrupt values that
+/// legitimately begin with `'`.
+pub(crate) fn unescape_csv_field(input: &str) -> String {
+    input.replace("\"\"", "\"")
 }
 
 /// Helper function to rank preference of different IPv6 address types:

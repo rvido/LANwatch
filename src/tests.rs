@@ -8,7 +8,10 @@ mod tests {
     #[cfg(feature = "ssdp")]
     use std::collections::HashMap;
 
-    use crate::device::{is_leap_year, sanitize_hostname};
+    use crate::device::{
+        escape_csv_field, is_leap_year, sanitize_display_string, sanitize_hostname,
+        unescape_csv_field,
+    };
     use crate::parser::dhcp::extract_mac_from_duid;
 
     #[cfg(feature = "mdns")]
@@ -1232,6 +1235,78 @@ mod tests {
             Some("CircleV2")
         );
         assert_eq!(sanitize_hostname("....").as_deref(), None);
+    }
+
+    #[test]
+    fn test_sanitize_display_string_preserves_names_strips_control() {
+        // Legitimate names with spaces survive.
+        assert_eq!(
+            sanitize_display_string("Living Room TV").as_deref(),
+            Some("Living Room TV")
+        );
+        // Control characters (NUL, tab, newline) are removed; surrounding
+        // whitespace trimmed.
+        assert_eq!(
+            sanitize_display_string("  a\tb\nc\0  ").as_deref(),
+            Some("abc")
+        );
+        // Nothing printable -> None.
+        assert_eq!(sanitize_display_string("\0\n\t").as_deref(), None);
+        // HTML metacharacters are intentionally preserved here (escaped at the
+        // output sink), so the value is passed through unchanged.
+        assert_eq!(
+            sanitize_display_string("<img src=x>").as_deref(),
+            Some("<img src=x>")
+        );
+        // Length is capped at 255 characters.
+        let long = "x".repeat(300);
+        assert_eq!(sanitize_display_string(&long).map(|s| s.len()), Some(255));
+    }
+
+    #[test]
+    fn test_escape_csv_field_quotes_and_formula_guard() {
+        // Embedded double-quotes are doubled per RFC 4180.
+        assert_eq!(escape_csv_field(r#"a"b"#), r#"a""b"#);
+        // A field breakout attempt cannot escape the quoted field: every embedded
+        // quote is doubled, so none can terminate the surrounding quoted field.
+        assert_eq!(escape_csv_field("\",\"=cmd"), "\"\",\"\"=cmd");
+        // Leading formula triggers are neutralized with a single quote.
+        assert_eq!(escape_csv_field("=1+2"), "'=1+2");
+        assert_eq!(escape_csv_field("+ping"), "'+ping");
+        assert_eq!(escape_csv_field("-2"), "'-2");
+        assert_eq!(escape_csv_field("@SUM"), "'@SUM");
+        // Ordinary values are untouched.
+        assert_eq!(escape_csv_field("Living Room TV"), "Living Room TV");
+    }
+
+    #[test]
+    fn test_csv_escape_unescape_roundtrip() {
+        let original = r#"desc with "quotes" inside"#;
+        let escaped = escape_csv_field(original);
+        assert_eq!(unescape_csv_field(&escaped), original);
+    }
+
+    #[test]
+    fn test_csv_export_of_malicious_description_is_contained() {
+        let mut device = crate::device::DeviceInfo::new(
+            "aa:bb:cc:dd:ee:ff".to_string(),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5)),
+            None,
+        );
+        // A description crafted to break out of the CSV field and inject a formula.
+        device.system_description = Some(r#"x","=HYPERLINK("evil")"#.to_string());
+        let line = device.to_csv_line();
+
+        // The injected quote is doubled, so it cannot terminate the field early,
+        // and the formula payload stays inside the single quoted description
+        // field rather than spilling into new columns.
+        assert!(line.contains(r#""x"",""=HYPERLINK(""evil"")""#));
+        // Round-trips back to the original text.
+        let parsed = crate::device::DeviceInfo::from_csv_line(&line).unwrap();
+        assert_eq!(
+            parsed.system_description.as_deref(),
+            Some(r#"x","=HYPERLINK("evil")"#)
+        );
     }
 
     #[test]
