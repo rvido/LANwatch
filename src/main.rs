@@ -13,7 +13,7 @@ use lanwatch::{
 #[cfg(feature = "mdns")]
 use lanwatch::{MdnsQuerier, MdnsRecordData, MdnsServiceRegistry};
 #[cfg(any(feature = "mdns", feature = "ssdp"))]
-use lanwatch::{NetworkEvent, NetworkSniffer};
+use lanwatch::{NetworkEvent, NetworkSniffer, format_mac};
 #[cfg(feature = "ssdp")]
 use lanwatch::{SsdpPacket, SsdpQuerier};
 use std::env;
@@ -436,13 +436,14 @@ fn start_network_worker(
                                 source_mac,
                                 source_ip,
                             } => {
+                                let mac = format_mac(*source_mac);
                                 let is_new_or_updated =
-                                    tracker.update_device(source_mac, *source_ip, None);
+                                    tracker.update_device(&mac, *source_ip, None);
                                 if is_new_or_updated {
                                     pending_updates += 1;
                                 }
                                 print_arp_packet(
-                                    source_mac,
+                                    &mac,
                                     source_ip,
                                     is_new_or_updated,
                                     tracker.device_count(),
@@ -452,13 +453,14 @@ fn start_network_worker(
                                 source_mac,
                                 source_ip,
                             } => {
+                                let mac = format_mac(*source_mac);
                                 let is_new_or_updated =
-                                    tracker.update_device(source_mac, *source_ip, None);
+                                    tracker.update_device(&mac, *source_ip, None);
                                 if is_new_or_updated {
                                     pending_updates += 1;
                                 }
                                 print_ndp_packet(
-                                    source_mac,
+                                    &mac,
                                     source_ip,
                                     is_new_or_updated,
                                     tracker.device_count(),
@@ -608,7 +610,7 @@ fn print_ndp_packet(mac: &str, ip: &std::net::IpAddr, is_new_or_updated: bool, t
 #[cfg(feature = "ssdp")]
 fn print_lldp_packet(packet: &lanwatch::LldpPacket, is_new_or_updated: bool, total: usize) {
     println!("\n[LLDP] Link Layer Discovery Packet Detected");
-    println!("Source MAC: {}", packet.source_mac);
+    println!("Source MAC: {}", format_mac(packet.source_mac));
     if let Some(ref name) = packet.system_name {
         println!("System Name: {}", name);
     }
@@ -630,9 +632,9 @@ fn print_lldp_packet(packet: &lanwatch::LldpPacket, is_new_or_updated: bool, tot
 #[cfg(feature = "ssdp")]
 fn print_lifx_packet(packet: &lanwatch::LifxPacket, is_new_or_updated: bool, total: usize) {
     println!("\n[LIFX] Smart Device Packet Detected");
-    println!("Source MAC: {}", packet.source_mac);
+    println!("Source MAC: {}", format_mac(packet.source_mac));
     println!("Source IP:  {}", packet.source_ip);
-    println!("Target MAC: {}", packet.target_mac);
+    println!("Target MAC: {}", format_mac(packet.target_mac));
     println!("Msg Type:   {}", packet.msg_type);
     if is_new_or_updated {
         println!("-> [DB Updated] Total devices: {}", total);
@@ -643,7 +645,7 @@ fn print_lifx_packet(packet: &lanwatch::LifxPacket, is_new_or_updated: bool, tot
 #[cfg(feature = "ssdp")]
 fn print_coap_packet(packet: &lanwatch::CoapPacket, is_new_or_updated: bool, total: usize) {
     println!("\n[CoAP] Constrained Device Packet Detected");
-    println!("Source MAC: {}", packet.source_mac);
+    println!("Source MAC: {}", format_mac(packet.source_mac));
     println!("Source IP:  {}", packet.source_ip);
     println!("Code:       {}", packet.code);
     println!("Message ID: {}", packet.message_id);
@@ -659,7 +661,7 @@ fn print_coap_packet(packet: &lanwatch::CoapPacket, is_new_or_updated: bool, tot
 #[cfg(feature = "ssdp")]
 fn print_knx_packet(packet: &lanwatch::KnxPacket, is_new_or_updated: bool, total: usize) {
     println!("\n[KNX] Building Automation Packet Detected");
-    println!("Source MAC: {}", packet.source_mac);
+    println!("Source MAC: {}", format_mac(packet.source_mac));
     println!("Source IP:  {}", packet.source_ip);
     println!("Service:    0x{:04x}", packet.service_type);
     if let Some(ref name) = packet.friendly_name {
@@ -677,7 +679,7 @@ fn print_knx_packet(packet: &lanwatch::KnxPacket, is_new_or_updated: bool, total
 #[cfg(feature = "ssdp")]
 fn print_cctv_packet(packet: &lanwatch::CctvPacket, is_new_or_updated: bool, total: usize) {
     println!("\n[CCTV] Physical Security/IP Camera Detected");
-    println!("Source MAC: {}", packet.source_mac);
+    println!("Source MAC: {}", format_mac(packet.source_mac));
     println!("Source IP:  {}", packet.source_ip);
     println!("Vendor:     {}", packet.vendor);
     if let Some(ref model) = packet.model {
@@ -696,7 +698,7 @@ fn print_cctv_packet(packet: &lanwatch::CctvPacket, is_new_or_updated: bool, tot
 #[cfg(feature = "ssdp")]
 fn print_mqtt_packet(packet: &lanwatch::MqttPacket, is_new_or_updated: bool, total: usize) {
     println!("\n[MQTT] IoT Device Detected");
-    println!("Source MAC: {}", packet.source_mac);
+    println!("Source MAC: {}", format_mac(packet.source_mac));
     println!("Source IP:  {}", packet.source_ip);
     println!("Client ID:  {}", packet.client_id);
     println!("Protocol:   {}", packet.protocol);
@@ -709,7 +711,7 @@ fn print_mqtt_packet(packet: &lanwatch::MqttPacket, is_new_or_updated: bool, tot
 #[cfg(feature = "ssdp")]
 fn print_gdm_packet(packet: &lanwatch::GdmPacket, is_new_or_updated: bool, total: usize) {
     println!("\n[Plex GDM] Media Device Detected");
-    println!("Source MAC: {}", packet.source_mac);
+    println!("Source MAC: {}", format_mac(packet.source_mac));
     println!("Source IP:  {}", packet.source_ip);
     if let Some(ref name) = packet.name {
         println!("Name:       {}", name);
@@ -732,7 +734,7 @@ fn print_gdm_packet(packet: &lanwatch::GdmPacket, is_new_or_updated: bool, total
 #[cfg(feature = "ssdp")]
 fn print_cdp_packet(packet: &lanwatch::CdpPacket, is_new_or_updated: bool, total: usize) {
     println!("\n[CDP] Cisco Discovery Packet Detected");
-    println!("Source MAC: {}", packet.source_mac);
+    println!("Source MAC: {}", format_mac(packet.source_mac));
     if let Some(ref dev_id) = packet.device_id {
         println!("Device ID:   {}", dev_id);
     }
@@ -830,7 +832,9 @@ fn print_mdns_packet(packet: &lanwatch::MdnsPacket, updated_count: usize, total:
     };
     println!(
         "\n[mDNS] {} from {} (MAC: {})",
-        packet_type, packet.source_ip, packet.source_mac
+        packet_type,
+        packet.source_ip,
+        format_mac(packet.source_mac)
     );
 
     for q in &packet.questions {
@@ -878,7 +882,9 @@ fn print_llmnr_packet(packet: &lanwatch::MdnsPacket, updated_count: usize, total
     };
     println!(
         "\n[LLMNR] {} from {} (MAC: {})",
-        packet_type, packet.source_ip, packet.source_mac
+        packet_type,
+        packet.source_ip,
+        format_mac(packet.source_mac)
     );
 
     for q in &packet.questions {
@@ -910,7 +916,8 @@ fn print_llmnr_packet(packet: &lanwatch::MdnsPacket, updated_count: usize, total
 fn print_nbns_packet(packet: &lanwatch::NbnsPacket, updated_count: usize, total: usize) {
     println!(
         "\n[NetBIOS] Name Service from {} (MAC: {})",
-        packet.source_ip, packet.source_mac
+        packet.source_ip,
+        format_mac(packet.source_mac)
     );
     println!("  Name: {}", packet.name);
     let suffix_desc = match packet.suffix {
@@ -934,7 +941,9 @@ fn print_nbns_packet(packet: &lanwatch::NbnsPacket, updated_count: usize, total:
 fn print_ssdp_packet(packet: &SsdpPacket, updated_count: usize, total: usize) {
     println!(
         "\n[SSDP] {} from {} (MAC: {})",
-        packet.message_type, packet.source_ip, packet.source_mac
+        packet.message_type,
+        packet.source_ip,
+        format_mac(packet.source_mac)
     );
     println!("Start line: {}", packet.start_line);
 
@@ -967,7 +976,8 @@ fn print_ssdp_packet(packet: &SsdpPacket, updated_count: usize, total: usize) {
 fn print_wsd_packet(packet: &lanwatch::WsdPacket, updated_count: usize, total: usize) {
     println!(
         "\n[WS-Discovery] Hello/ProbeMatches from {} (MAC: {})",
-        packet.source_ip, packet.source_mac
+        packet.source_ip,
+        format_mac(packet.source_mac)
     );
     if let Some(ref t) = packet.device_type {
         println!("  Device Type: {}", t);

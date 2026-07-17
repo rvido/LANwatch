@@ -105,7 +105,7 @@ pub fn process_ethernet_frame_extended(frame: &[u8]) -> Option<NetworkEvent> {
     if ethertype == 0x88cc {
         #[cfg(feature = "ssdp")]
         {
-            let source_mac = ethernet.get_source().to_string();
+            let source_mac = ethernet.get_source().octets();
             return parse_lldp_packet(ethernet.payload(), source_mac).map(NetworkEvent::Lldp);
         }
         #[cfg(not(feature = "ssdp"))]
@@ -123,7 +123,7 @@ pub fn process_ethernet_frame_extended(frame: &[u8]) -> Option<NetworkEvent> {
                     let oui = [payload[3], payload[4], payload[5]];
                     let protocol_id = u16::from_be_bytes([payload[6], payload[7]]);
                     if oui == [0x00, 0x00, 0x0C] && protocol_id == 0x2000 {
-                        let source_mac = ethernet.get_source().to_string();
+                        let source_mac = ethernet.get_source().octets();
                         return parse_cdp_packet(&payload[8..], source_mac).map(NetworkEvent::Cdp);
                     }
                 }
@@ -140,7 +140,7 @@ pub fn process_ethernet_frame_extended(frame: &[u8]) -> Option<NetworkEvent> {
             if arp.get_operation() == ArpOperations::Reply
                 || arp.get_operation() == ArpOperations::Request
             {
-                let src_mac = arp.get_sender_hw_addr().to_string();
+                let src_mac = arp.get_sender_hw_addr().octets();
                 let src_ip = std::net::IpAddr::V4(arp.get_sender_proto_addr());
                 Some(NetworkEvent::Arp {
                     source_mac: src_mac,
@@ -180,154 +180,142 @@ fn process_ipv4_packet(ethernet: &EthernetPacket) -> Option<DhcpEvent> {
     Some(DhcpEvent::V4(packet))
 }
 
+/// Dispatches a UDP payload to the appropriate discovery-protocol parser based on port
+/// number. Shared between the IPv4 and IPv6 extended-frame paths, which differ only in
+/// how `source_ip`/`dest_ip` were extracted from the IP header.
+#[cfg(any(feature = "mdns", feature = "ssdp"))]
+fn dispatch_udp_extended(
+    payload: &[u8],
+    source_mac: [u8; 6],
+    source_ip: IpAddr,
+    dest_ip: IpAddr,
+    src: u16,
+    dest: u16,
+) -> Option<NetworkEvent> {
+    #[cfg(feature = "mdns")]
+    if is_mdns_ports(src, dest) {
+        let packet = parse_mdns_payload(payload, source_mac, source_ip, dest_ip)?;
+        return Some(NetworkEvent::Mdns(packet));
+    }
+
+    #[cfg(feature = "mdns")]
+    if is_llmnr_ports(src, dest) {
+        let packet = parse_mdns_payload(payload, source_mac, source_ip, dest_ip)?;
+        return Some(NetworkEvent::Llmnr(packet));
+    }
+
+    #[cfg(feature = "mdns")]
+    if is_nbns_ports(src, dest) {
+        let packet = parse_nbns_payload(payload, source_mac, source_ip)?;
+        return Some(NetworkEvent::Nbns(packet));
+    }
+
+    #[cfg(feature = "ssdp")]
+    if is_ssdp_ports(src, dest) {
+        let packet = parse_ssdp_payload(payload, source_mac, source_ip, dest_ip)?;
+        return Some(NetworkEvent::Ssdp(packet));
+    }
+
+    #[cfg(feature = "ssdp")]
+    if is_wsd_ports(src, dest) {
+        let packet = parse_wsd_payload(payload, source_mac, source_ip)?;
+        return Some(NetworkEvent::Wsd(packet));
+    }
+
+    #[cfg(feature = "ssdp")]
+    if crate::parser::iot::is_lifx_port(src) || crate::parser::iot::is_lifx_port(dest) {
+        let packet = crate::parser::iot::parse_lifx_payload(payload, source_mac, source_ip)?;
+        return Some(NetworkEvent::Lifx(packet));
+    }
+
+    #[cfg(feature = "ssdp")]
+    if crate::parser::iot::is_coap_port(src) || crate::parser::iot::is_coap_port(dest) {
+        let packet = crate::parser::iot::parse_coap_payload(payload, source_mac, source_ip)?;
+        return Some(NetworkEvent::Coap(packet));
+    }
+
+    #[cfg(feature = "ssdp")]
+    if crate::parser::iot::is_knx_port(src) || crate::parser::iot::is_knx_port(dest) {
+        let packet = crate::parser::iot::parse_knx_payload(payload, source_mac, source_ip)?;
+        return Some(NetworkEvent::Knx(packet));
+    }
+
+    #[cfg(feature = "ssdp")]
+    if src == crate::parser::cctv::SADP_PORT
+        || dest == crate::parser::cctv::SADP_PORT
+        || src == crate::parser::cctv::SADP_ALT_PORT
+        || dest == crate::parser::cctv::SADP_ALT_PORT
+    {
+        let packet = crate::parser::cctv::parse_sadp_payload(payload, source_mac, source_ip)?;
+        return Some(NetworkEvent::Cctv(packet));
+    }
+
+    #[cfg(feature = "ssdp")]
+    if src == crate::parser::cctv::DAHUA_PORT || dest == crate::parser::cctv::DAHUA_PORT {
+        let packet = crate::parser::cctv::parse_dahua_payload(payload, source_mac, source_ip)?;
+        return Some(NetworkEvent::Cctv(packet));
+    }
+
+    #[cfg(feature = "ssdp")]
+    if crate::parser::mqtt_gdm::is_mqtt_port(src) || crate::parser::mqtt_gdm::is_mqtt_port(dest) {
+        let packet =
+            crate::parser::mqtt_gdm::parse_mqtt_sn_connect(payload, source_mac, source_ip)?;
+        return Some(NetworkEvent::Mqtt(packet));
+    }
+
+    #[cfg(feature = "ssdp")]
+    if crate::parser::mqtt_gdm::is_gdm_port(src) || crate::parser::mqtt_gdm::is_gdm_port(dest) {
+        let packet = crate::parser::mqtt_gdm::parse_gdm_payload(payload, source_mac, source_ip)?;
+        return Some(NetworkEvent::Gdm(packet));
+    }
+
+    None
+}
+
+/// Dispatches a TCP payload to the appropriate discovery-protocol parser based on port
+/// number. Shared between the IPv4 and IPv6 extended-frame paths.
+#[cfg(feature = "ssdp")]
+fn dispatch_tcp_extended(
+    payload: &[u8],
+    source_mac: [u8; 6],
+    source_ip: IpAddr,
+    src: u16,
+    dest: u16,
+) -> Option<NetworkEvent> {
+    if src == crate::parser::cctv::RTSP_PORT || dest == crate::parser::cctv::RTSP_PORT {
+        return Some(NetworkEvent::Cctv(crate::parser::cctv::CctvPacket {
+            source_mac,
+            source_ip,
+            vendor: crate::types::Vendor::GenericRtsp,
+            model: None,
+            serial_number: None,
+            protocol: "RTSP".to_string(),
+        }));
+    }
+    if crate::parser::mqtt_gdm::is_mqtt_port(src) || crate::parser::mqtt_gdm::is_mqtt_port(dest) {
+        let packet = crate::parser::mqtt_gdm::parse_mqtt_connect(payload, source_mac, source_ip)?;
+        return Some(NetworkEvent::Mqtt(packet));
+    }
+    None
+}
+
 #[cfg(any(feature = "mdns", feature = "ssdp"))]
 fn process_ipv4_packet_extended(ethernet: &EthernetPacket) -> Option<NetworkEvent> {
     let ipv4 = Ipv4Packet::new(ethernet.payload())?;
     let next_proto = ipv4.get_next_level_protocol();
+    let source_ip = IpAddr::V4(ipv4.get_source());
+    let dest_ip = IpAddr::V4(ipv4.get_destination());
 
     if next_proto == IpNextHeaderProtocols::Udp {
         let udp = UdpPacket::new(ipv4.payload())?;
         let src = udp.get_source();
         let dest = udp.get_destination();
+        let source_mac = ethernet.get_source().octets();
 
-        #[cfg(feature = "mdns")]
-        if is_mdns_ports(src, dest) {
-            let source_mac = ethernet.get_source().to_string();
-            let packet = parse_mdns_payload(
-                udp.payload(),
-                source_mac,
-                std::net::IpAddr::V4(ipv4.get_source()),
-                std::net::IpAddr::V4(ipv4.get_destination()),
-            )?;
-            return Some(NetworkEvent::Mdns(packet));
-        }
-
-        #[cfg(feature = "mdns")]
-        if is_llmnr_ports(src, dest) {
-            let source_mac = ethernet.get_source().to_string();
-            let packet = parse_mdns_payload(
-                udp.payload(),
-                source_mac,
-                std::net::IpAddr::V4(ipv4.get_source()),
-                std::net::IpAddr::V4(ipv4.get_destination()),
-            )?;
-            return Some(NetworkEvent::Llmnr(packet));
-        }
-
-        #[cfg(feature = "mdns")]
-        if is_nbns_ports(src, dest) {
-            let source_mac = ethernet.get_source().to_string();
-            let packet = parse_nbns_payload(
-                udp.payload(),
-                source_mac,
-                std::net::IpAddr::V4(ipv4.get_source()),
-            )?;
-            return Some(NetworkEvent::Nbns(packet));
-        }
-
-        #[cfg(feature = "ssdp")]
-        if is_ssdp_ports(src, dest) {
-            let source_mac = ethernet.get_source().to_string();
-            let packet = parse_ssdp_payload(
-                udp.payload(),
-                source_mac,
-                std::net::IpAddr::V4(ipv4.get_source()),
-                std::net::IpAddr::V4(ipv4.get_destination()),
-            )?;
-            return Some(NetworkEvent::Ssdp(packet));
-        }
-
-        #[cfg(feature = "ssdp")]
-        if is_wsd_ports(src, dest) {
-            let source_mac = ethernet.get_source().to_string();
-            let packet = parse_wsd_payload(
-                udp.payload(),
-                source_mac,
-                std::net::IpAddr::V4(ipv4.get_source()),
-            )?;
-            return Some(NetworkEvent::Wsd(packet));
-        }
-
-        #[cfg(feature = "ssdp")]
-        if crate::parser::iot::is_lifx_port(src) || crate::parser::iot::is_lifx_port(dest) {
-            let source_mac = ethernet.get_source().to_string();
-            let packet = crate::parser::iot::parse_lifx_payload(
-                udp.payload(),
-                source_mac,
-                std::net::IpAddr::V4(ipv4.get_source()),
-            )?;
-            return Some(NetworkEvent::Lifx(packet));
-        }
-
-        #[cfg(feature = "ssdp")]
-        if crate::parser::iot::is_coap_port(src) || crate::parser::iot::is_coap_port(dest) {
-            let source_mac = ethernet.get_source().to_string();
-            let packet = crate::parser::iot::parse_coap_payload(
-                udp.payload(),
-                source_mac,
-                std::net::IpAddr::V4(ipv4.get_source()),
-            )?;
-            return Some(NetworkEvent::Coap(packet));
-        }
-
-        #[cfg(feature = "ssdp")]
-        if crate::parser::iot::is_knx_port(src) || crate::parser::iot::is_knx_port(dest) {
-            let source_mac = ethernet.get_source().to_string();
-            let packet = crate::parser::iot::parse_knx_payload(
-                udp.payload(),
-                source_mac,
-                std::net::IpAddr::V4(ipv4.get_source()),
-            )?;
-            return Some(NetworkEvent::Knx(packet));
-        }
-
-        #[cfg(feature = "ssdp")]
-        if src == crate::parser::cctv::SADP_PORT
-            || dest == crate::parser::cctv::SADP_PORT
-            || src == crate::parser::cctv::SADP_ALT_PORT
-            || dest == crate::parser::cctv::SADP_ALT_PORT
+        if let Some(event) =
+            dispatch_udp_extended(udp.payload(), source_mac, source_ip, dest_ip, src, dest)
         {
-            let source_mac = ethernet.get_source().to_string();
-            let packet = crate::parser::cctv::parse_sadp_payload(
-                udp.payload(),
-                source_mac,
-                std::net::IpAddr::V4(ipv4.get_source()),
-            )?;
-            return Some(NetworkEvent::Cctv(packet));
-        }
-
-        #[cfg(feature = "ssdp")]
-        if src == crate::parser::cctv::DAHUA_PORT || dest == crate::parser::cctv::DAHUA_PORT {
-            let source_mac = ethernet.get_source().to_string();
-            let packet = crate::parser::cctv::parse_dahua_payload(
-                udp.payload(),
-                source_mac,
-                std::net::IpAddr::V4(ipv4.get_source()),
-            )?;
-            return Some(NetworkEvent::Cctv(packet));
-        }
-
-        #[cfg(feature = "ssdp")]
-        if crate::parser::mqtt_gdm::is_mqtt_port(src) || crate::parser::mqtt_gdm::is_mqtt_port(dest)
-        {
-            let source_mac = ethernet.get_source().to_string();
-            let packet = crate::parser::mqtt_gdm::parse_mqtt_sn_connect(
-                udp.payload(),
-                source_mac,
-                std::net::IpAddr::V4(ipv4.get_source()),
-            )?;
-            return Some(NetworkEvent::Mqtt(packet));
-        }
-
-        #[cfg(feature = "ssdp")]
-        if crate::parser::mqtt_gdm::is_gdm_port(src) || crate::parser::mqtt_gdm::is_gdm_port(dest) {
-            let source_mac = ethernet.get_source().to_string();
-            let packet = crate::parser::mqtt_gdm::parse_gdm_payload(
-                udp.payload(),
-                source_mac,
-                std::net::IpAddr::V4(ipv4.get_source()),
-            )?;
-            return Some(NetworkEvent::Gdm(packet));
+            return Some(event);
         }
 
         // Check for DHCPv4
@@ -347,29 +335,8 @@ fn process_ipv4_packet_extended(ethernet: &EthernetPacket) -> Option<NetworkEven
             let tcp = pnet_packet::tcp::TcpPacket::new(ipv4.payload())?;
             let src = tcp.get_source();
             let dest = tcp.get_destination();
-            if src == crate::parser::cctv::RTSP_PORT || dest == crate::parser::cctv::RTSP_PORT {
-                let source_mac = ethernet.get_source().to_string();
-                let source_ip = std::net::IpAddr::V4(ipv4.get_source());
-                return Some(NetworkEvent::Cctv(crate::parser::cctv::CctvPacket {
-                    source_mac,
-                    source_ip,
-                    vendor: "Generic RTSP".to_string(),
-                    model: None,
-                    serial_number: None,
-                    protocol: "RTSP".to_string(),
-                }));
-            }
-            if crate::parser::mqtt_gdm::is_mqtt_port(src)
-                || crate::parser::mqtt_gdm::is_mqtt_port(dest)
-            {
-                let source_mac = ethernet.get_source().to_string();
-                let packet = crate::parser::mqtt_gdm::parse_mqtt_connect(
-                    tcp.payload(),
-                    source_mac,
-                    std::net::IpAddr::V4(ipv4.get_source()),
-                )?;
-                return Some(NetworkEvent::Mqtt(packet));
-            }
+            let source_mac = ethernet.get_source().octets();
+            return dispatch_tcp_extended(tcp.payload(), source_mac, source_ip, src, dest);
         }
     }
 
@@ -414,7 +381,7 @@ fn process_ipv6_packet_extended(ethernet: &EthernetPacket) -> Option<NetworkEven
             if icmpv6_type == 135 || icmpv6_type == 136 {
                 let source_ip = ipv6.get_source();
                 if !source_ip.is_unspecified() {
-                    let source_mac = ethernet.get_source().to_string();
+                    let source_mac = ethernet.get_source().octets();
                     return Some(NetworkEvent::Ndp {
                         source_mac,
                         source_ip: IpAddr::V6(source_ip),
@@ -429,145 +396,14 @@ fn process_ipv6_packet_extended(ethernet: &EthernetPacket) -> Option<NetworkEven
         let udp = UdpPacket::new(ipv6.payload())?;
         let src = udp.get_source();
         let dest = udp.get_destination();
+        let source_mac = ethernet.get_source().octets();
+        let source_ip = IpAddr::V6(ipv6.get_source());
+        let dest_ip = IpAddr::V6(ipv6.get_destination());
 
-        #[cfg(feature = "mdns")]
-        if is_mdns_ports(src, dest) {
-            let source_mac = ethernet.get_source().to_string();
-            let packet = parse_mdns_payload(
-                udp.payload(),
-                source_mac,
-                std::net::IpAddr::V6(ipv6.get_source()),
-                std::net::IpAddr::V6(ipv6.get_destination()),
-            )?;
-            return Some(NetworkEvent::Mdns(packet));
-        }
-
-        #[cfg(feature = "mdns")]
-        if is_llmnr_ports(src, dest) {
-            let source_mac = ethernet.get_source().to_string();
-            let packet = parse_mdns_payload(
-                udp.payload(),
-                source_mac,
-                std::net::IpAddr::V6(ipv6.get_source()),
-                std::net::IpAddr::V6(ipv6.get_destination()),
-            )?;
-            return Some(NetworkEvent::Llmnr(packet));
-        }
-
-        #[cfg(feature = "mdns")]
-        if is_nbns_ports(src, dest) {
-            let source_mac = ethernet.get_source().to_string();
-            let packet = parse_nbns_payload(
-                udp.payload(),
-                source_mac,
-                std::net::IpAddr::V6(ipv6.get_source()),
-            )?;
-            return Some(NetworkEvent::Nbns(packet));
-        }
-
-        #[cfg(feature = "ssdp")]
-        if is_ssdp_ports(src, dest) {
-            let source_mac = ethernet.get_source().to_string();
-            let packet = parse_ssdp_payload(
-                udp.payload(),
-                source_mac,
-                std::net::IpAddr::V6(ipv6.get_source()),
-                std::net::IpAddr::V6(ipv6.get_destination()),
-            )?;
-            return Some(NetworkEvent::Ssdp(packet));
-        }
-
-        #[cfg(feature = "ssdp")]
-        if is_wsd_ports(src, dest) {
-            let source_mac = ethernet.get_source().to_string();
-            let packet = parse_wsd_payload(
-                udp.payload(),
-                source_mac,
-                std::net::IpAddr::V6(ipv6.get_source()),
-            )?;
-            return Some(NetworkEvent::Wsd(packet));
-        }
-
-        #[cfg(feature = "ssdp")]
-        if crate::parser::iot::is_lifx_port(src) || crate::parser::iot::is_lifx_port(dest) {
-            let source_mac = ethernet.get_source().to_string();
-            let packet = crate::parser::iot::parse_lifx_payload(
-                udp.payload(),
-                source_mac,
-                std::net::IpAddr::V6(ipv6.get_source()),
-            )?;
-            return Some(NetworkEvent::Lifx(packet));
-        }
-
-        #[cfg(feature = "ssdp")]
-        if crate::parser::iot::is_coap_port(src) || crate::parser::iot::is_coap_port(dest) {
-            let source_mac = ethernet.get_source().to_string();
-            let packet = crate::parser::iot::parse_coap_payload(
-                udp.payload(),
-                source_mac,
-                std::net::IpAddr::V6(ipv6.get_source()),
-            )?;
-            return Some(NetworkEvent::Coap(packet));
-        }
-
-        #[cfg(feature = "ssdp")]
-        if crate::parser::iot::is_knx_port(src) || crate::parser::iot::is_knx_port(dest) {
-            let source_mac = ethernet.get_source().to_string();
-            let packet = crate::parser::iot::parse_knx_payload(
-                udp.payload(),
-                source_mac,
-                std::net::IpAddr::V6(ipv6.get_source()),
-            )?;
-            return Some(NetworkEvent::Knx(packet));
-        }
-
-        #[cfg(feature = "ssdp")]
-        if src == crate::parser::cctv::SADP_PORT
-            || dest == crate::parser::cctv::SADP_PORT
-            || src == crate::parser::cctv::SADP_ALT_PORT
-            || dest == crate::parser::cctv::SADP_ALT_PORT
+        if let Some(event) =
+            dispatch_udp_extended(udp.payload(), source_mac, source_ip, dest_ip, src, dest)
         {
-            let source_mac = ethernet.get_source().to_string();
-            let packet = crate::parser::cctv::parse_sadp_payload(
-                udp.payload(),
-                source_mac,
-                std::net::IpAddr::V6(ipv6.get_source()),
-            )?;
-            return Some(NetworkEvent::Cctv(packet));
-        }
-
-        #[cfg(feature = "ssdp")]
-        if src == crate::parser::cctv::DAHUA_PORT || dest == crate::parser::cctv::DAHUA_PORT {
-            let source_mac = ethernet.get_source().to_string();
-            let packet = crate::parser::cctv::parse_dahua_payload(
-                udp.payload(),
-                source_mac,
-                std::net::IpAddr::V6(ipv6.get_source()),
-            )?;
-            return Some(NetworkEvent::Cctv(packet));
-        }
-
-        #[cfg(feature = "ssdp")]
-        if crate::parser::mqtt_gdm::is_mqtt_port(src) || crate::parser::mqtt_gdm::is_mqtt_port(dest)
-        {
-            let source_mac = ethernet.get_source().to_string();
-            let packet = crate::parser::mqtt_gdm::parse_mqtt_sn_connect(
-                udp.payload(),
-                source_mac,
-                std::net::IpAddr::V6(ipv6.get_source()),
-            )?;
-            return Some(NetworkEvent::Mqtt(packet));
-        }
-
-        #[cfg(feature = "ssdp")]
-        if crate::parser::mqtt_gdm::is_gdm_port(src) || crate::parser::mqtt_gdm::is_gdm_port(dest) {
-            let source_mac = ethernet.get_source().to_string();
-            let packet = crate::parser::mqtt_gdm::parse_gdm_payload(
-                udp.payload(),
-                source_mac,
-                std::net::IpAddr::V6(ipv6.get_source()),
-            )?;
-            return Some(NetworkEvent::Gdm(packet));
+            return Some(event);
         }
 
         // Check for DHCPv6
@@ -587,29 +423,9 @@ fn process_ipv6_packet_extended(ethernet: &EthernetPacket) -> Option<NetworkEven
             let tcp = pnet_packet::tcp::TcpPacket::new(ipv6.payload())?;
             let src = tcp.get_source();
             let dest = tcp.get_destination();
-            if src == crate::parser::cctv::RTSP_PORT || dest == crate::parser::cctv::RTSP_PORT {
-                let source_mac = ethernet.get_source().to_string();
-                let source_ip = std::net::IpAddr::V6(ipv6.get_source());
-                return Some(NetworkEvent::Cctv(crate::parser::cctv::CctvPacket {
-                    source_mac,
-                    source_ip,
-                    vendor: "Generic RTSP".to_string(),
-                    model: None,
-                    serial_number: None,
-                    protocol: "RTSP".to_string(),
-                }));
-            }
-            if crate::parser::mqtt_gdm::is_mqtt_port(src)
-                || crate::parser::mqtt_gdm::is_mqtt_port(dest)
-            {
-                let source_mac = ethernet.get_source().to_string();
-                let packet = crate::parser::mqtt_gdm::parse_mqtt_connect(
-                    tcp.payload(),
-                    source_mac,
-                    std::net::IpAddr::V6(ipv6.get_source()),
-                )?;
-                return Some(NetworkEvent::Mqtt(packet));
-            }
+            let source_mac = ethernet.get_source().octets();
+            let source_ip = IpAddr::V6(ipv6.get_source());
+            return dispatch_tcp_extended(tcp.payload(), source_mac, source_ip, src, dest);
         }
     }
 

@@ -13,7 +13,10 @@ use rusqlite::{Connection, params};
 
 use crate::device::{DeviceInfo, normalize_device_identifier, sanitize_hostname};
 use crate::oui::OuiRegistry;
-use crate::types::{DHCPV4_CLIENT_PORT, Dhcpv4Packet, Dhcpv6Packet};
+use crate::types::{DHCPV4_CLIENT_PORT, DeviceType, Dhcpv4Packet, Dhcpv6Packet, Vendor};
+
+#[cfg(any(feature = "mdns", feature = "ssdp"))]
+use crate::types::format_mac;
 
 #[cfg(feature = "mdns")]
 use crate::mdns_registry::MdnsServiceRegistry;
@@ -32,7 +35,13 @@ fn is_confirmed_phone(hostname: Option<&str>) -> bool {
     let Some(h) = hostname else {
         return false;
     };
-    let h = h.to_lowercase();
+    let owned;
+    let h = if h.bytes().any(|b| b.is_ascii_uppercase()) {
+        owned = h.to_ascii_lowercase();
+        owned.as_str()
+    } else {
+        h
+    };
     h.contains("moto")
         || h.contains("stylus")
         || h.contains("motorola")
@@ -46,86 +55,86 @@ fn is_confirmed_phone(hostname: Option<&str>) -> bool {
 #[cfg(feature = "mdns")]
 struct ModelRule {
     pattern: &'static str,
-    vendor: &'static str,
-    device_type: &'static str,
+    vendor: Vendor,
+    device_type: DeviceType,
 }
 
 #[cfg(feature = "mdns")]
 const MODEL_RULES: &[ModelRule] = &[
     ModelRule {
         pattern: "appletv",
-        vendor: "Apple",
-        device_type: "Apple TV",
+        vendor: Vendor::Apple,
+        device_type: DeviceType::AppleTv,
     },
     ModelRule {
         pattern: "apple tv",
-        vendor: "Apple",
-        device_type: "Apple TV",
+        vendor: Vendor::Apple,
+        device_type: DeviceType::AppleTv,
     },
     ModelRule {
         pattern: "macbook",
-        vendor: "Apple",
-        device_type: "Mac",
+        vendor: Vendor::Apple,
+        device_type: DeviceType::Mac,
     },
     ModelRule {
         pattern: "imac",
-        vendor: "Apple",
-        device_type: "Mac",
+        vendor: Vendor::Apple,
+        device_type: DeviceType::Mac,
     },
     ModelRule {
         pattern: "macmini",
-        vendor: "Apple",
-        device_type: "Mac",
+        vendor: Vendor::Apple,
+        device_type: DeviceType::Mac,
     },
     ModelRule {
         pattern: "macpro",
-        vendor: "Apple",
-        device_type: "Mac",
+        vendor: Vendor::Apple,
+        device_type: DeviceType::Mac,
     },
     ModelRule {
         pattern: "chromecast",
-        vendor: "Google",
-        device_type: "Media Player",
+        vendor: Vendor::Google,
+        device_type: DeviceType::MediaPlayer,
     },
     ModelRule {
         pattern: "hp ",
-        vendor: "HP",
-        device_type: "Printer",
+        vendor: Vendor::Hp,
+        device_type: DeviceType::Printer,
     },
     ModelRule {
         pattern: "laserjet",
-        vendor: "HP",
-        device_type: "Printer",
+        vendor: Vendor::Hp,
+        device_type: DeviceType::Printer,
     },
     ModelRule {
         pattern: "officejet",
-        vendor: "HP",
-        device_type: "Printer",
+        vendor: Vendor::Hp,
+        device_type: DeviceType::Printer,
     },
     ModelRule {
         pattern: "deskjet",
-        vendor: "HP",
-        device_type: "Printer",
+        vendor: Vendor::Hp,
+        device_type: DeviceType::Printer,
     },
     ModelRule {
         pattern: "epson",
-        vendor: "Epson",
-        device_type: "Printer",
+        vendor: Vendor::Epson,
+        device_type: DeviceType::Printer,
     },
     ModelRule {
         pattern: "canon",
-        vendor: "Canon",
-        device_type: "Printer",
+        vendor: Vendor::Canon,
+        device_type: DeviceType::Printer,
     },
     ModelRule {
         pattern: "brother",
-        vendor: "Brother",
-        device_type: "Printer",
+        vendor: Vendor::Brother,
+        device_type: DeviceType::Printer,
     },
     ModelRule {
         pattern: "sonos",
-        vendor: "Sonos",
-        device_type: "Smart Speaker",
+        vendor: Vendor::Sonos,
+        device_type: DeviceType::SmartSpeaker,
     },
 ];
 
@@ -142,6 +151,11 @@ pub struct DeviceTracker {
     pub(crate) dirty_devices: Mutex<HashSet<String>>,
     /// SQLite database connection
     pub(crate) conn: Mutex<Connection>,
+    /// Index from every IP address a device is known to answer to (primary `ip_address`
+    /// plus all of `ipv6_addresses`) back to its MAC key, kept in sync as devices are
+    /// updated. Used to resolve relayed/proxied mDNS packets (e.g. from Eero routers)
+    /// without a linear scan over all tracked devices.
+    pub(crate) ip_index: HashMap<IpAddr, String>,
 }
 
 impl DeviceTracker {
@@ -192,6 +206,7 @@ impl DeviceTracker {
             service_registry: None,
             dirty_devices: Mutex::new(HashSet::new()),
             conn: Mutex::new(conn),
+            ip_index: HashMap::new(),
         };
 
         tracker.load_from_db()?;
@@ -242,41 +257,39 @@ impl DeviceTracker {
 
             // 3. mDNS service-based type
             #[cfg(feature = "mdns")]
-            let service_device_type = if let Some(registry) = &self.service_registry {
-                let services_slice: Vec<&str> =
-                    device.services.iter().map(|s| s.as_str()).collect();
-                let mut detected = None;
-                for s in services_slice {
-                    if let Some(dt) = registry.get_device_type(s) {
-                        detected = Some(dt.to_string());
-                        break;
+            let service_device_type: Option<DeviceType> =
+                if let Some(registry) = &self.service_registry {
+                    let mut detected: Option<DeviceType> = None;
+                    for s in device.services.iter().map(|s| s.as_str()) {
+                        if let Some(dt) = registry.get_device_type(s) {
+                            detected = Some(dt.clone());
+                            break;
+                        }
                     }
-                }
-                if let Some(dt) = &detected
-                    && is_confirmed_phone(device.hostname.as_deref())
-                {
-                    let dt_lower = dt.to_lowercase();
-                    if !dt_lower.contains("phone")
-                        && !dt_lower.contains("iphone")
-                        && !dt_lower.contains("mobile")
-                        && !dt_lower.contains("tablet")
+                    if let Some(dt) = &detected
+                        && is_confirmed_phone(device.hostname.as_deref())
                     {
-                        detected = None;
+                        let dt_lower = dt.as_str().to_lowercase();
+                        if !dt_lower.contains("phone")
+                            && !dt_lower.contains("iphone")
+                            && !dt_lower.contains("mobile")
+                            && !dt_lower.contains("tablet")
+                        {
+                            detected = None;
+                        }
                     }
-                }
-                detected
-            } else {
-                None
-            };
+                    detected
+                } else {
+                    None
+                };
             #[cfg(not(feature = "mdns"))]
-            let service_device_type: Option<String> = None;
+            let service_device_type: Option<DeviceType> = None;
 
             // Re-evaluate device type
-            let incoming_type =
-                service_device_type.or_else(|| hostname_device_type.map(|t| t.to_string()));
+            let incoming_type = service_device_type.or(hostname_device_type);
 
             if let Some(t) = incoming_type
-                && device.device_type.as_deref() != Some(&t)
+                && device.device_type.as_ref() != Some(&t)
                 && Self::should_replace_device_type(device, &t)
             {
                 device.device_type = Some(t);
@@ -284,13 +297,11 @@ impl DeviceTracker {
             }
 
             // Re-evaluate vendor
-            let incoming_vendor = hostname_vendor
-                .map(|v| v.to_string())
-                .or_else(|| oui_vendor.map(|v| v.to_string()));
+            let incoming_vendor = hostname_vendor.or_else(|| oui_vendor.map(Vendor::from));
 
             if let Some(v) = incoming_vendor
-                && device.vendor.as_deref() != Some(&v)
-                && Self::should_replace_vendor(device.vendor.as_deref(), &v, oui_vendor)
+                && device.vendor.as_ref() != Some(&v)
+                && Self::should_replace_vendor(device.vendor.as_ref(), &v, oui_vendor)
             {
                 device.vendor = Some(v);
                 changed = true;
@@ -377,8 +388,8 @@ impl DeviceTracker {
                     hostname,
                     system_description,
                     services,
-                    vendor,
-                    device_type,
+                    vendor: vendor.map(Vendor::from),
+                    device_type: device_type.map(DeviceType::from),
                     first_seen,
                     last_seen,
                 })
@@ -386,10 +397,27 @@ impl DeviceTracker {
             .map_err(std::io::Error::other)?;
 
         for device in device_iter.flatten() {
+            Self::index_device_ips(&mut self.ip_index, &device);
             self.devices.insert(device.mac_address.clone(), device);
         }
 
         Ok(())
+    }
+
+    /// Adds every IP address currently known for `device` (its primary `ip_address`, plus
+    /// all of `ipv6_addresses`) to the IP→MAC index. Idempotent and safe to call after any
+    /// device mutation — inserts are cheap and simply overwrite with the current owner.
+    ///
+    /// Takes the index directly (rather than `&mut self`) so it can be called while the
+    /// caller still holds a `&mut DeviceInfo` borrowed from `self.devices`: `self.ip_index`
+    /// and `self.devices` are disjoint fields, but a `&mut self` method would conflict.
+    fn index_device_ips(index: &mut HashMap<IpAddr, String>, device: &DeviceInfo) {
+        if !device.ip_address.is_unspecified() {
+            index.insert(device.ip_address, device.mac_address.clone());
+        }
+        for v6 in &device.ipv6_addresses {
+            index.insert(IpAddr::V6(*v6), device.mac_address.clone());
+        }
     }
 
     /// Persists all current device information to the SQLite database file.
@@ -450,8 +478,8 @@ impl DeviceTracker {
                         device.hostname,
                         device.system_description,
                         services,
-                        device.vendor,
-                        device.device_type,
+                        device.vendor.as_ref().map(Vendor::as_str),
+                        device.device_type.as_ref().map(DeviceType::as_str),
                         first_seen,
                         last_seen,
                     ])
@@ -534,34 +562,32 @@ impl DeviceTracker {
             if let Some(ref vsi) = packet.vendor_specific_info {
                 let vsi_lower = vsi.to_lowercase();
                 let inferred_vendor = if vsi_lower.contains("ubnt") || vsi_lower.contains("unifi") {
-                    Some("Ubiquiti")
+                    Some(Vendor::Ubiquiti)
                 } else if vsi_lower.contains("yealink") {
-                    Some("Yealink")
+                    Some(Vendor::Yealink)
                 } else if vsi_lower.contains("polycom") {
-                    Some("Polycom")
+                    Some(Vendor::Polycom)
                 } else if vsi_lower.contains("cisco") {
-                    Some("Cisco")
+                    Some(Vendor::Cisco)
                 } else if vsi_lower.contains("mitel") {
-                    Some("Mitel")
+                    Some(Vendor::Mitel)
                 } else if vsi_lower.contains("avaya") {
-                    Some("Avaya")
+                    Some(Vendor::Avaya)
                 } else {
                     None
                 };
                 if let Some(vendor) = inferred_vendor {
+                    if opt_type.is_none() {
+                        opt_type = match &vendor {
+                            Vendor::Ubiquiti => Some(DeviceType::NetworkDevice),
+                            Vendor::Yealink | Vendor::Polycom | Vendor::Mitel | Vendor::Avaya => {
+                                Some(DeviceType::IpPhone)
+                            }
+                            _ => None,
+                        };
+                    }
                     if opt_vendor.is_none() {
                         opt_vendor = Some(vendor);
-                    }
-                    if opt_type.is_none() {
-                        if vendor == "Ubiquiti" {
-                            opt_type = Some("Network Device");
-                        } else if vendor == "Yealink"
-                            || vendor == "Polycom"
-                            || vendor == "Mitel"
-                            || vendor == "Avaya"
-                        {
-                            opt_type = Some("IP Phone");
-                        }
                     }
                 }
             }
@@ -581,20 +607,16 @@ impl DeviceTracker {
             let mut local_changed = false;
             if let Some(v) = opt_vendor
                 && (device.vendor.is_none()
-                    || (device.vendor.as_deref() != Some(v)
-                        && device
-                            .vendor
-                            .as_deref()
-                            .map(|ov| ov.eq_ignore_ascii_case("eero inc."))
-                            == Some(true)))
+                    || (device.vendor.as_ref() != Some(&v)
+                        && device.vendor.as_ref().map(Vendor::is_eero) == Some(true)))
             {
-                device.vendor = Some(v.to_string());
+                device.vendor = Some(v);
                 local_changed = true;
             }
             if let Some(t) = opt_type
                 && device.device_type.is_none()
             {
-                device.device_type = Some(t.to_string());
+                device.device_type = Some(t);
                 local_changed = true;
             }
             if local_changed {
@@ -613,18 +635,18 @@ impl DeviceTracker {
     fn fingerprint_dhcpv6(
         enterprise_number: Option<u32>,
         data_strings: &[String],
-    ) -> (Option<&'static str>, Option<&'static str>) {
+    ) -> (Option<Vendor>, Option<DeviceType>) {
         let mut vendor = None;
         let mut device_type = None;
 
         if let Some(ent) = enterprise_number {
             match ent {
-                311 => vendor = Some("Microsoft"),
+                311 => vendor = Some(Vendor::Microsoft),
                 9 => {
-                    vendor = Some("Cisco");
-                    device_type = Some("Network Device");
+                    vendor = Some(Vendor::Cisco);
+                    device_type = Some(DeviceType::NetworkDevice);
                 }
-                93 | 3247 => vendor = Some("Apple"),
+                93 | 3247 => vendor = Some(Vendor::Apple),
                 _ => {}
             }
         }
@@ -638,18 +660,18 @@ impl DeviceTracker {
                 s.as_str()
             };
             if lower.contains("android") {
-                vendor = Some("Google");
-                device_type = Some("Mobile");
+                vendor = Some(Vendor::Google);
+                device_type = Some(DeviceType::Mobile);
             } else if lower.contains("apple") {
-                vendor = Some("Apple");
+                vendor = Some(Vendor::Apple);
             } else if lower.contains("sonos") {
-                vendor = Some("Sonos");
-                device_type = Some("Audio Device");
+                vendor = Some(Vendor::Sonos);
+                device_type = Some(DeviceType::AudioDevice);
             } else if lower.contains("msft") || lower.contains("microsoft") {
-                vendor = Some("Microsoft");
+                vendor = Some(Vendor::Microsoft);
             } else if lower.contains("cisco") {
-                vendor = Some("Cisco");
-                device_type = Some("Network Device");
+                vendor = Some(Vendor::Cisco);
+                device_type = Some(DeviceType::NetworkDevice);
             }
         }
 
@@ -729,15 +751,15 @@ impl DeviceTracker {
         {
             let mut local_changed = false;
             if let Some(v) = opt_vendor
-                && (device.vendor.is_none() || device.vendor.as_deref() != Some(v))
+                && (device.vendor.is_none() || device.vendor.as_ref() != Some(&v))
             {
-                device.vendor = Some(v.to_string());
+                device.vendor = Some(v);
                 local_changed = true;
             }
             if let Some(t) = opt_type
-                && (device.device_type.is_none() || device.device_type.as_deref() != Some(t))
+                && (device.device_type.is_none() || device.device_type.as_ref() != Some(&t))
             {
-                device.device_type = Some(t.to_string());
+                device.device_type = Some(t);
                 local_changed = true;
             }
             if local_changed {
@@ -757,15 +779,15 @@ impl DeviceTracker {
     /// Returns `true` if the device's information was updated or if a new device was added.
     #[cfg(feature = "ssdp")]
     pub fn update_from_lldp(&mut self, packet: &LldpPacket) -> bool {
-        let mac = &packet.source_mac;
+        let mac = format_mac(packet.source_mac);
         let mut ip = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
         if let Some(m_addr) = packet.management_address {
             ip = m_addr;
         }
 
-        let mut changed = self.update_device(mac, ip, packet.system_name.as_deref());
+        let mut changed = self.update_device(&mac, ip, packet.system_name.as_deref());
 
-        if let Some(device) = self.devices.get_mut(mac) {
+        if let Some(device) = self.devices.get_mut(&mac) {
             let mut local_changed = false;
 
             if let Some(ref desc) = packet.system_description {
@@ -782,42 +804,42 @@ impl DeviceTracker {
                     desc.as_str()
                 };
                 let inferred_vendor = if desc_lower.contains("cisco") {
-                    Some("Cisco")
+                    Some(Vendor::Cisco)
                 } else if desc_lower.contains("hp") || desc_lower.contains("procurve") {
-                    Some("HP")
+                    Some(Vendor::Hp)
                 } else if desc_lower.contains("juniper") {
-                    Some("Juniper")
+                    Some(Vendor::Juniper)
                 } else if desc_lower.contains("ubiquiti") || desc_lower.contains("unifi") {
-                    Some("Ubiquiti")
+                    Some(Vendor::Ubiquiti)
                 } else if desc_lower.contains("eero") {
-                    Some("eero inc.")
+                    Some(Vendor::Eero)
                 } else {
                     None
                 };
 
                 if let Some(vendor) = inferred_vendor {
-                    if device.vendor.as_deref() != Some(vendor) {
-                        device.vendor = Some(vendor.to_string());
+                    let dtype = if vendor.is_eero() {
+                        DeviceType::Router
+                    } else {
+                        DeviceType::NetworkDevice
+                    };
+
+                    if device.vendor.as_ref() != Some(&vendor) {
+                        device.vendor = Some(vendor);
                         local_changed = true;
                     }
 
-                    let dtype = if vendor == "eero inc." {
-                        "Router"
-                    } else {
-                        "Network Device"
-                    };
-
-                    if device.device_type.as_deref() != Some("Switch")
-                        && device.device_type.as_deref() != Some("Router")
+                    if device.device_type.as_ref() != Some(&DeviceType::Switch)
+                        && device.device_type.as_ref() != Some(&DeviceType::Router)
                     {
-                        device.device_type = Some(dtype.to_string());
+                        device.device_type = Some(dtype);
                         local_changed = true;
                     }
                 }
             }
 
             if device.device_type.is_none() {
-                device.device_type = Some("Network Device".to_string());
+                device.device_type = Some(DeviceType::NetworkDevice);
                 local_changed = true;
             }
 
@@ -838,16 +860,16 @@ impl DeviceTracker {
     /// Returns `true` if the device's information was updated or if a new device was added.
     #[cfg(feature = "ssdp")]
     pub fn update_from_cdp(&mut self, packet: &CdpPacket) -> bool {
-        let mac = &packet.source_mac;
+        let mac = format_mac(packet.source_mac);
         let mut ip = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
         if let Some(m_addr) = packet.management_address {
             ip = m_addr;
         }
 
         let hostname = packet.device_id.as_deref();
-        let mut changed = self.update_device(mac, ip, hostname);
+        let mut changed = self.update_device(&mac, ip, hostname);
 
-        if let Some(device) = self.devices.get_mut(mac) {
+        if let Some(device) = self.devices.get_mut(&mac) {
             let mut local_changed = false;
 
             if let Some(ref soft) = packet.software_version {
@@ -858,12 +880,12 @@ impl DeviceTracker {
                 }
             }
 
-            if device.vendor.as_deref() != Some("Cisco") {
-                device.vendor = Some("Cisco".to_string());
+            if device.vendor.as_ref() != Some(&Vendor::Cisco) {
+                device.vendor = Some(Vendor::Cisco);
                 local_changed = true;
             }
 
-            let mut dtype = "Network Device";
+            let mut dtype = DeviceType::NetworkDevice;
             if let Some(ref plat) = packet.platform {
                 let owned_plat;
                 let plat_lower = if plat.bytes().any(|b| b.is_ascii_uppercase()) {
@@ -873,20 +895,20 @@ impl DeviceTracker {
                     plat.as_str()
                 };
                 if plat_lower.contains("ip phone") {
-                    dtype = "IP Phone";
+                    dtype = DeviceType::IpPhone;
                 } else if plat_lower.contains("switch")
                     || plat_lower.contains("ws-c")
                     || plat_lower.contains("catalyst")
                     || plat_lower.contains("nexus")
                 {
-                    dtype = "Switch";
+                    dtype = DeviceType::Switch;
                 } else if plat_lower.contains("router") {
-                    dtype = "Router";
+                    dtype = DeviceType::Router;
                 }
             }
 
-            if device.device_type.as_deref() != Some(dtype) {
-                device.device_type = Some(dtype.to_string());
+            if device.device_type.as_ref() != Some(&dtype) {
+                device.device_type = Some(dtype);
                 local_changed = true;
             }
 
@@ -925,28 +947,17 @@ impl DeviceTracker {
         }
 
         let target_mac = if advertised_ips.is_empty() {
-            Some(packet.source_mac.to_string())
+            Some(format_mac(packet.source_mac))
         } else {
             let directly_from_host = advertised_ips.contains(&packet.source_ip);
             if directly_from_host {
-                Some(packet.source_mac.to_string())
+                Some(format_mac(packet.source_mac))
             } else {
-                // Relayed/proxied packet: try to find an existing device matching any of the advertised IPs
-                let mut resolved = None;
-                for ip in &advertised_ips {
-                    let found = self.devices.values().find(|d| {
-                        d.ip_address == *ip
-                            || match ip {
-                                IpAddr::V4(_) => false,
-                                IpAddr::V6(ipv6) => d.ipv6_addresses.contains(ipv6),
-                            }
-                    });
-                    if let Some(dev) = found {
-                        resolved = Some(dev.mac_address.clone());
-                        break;
-                    }
-                }
-                resolved
+                // Relayed/proxied packet: resolve via the IP index (kept in sync on every
+                // device update) instead of scanning every tracked device.
+                advertised_ips
+                    .iter()
+                    .find_map(|ip| self.ip_index.get(ip).cloned())
             }
         };
 
@@ -1027,8 +1038,8 @@ impl DeviceTracker {
         // Extract IoT-specific metadata (Matter, HAP)
         let iot_meta = crate::parser::iot::extract_iot_metadata(&services, &txt_attrs);
 
-        let mut txt_vendor = iot_meta.vendor.as_deref();
-        let mut txt_device_type = iot_meta.device_type.as_deref();
+        let mut txt_vendor = iot_meta.vendor.clone();
+        let mut txt_device_type = iot_meta.device_type.clone();
         let txt_model = iot_meta.model.as_ref();
 
         if txt_vendor.is_none()
@@ -1048,8 +1059,8 @@ impl DeviceTracker {
 
             for rule in MODEL_RULES {
                 if m.contains(rule.pattern) {
-                    txt_vendor = Some(rule.vendor);
-                    txt_device_type = Some(rule.device_type);
+                    txt_vendor = Some(rule.vendor.clone());
+                    txt_device_type = Some(rule.device_type.clone());
                     break;
                 }
             }
@@ -1058,12 +1069,10 @@ impl DeviceTracker {
         // Determine vendor and device type from services and hostname (before borrowing device)
         let vendor = Self::detect_vendor_from_hostname(first_hostname)
             .or(txt_vendor)
-            .or_else(|| self.detect_vendor_from_services(&services))
-            .map(str::to_string);
+            .or_else(|| self.detect_vendor_from_services(&services));
         let device_type = Self::detect_device_type_from_hostname(first_hostname)
             .or(txt_device_type)
-            .or_else(|| self.detect_device_type_from_services(&services))
-            .map(str::to_string);
+            .or_else(|| self.detect_device_type_from_services(&services));
 
         let ipv6_addr = first_ipv6;
 
@@ -1101,6 +1110,8 @@ impl DeviceTracker {
                 updated += 1;
             }
 
+            Self::index_device_ips(&mut self.ip_index, device);
+
             // Add services
             for service in &services {
                 if device.add_service(service) {
@@ -1109,9 +1120,9 @@ impl DeviceTracker {
             }
 
             // Set vendor if detected (or fall back to OUI vendor)
-            let vendor_to_apply = vendor.as_deref().or(oui_vendor);
+            let vendor_to_apply = vendor.clone().or_else(|| oui_vendor.map(Vendor::from));
             if let Some(v) = vendor_to_apply
-                && Self::should_replace_vendor(device.vendor.as_deref(), v, oui_vendor)
+                && Self::should_replace_vendor(device.vendor.as_ref(), &v, oui_vendor)
             {
                 // Protect Eero devices from being overwritten by other vendors
                 let is_eero = first_hostname
@@ -1122,28 +1133,22 @@ impl DeviceTracker {
                         .as_deref()
                         .map(|h| h.to_ascii_lowercase().contains("eero"))
                         .unwrap_or(false)
-                    || device
-                        .vendor
-                        .as_deref()
-                        .map(|v| v.eq_ignore_ascii_case("eero inc."))
-                        .unwrap_or(false)
+                    || device.vendor.as_ref().map(Vendor::is_eero).unwrap_or(false)
                     || oui_vendor
                         .map(|v| v.eq_ignore_ascii_case("eero inc."))
                         .unwrap_or(false);
-                if (!is_eero || v.eq_ignore_ascii_case("eero inc."))
-                    && device.vendor.as_deref() != Some(v)
-                {
-                    device.vendor = Some(v.to_string());
+                if (!is_eero || v.is_eero()) && device.vendor.as_ref() != Some(&v) {
+                    device.vendor = Some(v);
                     updated += 1;
                 }
             }
 
             // Set device type if detected
-            let mut dt_to_apply = device_type.as_deref();
-            if let Some(dt) = dt_to_apply {
+            let mut dt_to_apply = device_type.clone();
+            if let Some(dt) = &dt_to_apply {
                 let effective_hostname = first_hostname.or(device.hostname.as_deref());
                 if is_confirmed_phone(effective_hostname) {
-                    let dt_lower = dt.to_lowercase();
+                    let dt_lower = dt.as_str().to_lowercase();
                     if !dt_lower.contains("phone")
                         && !dt_lower.contains("iphone")
                         && !dt_lower.contains("mobile")
@@ -1155,7 +1160,7 @@ impl DeviceTracker {
             }
 
             if let Some(t) = dt_to_apply
-                && Self::should_replace_device_type(device, t)
+                && Self::should_replace_device_type(device, &t)
             {
                 // Protect Eero devices from being overwritten by other device types
                 let is_eero = first_hostname
@@ -1166,18 +1171,13 @@ impl DeviceTracker {
                         .as_deref()
                         .map(|h| h.to_ascii_lowercase().contains("eero"))
                         .unwrap_or(false)
-                    || device
-                        .vendor
-                        .as_deref()
-                        .map(|v| v.eq_ignore_ascii_case("eero inc."))
-                        .unwrap_or(false)
+                    || device.vendor.as_ref().map(Vendor::is_eero).unwrap_or(false)
                     || oui_vendor
                         .map(|v| v.eq_ignore_ascii_case("eero inc."))
                         .unwrap_or(false);
-                if (!is_eero || t.eq_ignore_ascii_case("Router"))
-                    && device.device_type.as_deref() != Some(t)
+                if (!is_eero || t == DeviceType::Router) && device.device_type.as_ref() != Some(&t)
                 {
-                    device.device_type = Some(t.to_string());
+                    device.device_type = Some(t);
                     updated += 1;
                 }
             }
@@ -1193,11 +1193,7 @@ impl DeviceTracker {
                         .as_deref()
                         .map(|h| h.to_ascii_lowercase().contains("eero"))
                         .unwrap_or(false)
-                    || device
-                        .vendor
-                        .as_deref()
-                        .map(|v| v.eq_ignore_ascii_case("eero inc."))
-                        .unwrap_or(false)
+                    || device.vendor.as_ref().map(Vendor::is_eero).unwrap_or(false)
                     || oui_vendor
                         .map(|v| v.eq_ignore_ascii_case("eero inc."))
                         .unwrap_or(false);
@@ -1240,16 +1236,16 @@ impl DeviceTracker {
     /// Number of updated/added devices.
     #[cfg(feature = "mdns")]
     pub fn update_from_nbns(&mut self, packet: &NbnsPacket) -> usize {
-        let mac = &packet.source_mac;
+        let mac = format_mac(packet.source_mac);
         let mut updated = 0;
 
         let hostname = Some(packet.name.as_str());
-        let mut vendor = Self::detect_vendor_from_hostname(hostname).map(str::to_string);
-        let mut device_type = Self::detect_device_type_from_hostname(hostname).map(str::to_string);
+        let mut vendor = Self::detect_vendor_from_hostname(hostname);
+        let mut device_type = Self::detect_device_type_from_hostname(hostname);
 
         // Customize vendor/device type based on NetBIOS specific suffix rules
         if packet.suffix == 0x20 && device_type.is_none() {
-            device_type = Some("File Server".to_string());
+            device_type = Some(DeviceType::FileServer);
         }
         let contains_samba = if packet.name.bytes().any(|b| b.is_ascii_uppercase()) {
             packet.name.to_ascii_lowercase().contains("samba")
@@ -1258,17 +1254,17 @@ impl DeviceTracker {
         };
         if contains_samba {
             if vendor.is_none() {
-                vendor = Some("Linux".to_string());
+                vendor = Some(Vendor::Linux);
             }
             if device_type.is_none() {
-                device_type = Some("Storage (NAS)".to_string());
+                device_type = Some(DeviceType::StorageNas);
             }
         }
 
         {
-            let device = self.devices.entry(mac.to_string()).or_insert_with(|| {
+            let device = self.devices.entry(mac.clone()).or_insert_with(|| {
                 updated += 1;
-                DeviceInfo::new(mac.to_string(), packet.source_ip, None)
+                DeviceInfo::new(mac.clone(), packet.source_ip, None)
             });
 
             // Update IP if currently unspecified
@@ -1276,6 +1272,7 @@ impl DeviceTracker {
                 device.ip_address = packet.source_ip;
                 updated += 1;
             }
+            Self::index_device_ips(&mut self.ip_index, device);
 
             // Update hostname
             if device.hostname.is_none() {
@@ -1285,8 +1282,8 @@ impl DeviceTracker {
 
             // Update vendor
             if let Some(ref v) = vendor {
-                let oui_vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(mac));
-                if Self::should_replace_vendor(device.vendor.as_deref(), v, oui_vendor) {
+                let oui_vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(&mac));
+                if Self::should_replace_vendor(device.vendor.as_ref(), v, oui_vendor) {
                     device.vendor = Some(v.clone());
                     updated += 1;
                 }
@@ -1316,7 +1313,7 @@ impl DeviceTracker {
     /// Detect vendor and device type from DHCP Option 60 (Vendor Class Identifier)
     fn detect_device_details_from_dhcp_vendor_class(
         vendor_class: &str,
-    ) -> (Option<&'static str>, Option<&'static str>) {
+    ) -> (Option<Vendor>, Option<DeviceType>) {
         if vendor_class.is_empty() {
             return (None, None);
         }
@@ -1329,41 +1326,39 @@ impl DeviceTracker {
             vendor_class
         };
         if vc.contains("msft 5.0") || vc.contains("msft 98") || vc.starts_with("msft") {
-            return (Some("Microsoft"), Some("PC/Windows"));
+            return (Some(Vendor::Microsoft), Some(DeviceType::PcWindows));
         }
         if vc.contains("android-dhcp") {
-            return (Some("Google"), Some("Android Phone"));
+            return (Some(Vendor::Google), Some(DeviceType::AndroidPhone));
         }
         if vc.contains("dhcpcd") {
-            return (Some("Linux"), Some("IoT Device"));
+            return (Some(Vendor::Linux), Some(DeviceType::IotDevice));
         }
         if vc.contains("hp jetdirect") || vc.contains("hewlett-packard jetdirect") {
-            return (Some("HP"), Some("Printer"));
+            return (Some(Vendor::Hp), Some(DeviceType::Printer));
         }
         if vc.contains("roku") {
-            return (Some("Roku"), Some("Media Player"));
+            return (Some(Vendor::Roku), Some(DeviceType::MediaPlayer));
         }
         if vc.contains("sonos") {
-            return (Some("Sonos"), Some("Smart Speaker"));
+            return (Some(Vendor::Sonos), Some(DeviceType::SmartSpeaker));
         }
         if vc.contains("appletv") || vc.contains("apple tv") {
-            return (Some("Apple"), Some("Apple TV"));
+            return (Some(Vendor::Apple), Some(DeviceType::AppleTv));
         }
         if vc.contains("idevice")
             || vc.contains("iphone")
             || vc.contains("ipad")
             || vc.contains("macintosh")
         {
-            return (Some("Apple"), Some("Apple Device"));
+            return (Some(Vendor::Apple), Some(DeviceType::AppleDevice));
         }
 
         (None, None)
     }
 
     /// Detect vendor and device type from DHCP Option 55 (Parameter Request List)
-    fn detect_device_details_from_dhcp_options(
-        prl: &[u8],
-    ) -> (Option<&'static str>, Option<&'static str>) {
+    fn detect_device_details_from_dhcp_options(prl: &[u8]) -> (Option<Vendor>, Option<DeviceType>) {
         if prl.is_empty() {
             return (None, None);
         }
@@ -1375,35 +1370,35 @@ impl DeviceTracker {
 
         // Windows Signature: contains 249 (MS Classless Route)
         if has_249 {
-            return (Some("Microsoft"), Some("PC/Windows"));
+            return (Some(Vendor::Microsoft), Some(DeviceType::PcWindows));
         }
 
         // Apple (iOS/macOS) Signature: contains 95 (LDAP) and lacks 26/28
         if has_95 && !has_26 && !has_28 {
-            return (Some("Apple"), Some("Apple Device"));
+            return (Some(Vendor::Apple), Some(DeviceType::AppleDevice));
         }
 
         // Android / Linux Signature: contains 26 (Interface MTU) and 28 (Broadcast Address)
         if has_26 && has_28 {
-            return (Some("Google"), Some("Android Phone"));
+            return (Some(Vendor::Google), Some(DeviceType::AndroidPhone));
         }
 
         (None, None)
     }
 
     /// Detect vendor from hostname patterns
-    pub(crate) fn detect_vendor_from_hostname(hostname: Option<&str>) -> Option<&'static str> {
+    pub(crate) fn detect_vendor_from_hostname(hostname: Option<&str>) -> Option<Vendor> {
         crate::classifier::detect_vendor_from_hostname(hostname)
     }
 
     /// Detect device type from hostname patterns
-    pub(crate) fn detect_device_type_from_hostname(hostname: Option<&str>) -> Option<&'static str> {
+    pub(crate) fn detect_device_type_from_hostname(hostname: Option<&str>) -> Option<DeviceType> {
         crate::classifier::detect_device_type_from_hostname(hostname)
     }
 
     /// Detect vendor from a list of services
     #[cfg(feature = "mdns")]
-    fn detect_vendor_from_services(&self, services: &[&str]) -> Option<&str> {
+    fn detect_vendor_from_services(&self, services: &[&str]) -> Option<Vendor> {
         let mut has_printer_services = false;
         let mut has_scanner_services = false;
 
@@ -1432,10 +1427,10 @@ impl DeviceTracker {
         if let Some(registry) = &self.service_registry {
             for service in services {
                 if let Some(vendor) = registry.get_vendor(service) {
-                    if is_peripheral && vendor.eq_ignore_ascii_case("apple") {
+                    if is_peripheral && *vendor == Vendor::Apple {
                         continue;
                     }
-                    return Some(vendor);
+                    return Some(vendor.clone());
                 }
             }
         }
@@ -1450,19 +1445,19 @@ impl DeviceTracker {
             };
             if s.contains("googlecast") || s.contains("googlezone") || s.contains("androidtvremote")
             {
-                return Some("Google");
+                return Some(Vendor::Google);
             }
             if s.contains("amzn-wplay") {
-                return Some("Amazon");
+                return Some(Vendor::Amazon);
             }
             if s.contains("spotify") {
-                return Some("Spotify");
+                return Some(Vendor::Spotify);
             }
             if s.contains("nvstream") {
-                return Some("NVIDIA");
+                return Some(Vendor::Nvidia);
             }
             if s.contains("eero") {
-                return Some("eero inc.");
+                return Some(Vendor::Eero);
             }
             if !is_peripheral
                 && (s.contains("airplay")
@@ -1480,78 +1475,51 @@ impl DeviceTracker {
                     || s.contains("hap._tcp")
                     || s.contains("appletv"))
             {
-                return Some("Apple");
+                return Some(Vendor::Apple);
             }
         }
         None
     }
 
     fn should_replace_vendor(
-        current: Option<&str>,
-        incoming: &str,
+        current: Option<&Vendor>,
+        incoming: &Vendor,
         oui_vendor: Option<&str>,
     ) -> bool {
         match current {
             None => true,
-            Some(existing) if existing.eq_ignore_ascii_case(incoming) => false,
+            Some(existing) if existing == incoming => false,
             Some(existing) => {
                 // If the incoming vendor is from a confirmed phone, allow the correction
                 // (e.g. replacing generic "Google" or "Apple" with the actual phone manufacturer).
-                if (incoming.eq_ignore_ascii_case("Motorola")
-                    || incoming.eq_ignore_ascii_case("Samsung")
-                    || incoming.eq_ignore_ascii_case("Apple")
-                    || incoming.eq_ignore_ascii_case("Google"))
-                    && (existing.eq_ignore_ascii_case("Google")
-                        || existing.eq_ignore_ascii_case("Apple"))
+                if matches!(
+                    incoming,
+                    Vendor::Motorola | Vendor::Samsung | Vendor::Apple | Vendor::Google
+                ) && matches!(existing, Vendor::Google | Vendor::Apple)
                 {
                     return true;
                 }
 
-                if existing.eq_ignore_ascii_case("Google")
-                    && incoming.eq_ignore_ascii_case("Rachio")
-                {
+                if *existing == Vendor::Google && *incoming == Vendor::Rachio {
                     return true;
                 }
                 oui_vendor
-                    .map(|oui| existing.eq_ignore_ascii_case(oui))
+                    .map(|oui| existing.as_str().eq_ignore_ascii_case(oui))
                     .unwrap_or(false)
             }
         }
     }
 
-    fn should_replace_device_type(device: &DeviceInfo, incoming: &str) -> bool {
-        let current = device.device_type.as_deref();
+    fn should_replace_device_type(device: &DeviceInfo, incoming: &DeviceType) -> bool {
+        let current = device.device_type.as_ref();
         match current {
             None => true,
-            Some(existing) if existing.eq_ignore_ascii_case(incoming) => false,
+            Some(existing) if existing == incoming => false,
             Some(existing) => {
-                let existing = existing.to_ascii_lowercase();
-                let incoming = incoming.to_ascii_lowercase();
-
-                // Define priority categories:
-                // Inferred/Generic types (Priority 0) should be overwritten by specific active-discovery types (Priority 1).
-                let is_generic = |t: &str| -> bool {
-                    matches!(
-                        t,
-                        "unknown"
-                            | "android phone"
-                            | "pc/windows"
-                            | "apple device"
-                            | "linux"
-                            | "iot device"
-                            | "smart home device"
-                            | "matter smart device"
-                            | "homekit device"
-                            | "homekit accessory"
-                            | "knx device"
-                            | "coap device"
-                    )
-                };
-
                 // Do not downgrade a device classified via mDNS/SSDP cast services (like Chromecast) to a generic Android Phone
                 // UNLESS the hostname explicitly confirms it is a specific mobile device.
-                if existing == "chromecast"
-                    && incoming == "android phone"
+                if *existing == DeviceType::Chromecast
+                    && *incoming == DeviceType::AndroidPhone
                     && !is_confirmed_phone(device.hostname.as_deref())
                 {
                     let has_cast_service = device
@@ -1565,8 +1533,8 @@ impl DeviceTracker {
 
                 // Do not downgrade a device with active mDNS/SSDP discovery services to a generic class,
                 // UNLESS the hostname explicitly confirms it is a specific mobile device (e.g. Moto, Samsung, iPhone).
-                if !is_generic(&existing)
-                    && is_generic(&incoming)
+                if !existing.is_generic()
+                    && incoming.is_generic()
                     && !is_confirmed_phone(device.hostname.as_deref())
                 {
                     return false;
@@ -1574,7 +1542,7 @@ impl DeviceTracker {
 
                 // Upgrade from generic/inferred to specific/refined,
                 // UNLESS the device is a confirmed mobile phone/tablet (in which case do not override it with a smart/media type).
-                if is_generic(&existing) && !is_generic(&incoming) {
+                if existing.is_generic() && !incoming.is_generic() {
                     if is_confirmed_phone(device.hostname.as_deref()) {
                         return false;
                     }
@@ -1583,21 +1551,21 @@ impl DeviceTracker {
 
                 // If both are specific/refined, allow allowed corrections
                 matches!(
-                    incoming.as_str(),
-                    "smart watering device"
-                        | "smart cleaning device"
-                        | "laptop"
-                        | "android phone"
-                        | "pixel phone"
-                        | "apple iphone"
+                    incoming,
+                    DeviceType::SmartWateringDevice
+                        | DeviceType::SmartCleaningDevice
+                        | DeviceType::Laptop
+                        | DeviceType::AndroidPhone
+                        | DeviceType::PixelPhone
+                        | DeviceType::AppleIPhone
                 ) && matches!(
-                    existing.as_str(),
-                    "security camera"
-                        | "router"
-                        | "smart home device"
-                        | "unknown"
-                        | "chromecast"
-                        | "thermostat"
+                    existing,
+                    DeviceType::SecurityCamera
+                        | DeviceType::Router
+                        | DeviceType::SmartHomeDevice
+                        | DeviceType::Unknown
+                        | DeviceType::Chromecast
+                        | DeviceType::Thermostat
                 )
             }
         }
@@ -1605,7 +1573,7 @@ impl DeviceTracker {
 
     /// Detect device type from a list of services
     #[cfg(feature = "mdns")]
-    fn detect_device_type_from_services(&self, services: &[&str]) -> Option<&str> {
+    fn detect_device_type_from_services(&self, services: &[&str]) -> Option<DeviceType> {
         for service in services {
             let owned;
             let s = if service.bytes().any(|b| b.is_ascii_uppercase()) {
@@ -1615,39 +1583,39 @@ impl DeviceTracker {
                 service
             };
             if s.contains("googlecast") || s.contains("googlezone") {
-                return Some("Chromecast");
+                return Some(DeviceType::Chromecast);
             }
             if s.contains("appletv") || s.contains("mediaremotetv") {
-                return Some("Apple TV");
+                return Some(DeviceType::AppleTv);
             }
             if s.contains("_remotepairing") || s.contains("_atc") || s.contains("_rdlink") {
-                return Some("Apple iPhone");
+                return Some(DeviceType::AppleIPhone);
             }
             if s.contains("airplay") || s.contains("raop") {
-                return Some("AirPlay Device");
+                return Some(DeviceType::AirPlayDevice);
             }
             if s.contains("amzn-wplay") {
-                return Some("Fire TV");
+                return Some(DeviceType::FireTv);
             }
             if s.contains("eero") {
-                return Some("Router");
+                return Some(DeviceType::Router);
             }
             if s.contains("_printer")
                 || s.contains("_ipp")
                 || s.contains("_pdl-datastream")
                 || s.contains("_print-caps")
             {
-                return Some("Printer");
+                return Some(DeviceType::Printer);
             }
             if s.contains("_scanner") || s.contains("_uscan") {
-                return Some("Scanner");
+                return Some(DeviceType::Scanner);
             }
         }
 
         if let Some(registry) = &self.service_registry {
             for service in services {
                 if let Some(device_type) = registry.get_device_type(service) {
-                    return Some(device_type);
+                    return Some(device_type.clone());
                 }
             }
         }
@@ -1661,19 +1629,19 @@ impl DeviceTracker {
                 service
             };
             if s.contains("_smb") || s.contains("_afpovertcp") || s.contains("_nfs") {
-                return Some("NAS");
+                return Some(DeviceType::Nas);
             }
             if s.contains("_homekit") || s.contains("_hap") {
-                return Some("Smart Home Device");
+                return Some(DeviceType::SmartHomeDevice);
             }
             if s.contains("androidtvremote") {
-                return Some("Android TV");
+                return Some(DeviceType::AndroidTv);
             }
             if s.contains("nvstream") {
-                return Some("NVIDIA Shield");
+                return Some(DeviceType::NvidiaShield);
             }
             if s.contains("spotify") {
-                return Some("Spotify Connect Device");
+                return Some(DeviceType::SpotifyConnectDevice);
             }
         }
         None
@@ -1688,12 +1656,12 @@ impl DeviceTracker {
         let packet = packet.view();
 
         let mut updated = 0;
-        let mac = &packet.source_mac;
+        let mac = format_mac(packet.source_mac);
         let services = packet.service_terms();
         let oui_vendor = self
             .oui_registry
             .as_ref()
-            .and_then(|registry| registry.lookup(mac));
+            .and_then(|registry| registry.lookup(&mac));
 
         let vendor = packet.detect_vendor_from_view();
         let device_type = packet.detect_device_type_from_view();
@@ -1707,14 +1675,14 @@ impl DeviceTracker {
             _ => None,
         };
 
-        let device = self.devices.entry(mac.to_string()).or_insert_with(|| {
+        let device = self.devices.entry(mac.clone()).or_insert_with(|| {
             updated += 1;
             let initial_ip = source_ipv4.map(IpAddr::V4).unwrap_or_else(|| {
                 source_ipv6
                     .map(IpAddr::V6)
                     .unwrap_or(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)))
             });
-            DeviceInfo::new(mac.to_string(), initial_ip, None)
+            DeviceInfo::new(mac.clone(), initial_ip, None)
         });
 
         if let Some(ipv4) = source_ipv4
@@ -1730,6 +1698,8 @@ impl DeviceTracker {
             updated += 1;
         }
 
+        Self::index_device_ips(&mut self.ip_index, device);
+
         for service in &services {
             if device.add_service(service) {
                 updated += 1;
@@ -1737,20 +1707,20 @@ impl DeviceTracker {
         }
 
         // Set vendor if detected (or fall back to OUI vendor)
-        let vendor_to_apply = vendor.or(oui_vendor);
+        let vendor_to_apply = vendor.or_else(|| oui_vendor.map(Vendor::from));
         if let Some(v) = vendor_to_apply
-            && Self::should_replace_vendor(device.vendor.as_deref(), v, oui_vendor)
-            && device.vendor.as_deref() != Some(v)
+            && Self::should_replace_vendor(device.vendor.as_ref(), &v, oui_vendor)
+            && device.vendor.as_ref() != Some(&v)
         {
-            device.vendor = Some(v.to_string());
+            device.vendor = Some(v);
             updated += 1;
         }
 
         if let Some(t) = device_type
-            && Self::should_replace_device_type(device, t)
-            && device.device_type.as_deref() != Some(t)
+            && Self::should_replace_device_type(device, &t)
+            && device.device_type.as_ref() != Some(&t)
         {
-            device.device_type = Some(t.to_string());
+            device.device_type = Some(t);
             updated += 1;
         }
 
@@ -1760,7 +1730,7 @@ impl DeviceTracker {
             let _ = self.save_to_db();
         }
 
-        self.dirty_devices.lock().unwrap().insert(mac.to_string());
+        self.dirty_devices.lock().unwrap().insert(mac);
 
         updated
     }
@@ -1771,12 +1741,12 @@ impl DeviceTracker {
     /// The count of unique updates applied to the device entry.
     #[cfg(feature = "ssdp")]
     pub fn update_from_wsd(&mut self, packet: &WsdPacket) -> usize {
-        let mac = &packet.source_mac;
+        let mac = format_mac(packet.source_mac);
         let mut updated = 0;
 
-        let device = self.devices.entry(mac.to_string()).or_insert_with(|| {
+        let device = self.devices.entry(mac.clone()).or_insert_with(|| {
             updated += 1;
-            DeviceInfo::new(mac.to_string(), packet.source_ip, None)
+            DeviceInfo::new(mac.clone(), packet.source_ip, None)
         });
 
         // Update IP if currently unspecified
@@ -1784,11 +1754,12 @@ impl DeviceTracker {
             device.ip_address = packet.source_ip;
             updated += 1;
         }
+        Self::index_device_ips(&mut self.ip_index, device);
 
         // Update vendor
         if let Some(ref v) = packet.vendor {
-            let oui_vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(mac));
-            if Self::should_replace_vendor(device.vendor.as_deref(), v, oui_vendor) {
+            let oui_vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(&mac));
+            if Self::should_replace_vendor(device.vendor.as_ref(), v, oui_vendor) {
                 device.vendor = Some(v.clone());
                 updated += 1;
             }
@@ -1809,7 +1780,7 @@ impl DeviceTracker {
         }
 
         if updated > 0 {
-            self.dirty_devices.lock().unwrap().insert(mac.to_string());
+            self.dirty_devices.lock().unwrap().insert(mac.clone());
         }
 
         updated
@@ -1821,12 +1792,12 @@ impl DeviceTracker {
     /// The count of unique updates applied to the device entry.
     #[cfg(feature = "ssdp")]
     pub fn update_from_lifx(&mut self, packet: &crate::parser::iot::LifxPacket) -> usize {
-        let mac = &packet.source_mac;
+        let mac = format_mac(packet.source_mac);
         let mut updated = 0;
 
-        let device = self.devices.entry(mac.to_string()).or_insert_with(|| {
+        let device = self.devices.entry(mac.clone()).or_insert_with(|| {
             updated += 1;
-            DeviceInfo::new(mac.to_string(), packet.source_ip, None)
+            DeviceInfo::new(mac.clone(), packet.source_ip, None)
         });
 
         // Update IP if currently unspecified
@@ -1834,17 +1805,18 @@ impl DeviceTracker {
             device.ip_address = packet.source_ip;
             updated += 1;
         }
+        Self::index_device_ips(&mut self.ip_index, device);
 
         // Set LIFX as vendor if not set or if we should replace it
-        let oui_vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(mac));
-        if Self::should_replace_vendor(device.vendor.as_deref(), "LIFX", oui_vendor) {
-            device.vendor = Some("LIFX".to_string());
+        let oui_vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(&mac));
+        if Self::should_replace_vendor(device.vendor.as_ref(), &Vendor::Lifx, oui_vendor) {
+            device.vendor = Some(Vendor::Lifx);
             updated += 1;
         }
 
         // Set Lightbulb as device type if not set
-        if Self::should_replace_device_type(device, "Lightbulb") {
-            device.device_type = Some("Lightbulb".to_string());
+        if Self::should_replace_device_type(device, &DeviceType::Lightbulb) {
+            device.device_type = Some(DeviceType::Lightbulb);
             updated += 1;
         }
 
@@ -1862,7 +1834,7 @@ impl DeviceTracker {
         }
 
         if updated > 0 {
-            self.dirty_devices.lock().unwrap().insert(mac.to_string());
+            self.dirty_devices.lock().unwrap().insert(mac.clone());
         }
 
         updated
@@ -1874,12 +1846,12 @@ impl DeviceTracker {
     /// The count of unique updates applied to the device entry.
     #[cfg(feature = "ssdp")]
     pub fn update_from_coap(&mut self, packet: &crate::parser::iot::CoapPacket) -> usize {
-        let mac = &packet.source_mac;
+        let mac = format_mac(packet.source_mac);
         let mut updated = 0;
 
-        let device = self.devices.entry(mac.to_string()).or_insert_with(|| {
+        let device = self.devices.entry(mac.clone()).or_insert_with(|| {
             updated += 1;
-            DeviceInfo::new(mac.to_string(), packet.source_ip, None)
+            DeviceInfo::new(mac.clone(), packet.source_ip, None)
         });
 
         // Update IP if currently unspecified
@@ -1887,8 +1859,9 @@ impl DeviceTracker {
             device.ip_address = packet.source_ip;
             updated += 1;
         }
+        Self::index_device_ips(&mut self.ip_index, device);
 
-        let mut dev_type = "IoT Device";
+        let mut dev_type = DeviceType::IotDevice;
 
         // Parse payload to infer device type / details if available
         if let Some(ref payload) = packet.payload {
@@ -1900,17 +1873,17 @@ impl DeviceTracker {
             let payload_lower = payload.to_lowercase();
             // Basic inference from CoAP CoRE Link Format
             if payload_lower.contains("temp") || payload_lower.contains("therm") {
-                dev_type = "Sensor";
+                dev_type = DeviceType::Sensor;
             } else if payload_lower.contains("light") || payload_lower.contains("lamp") {
-                dev_type = "Lightbulb";
+                dev_type = DeviceType::Lightbulb;
             } else if payload_lower.contains("plug") || payload_lower.contains("outlet") {
-                dev_type = "Outlet";
+                dev_type = DeviceType::Outlet;
             }
         }
 
         // Set the final device type
-        if Self::should_replace_device_type(device, dev_type) {
-            device.device_type = Some(dev_type.to_string());
+        if Self::should_replace_device_type(device, &dev_type) {
+            device.device_type = Some(dev_type);
             updated += 1;
         }
 
@@ -1921,7 +1894,7 @@ impl DeviceTracker {
         }
 
         if updated > 0 {
-            self.dirty_devices.lock().unwrap().insert(mac.to_string());
+            self.dirty_devices.lock().unwrap().insert(mac.clone());
         }
 
         updated
@@ -1933,12 +1906,12 @@ impl DeviceTracker {
     /// The count of unique updates applied to the device entry.
     #[cfg(feature = "ssdp")]
     pub fn update_from_knx(&mut self, packet: &crate::parser::iot::KnxPacket) -> usize {
-        let mac = &packet.source_mac;
+        let mac = format_mac(packet.source_mac);
         let mut updated = 0;
 
-        let device = self.devices.entry(mac.to_string()).or_insert_with(|| {
+        let device = self.devices.entry(mac.clone()).or_insert_with(|| {
             updated += 1;
-            DeviceInfo::new(mac.to_string(), packet.source_ip, None)
+            DeviceInfo::new(mac.clone(), packet.source_ip, None)
         });
 
         // Update IP if currently unspecified
@@ -1946,17 +1919,18 @@ impl DeviceTracker {
             device.ip_address = packet.source_ip;
             updated += 1;
         }
+        Self::index_device_ips(&mut self.ip_index, device);
 
         // Set vendor if friendly name or serial number suggests one, otherwise generic KNX
-        let oui_vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(mac));
-        if Self::should_replace_vendor(device.vendor.as_deref(), "KNX Device", oui_vendor) {
-            device.vendor = Some("KNX".to_string());
+        let oui_vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(&mac));
+        if Self::should_replace_vendor(device.vendor.as_ref(), &Vendor::Knx, oui_vendor) {
+            device.vendor = Some(Vendor::Knx);
             updated += 1;
         }
 
         // Set device type if not set
-        if Self::should_replace_device_type(device, "Home Automation") {
-            device.device_type = Some("Home Automation".to_string());
+        if Self::should_replace_device_type(device, &DeviceType::HomeAutomation) {
+            device.device_type = Some(DeviceType::HomeAutomation);
             updated += 1;
         }
 
@@ -1987,7 +1961,7 @@ impl DeviceTracker {
         }
 
         if updated > 0 {
-            self.dirty_devices.lock().unwrap().insert(mac.to_string());
+            self.dirty_devices.lock().unwrap().insert(mac.clone());
         }
 
         updated
@@ -1999,12 +1973,12 @@ impl DeviceTracker {
     /// The count of unique updates applied to the device entry.
     #[cfg(feature = "ssdp")]
     pub fn update_from_cctv(&mut self, packet: &crate::parser::cctv::CctvPacket) -> usize {
-        let mac = &packet.source_mac;
+        let mac = format_mac(packet.source_mac);
         let mut updated = 0;
 
-        let device = self.devices.entry(mac.to_string()).or_insert_with(|| {
+        let device = self.devices.entry(mac.clone()).or_insert_with(|| {
             updated += 1;
-            DeviceInfo::new(mac.to_string(), packet.source_ip, None)
+            DeviceInfo::new(mac.clone(), packet.source_ip, None)
         });
 
         // Update IP if currently unspecified
@@ -2012,17 +1986,18 @@ impl DeviceTracker {
             device.ip_address = packet.source_ip;
             updated += 1;
         }
+        Self::index_device_ips(&mut self.ip_index, device);
 
         // Set vendor if appropriate
-        let oui_vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(mac));
-        if Self::should_replace_vendor(device.vendor.as_deref(), &packet.vendor, oui_vendor) {
+        let oui_vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(&mac));
+        if Self::should_replace_vendor(device.vendor.as_ref(), &packet.vendor, oui_vendor) {
             device.vendor = Some(packet.vendor.clone());
             updated += 1;
         }
 
         // Set device type to "IP Camera"
-        if Self::should_replace_device_type(device, "IP Camera") {
-            device.device_type = Some("IP Camera".to_string());
+        if Self::should_replace_device_type(device, &DeviceType::IpCamera) {
+            device.device_type = Some(DeviceType::IpCamera);
             updated += 1;
         }
 
@@ -2057,7 +2032,7 @@ impl DeviceTracker {
         }
 
         if updated > 0 {
-            self.dirty_devices.lock().unwrap().insert(mac.to_string());
+            self.dirty_devices.lock().unwrap().insert(mac.clone());
         }
 
         updated
@@ -2069,12 +2044,12 @@ impl DeviceTracker {
     /// The count of unique updates applied to the device entry.
     #[cfg(feature = "ssdp")]
     pub fn update_from_mqtt(&mut self, packet: &crate::parser::mqtt_gdm::MqttPacket) -> usize {
-        let mac = &packet.source_mac;
+        let mac = format_mac(packet.source_mac);
         let mut updated = 0;
 
-        let device = self.devices.entry(mac.to_string()).or_insert_with(|| {
+        let device = self.devices.entry(mac.clone()).or_insert_with(|| {
             updated += 1;
-            DeviceInfo::new(mac.to_string(), packet.source_ip, None)
+            DeviceInfo::new(mac.clone(), packet.source_ip, None)
         });
 
         // Update IP if currently unspecified
@@ -2082,10 +2057,11 @@ impl DeviceTracker {
             device.ip_address = packet.source_ip;
             updated += 1;
         }
+        Self::index_device_ips(&mut self.ip_index, device);
 
         // Set device type to "IoT Device"
-        if Self::should_replace_device_type(device, "IoT Device") {
-            device.device_type = Some("IoT Device".to_string());
+        if Self::should_replace_device_type(device, &DeviceType::IotDevice) {
+            device.device_type = Some(DeviceType::IotDevice);
             updated += 1;
         }
 
@@ -2106,7 +2082,7 @@ impl DeviceTracker {
         }
 
         if updated > 0 {
-            self.dirty_devices.lock().unwrap().insert(mac.to_string());
+            self.dirty_devices.lock().unwrap().insert(mac.clone());
         }
 
         updated
@@ -2118,12 +2094,12 @@ impl DeviceTracker {
     /// The count of unique updates applied to the device entry.
     #[cfg(feature = "ssdp")]
     pub fn update_from_gdm(&mut self, packet: &crate::parser::mqtt_gdm::GdmPacket) -> usize {
-        let mac = &packet.source_mac;
+        let mac = format_mac(packet.source_mac);
         let mut updated = 0;
 
-        let device = self.devices.entry(mac.to_string()).or_insert_with(|| {
+        let device = self.devices.entry(mac.clone()).or_insert_with(|| {
             updated += 1;
-            DeviceInfo::new(mac.to_string(), packet.source_ip, None)
+            DeviceInfo::new(mac.clone(), packet.source_ip, None)
         });
 
         // Update IP if currently unspecified
@@ -2131,27 +2107,27 @@ impl DeviceTracker {
             device.ip_address = packet.source_ip;
             updated += 1;
         }
+        Self::index_device_ips(&mut self.ip_index, device);
 
         // Set vendor to "Plex"
-        let vendor_name = "Plex".to_string();
-        let oui_vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(mac));
-        if Self::should_replace_vendor(device.vendor.as_deref(), &vendor_name, oui_vendor) {
-            device.vendor = Some(vendor_name);
+        let oui_vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(&mac));
+        if Self::should_replace_vendor(device.vendor.as_ref(), &Vendor::Plex, oui_vendor) {
+            device.vendor = Some(Vendor::Plex);
             updated += 1;
         }
 
         // Classify device type as "Media Server" or "Media Player"
         let dt = if let Some(ref prod) = packet.product {
             if prod.to_lowercase().contains("server") {
-                "Media Server"
+                DeviceType::MediaServer
             } else {
-                "Media Player"
+                DeviceType::MediaPlayer
             }
         } else {
-            "Media Server"
+            DeviceType::MediaServer
         };
-        if Self::should_replace_device_type(device, dt) {
-            device.device_type = Some(dt.to_string());
+        if Self::should_replace_device_type(device, &dt) {
+            device.device_type = Some(dt);
             updated += 1;
         }
 
@@ -2181,14 +2157,14 @@ impl DeviceTracker {
         }
 
         if updated > 0 {
-            self.dirty_devices.lock().unwrap().insert(mac.to_string());
+            self.dirty_devices.lock().unwrap().insert(mac.clone());
         }
 
         updated
     }
 
     /// Detect device type from vendor name
-    fn detect_device_type_from_vendor(vendor: &str) -> Option<&'static str> {
+    fn detect_device_type_from_vendor(vendor: &str) -> Option<DeviceType> {
         let owned_holder;
         let v = if vendor.bytes().any(|b| b.is_ascii_uppercase()) {
             owned_holder = vendor.to_ascii_lowercase();
@@ -2198,40 +2174,40 @@ impl DeviceTracker {
         };
 
         if v.contains("lenovo") {
-            return Some("Laptop");
+            return Some(DeviceType::Laptop);
         }
 
         if v.contains("eero") {
-            return Some("Router");
+            return Some(DeviceType::Router);
         }
 
         if v.contains("simplisafe") {
-            return Some("Security System");
+            return Some(DeviceType::SecuritySystem);
         }
         if v.contains("ring") && !v.contains("engineering") {
-            return Some("Security Camera");
+            return Some(DeviceType::SecurityCamera);
         }
         if v.contains("arlo") {
-            return Some("Security Camera");
+            return Some(DeviceType::SecurityCamera);
         }
         if v.contains("ecobee") || v.contains("honeywell") || v.contains("thermostat") {
-            return Some("Thermostat");
+            return Some(DeviceType::Thermostat);
         }
         if v.contains("nest") {
-            return Some("Smart Home Device");
+            return Some(DeviceType::SmartHomeDevice);
         }
         if v.contains("alarm") || v.contains("security") {
-            return Some("Security System");
+            return Some(DeviceType::SecuritySystem);
         }
 
         if v.contains("tuya") || v.contains("smartlife") {
-            return Some("Smart Home Device");
+            return Some(DeviceType::SmartHomeDevice);
         }
         if v.contains("philips hue") || v.contains("signify") {
-            return Some("Smart Light");
+            return Some(DeviceType::SmartLight);
         }
         if v.contains("sonos") {
-            return Some("Speaker");
+            return Some(DeviceType::Speaker);
         }
 
         if v.contains("ubiquiti")
@@ -2239,45 +2215,45 @@ impl DeviceTracker {
             || v.contains("tp-link")
             || v.contains("linksys")
         {
-            return Some("Network Equipment");
+            return Some(DeviceType::NetworkEquipment);
         }
         if v.contains("cisco") {
-            return Some("Network Equipment");
+            return Some(DeviceType::NetworkEquipment);
         }
 
         if v.contains("nintendo") {
-            return Some("Gaming Console");
+            return Some(DeviceType::GamingConsole);
         }
         if v.contains("sony") && (v.contains("playstation") || v.contains("entertainment")) {
-            return Some("Gaming Console");
+            return Some(DeviceType::GamingConsole);
         }
         if v.contains("microsoft") && v.contains("xbox") {
-            return Some("Gaming Console");
+            return Some(DeviceType::GamingConsole);
         }
 
         if v.contains("espressif") {
-            return Some("IoT Device");
+            return Some(DeviceType::IotDevice);
         }
         if v.contains("raspberry") {
-            return Some("Raspberry Pi");
+            return Some(DeviceType::RaspberryPi);
         }
         if v.contains("arduino") {
-            return Some("Microcontroller");
+            return Some(DeviceType::Microcontroller);
         }
 
         if v.contains("hp") && v.contains("print") {
-            return Some("Printer");
+            return Some(DeviceType::Printer);
         }
         if v.contains("canon")
             || v.contains("epson")
             || v.contains("brother")
             || v.contains("lexmark")
         {
-            return Some("Printer");
+            return Some(DeviceType::Printer);
         }
 
         if v.contains("synology") || v.contains("qnap") || v.contains("western digital") {
-            return Some("NAS");
+            return Some(DeviceType::Nas);
         }
 
         None
@@ -2292,63 +2268,70 @@ impl DeviceTracker {
         let device_type_from_hostname = Self::detect_device_type_from_hostname(hostname.as_deref());
 
         let result = if let Some(device) = self.devices.get_mut(mac) {
+            let old_ip = device.ip_address;
             let changed = device.update(ip, hostname.as_deref());
+
+            if device.ip_address != old_ip && !old_ip.is_unspecified() {
+                self.ip_index.remove(&old_ip);
+            }
+            Self::index_device_ips(&mut self.ip_index, device);
 
             let mut vendor_to_apply = hostname_vendor;
             let mut oui_vendor = None;
 
             if vendor_to_apply.is_none() && device.vendor.is_none() {
                 oui_vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(mac));
-                vendor_to_apply = oui_vendor;
+                vendor_to_apply = oui_vendor.map(Vendor::from);
             }
 
             if let Some(v) = vendor_to_apply {
                 if device.vendor.is_some()
-                    && device.vendor.as_deref() != Some(v)
+                    && device.vendor.as_ref() != Some(&v)
                     && oui_vendor.is_none()
                 {
                     oui_vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(mac));
                 }
 
-                if Self::should_replace_vendor(device.vendor.as_deref(), v, oui_vendor) {
-                    device.vendor = Some(v.to_string());
+                if Self::should_replace_vendor(device.vendor.as_ref(), &v, oui_vendor) {
+                    device.vendor = Some(v);
                 }
             }
 
             if let Some(dt) = device_type_from_hostname
-                && Self::should_replace_device_type(device, dt)
+                && Self::should_replace_device_type(device, &dt)
             {
-                device.device_type = Some(dt.to_string());
+                device.device_type = Some(dt);
             }
 
-            if let Some(v) = device.vendor.as_deref()
-                && let Some(dt) = Self::detect_device_type_from_vendor(v)
-                && Self::should_replace_device_type(device, dt)
+            if let Some(v) = device.vendor.as_ref()
+                && let Some(dt) = Self::detect_device_type_from_vendor(v.as_str())
+                && Self::should_replace_device_type(device, &dt)
             {
-                device.device_type = Some(dt.to_string());
+                device.device_type = Some(dt);
             }
 
             changed
         } else {
-            let vendor = hostname_vendor.map(str::to_string).or_else(|| {
+            let vendor = hostname_vendor.or_else(|| {
                 self.oui_registry
                     .as_ref()
                     .and_then(|r| r.lookup(mac))
-                    .map(str::to_string)
+                    .map(Vendor::from)
             });
 
             let mut device = DeviceInfo::new(mac.to_string(), ip, hostname);
-            if let Some(ref v) = vendor {
-                device.vendor = Some(v.clone());
-            }
             if let Some(dt) = device_type_from_hostname {
-                device.device_type = Some(dt.to_string());
+                device.device_type = Some(dt);
             }
             if let Some(ref v) = vendor
-                && let Some(dt) = Self::detect_device_type_from_vendor(v)
+                && let Some(dt) = Self::detect_device_type_from_vendor(v.as_str())
             {
-                device.device_type = Some(dt.to_string());
+                device.device_type = Some(dt);
             }
+            if let Some(v) = vendor {
+                device.vendor = Some(v);
+            }
+            Self::index_device_ips(&mut self.ip_index, &device);
             self.devices.insert(mac.to_string(), device);
             true
         };

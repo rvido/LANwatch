@@ -17,6 +17,46 @@ pub const DHCPV6_CLIENT_PORT: u16 = 546;
 /// DHCPv6 server port
 pub const DHCPV6_SERVER_PORT: u16 = 547;
 
+/// Formats a raw 6-byte MAC address as a lowercase colon-separated string
+/// (e.g. "aa:bb:cc:dd:ee:ff").
+///
+/// Packet structs carry MAC addresses as `[u8; 6]` to avoid allocating on
+/// every parsed frame; this is the single place that formatting happens,
+/// typically only once a packet is confirmed useful (e.g. as a device
+/// tracking key).
+pub fn format_mac(mac: [u8; 6]) -> String {
+    format!(
+        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+    )
+}
+
+/// Parses a MAC address from text (colon-, dash-, or unseparated hex, e.g.
+/// "aa:bb:cc:dd:ee:ff", "AA-BB-CC-DD-EE-FF", or "aabbccddeeff") into raw bytes.
+///
+/// Returns `None` unless exactly 12 hex digits are present.
+pub fn parse_mac(text: &str) -> Option<[u8; 6]> {
+    let mut nibbles = [0u8; 12];
+    let mut count = 0;
+    for c in text.chars() {
+        if c.is_ascii_hexdigit() {
+            if count >= 12 {
+                return None;
+            }
+            nibbles[count] = c.to_digit(16)? as u8;
+            count += 1;
+        }
+    }
+    if count != 12 {
+        return None;
+    }
+    let mut mac = [0u8; 6];
+    for i in 0..6 {
+        mac[i] = (nibbles[i * 2] << 4) | nibbles[i * 2 + 1];
+    }
+    Some(mac)
+}
+
 /// Errors that can occur during DHCP sniffing
 #[derive(Debug)]
 pub enum DhcpError {
@@ -198,6 +238,817 @@ impl std::fmt::Display for Dhcpv6MessageType {
     }
 }
 
+/// Known device manufacturer / vendor, detected from hostname patterns, DHCP fingerprints,
+/// mDNS/SSDP service metadata, or OUI (MAC prefix) lookups.
+///
+/// The variant set covers vendors that are directly compared against elsewhere in the
+/// codebase (e.g. to protect an "eero inc." classification from being overwritten). Any
+/// vendor name that doesn't match a known variant — most notably the free-form manufacturer
+/// strings returned by [`crate::oui::OuiRegistry`] — is preserved verbatim in `Other`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Vendor {
+    /// Apple Inc.
+    Apple,
+    /// Google LLC
+    Google,
+    /// Amazon.com, Inc.
+    Amazon,
+    /// Microsoft Corporation
+    Microsoft,
+    /// Samsung Electronics
+    Samsung,
+    /// Sony Corporation
+    Sony,
+    /// LG Electronics
+    Lg,
+    /// Cisco Systems
+    Cisco,
+    /// Ubiquiti Inc.
+    Ubiquiti,
+    /// Netgear Inc.
+    Netgear,
+    /// TP-Link Technologies
+    TpLink,
+    /// Philips
+    Philips,
+    /// HP Inc.
+    Hp,
+    /// Canon Inc.
+    Canon,
+    /// Brother Industries
+    Brother,
+    /// Seiko Epson Corporation
+    Epson,
+    /// Lenovo Group
+    Lenovo,
+    /// Dell Technologies
+    Dell,
+    /// Asus
+    Asus,
+    /// Acer Inc.
+    Acer,
+    /// Motorola Mobility
+    Motorola,
+    /// Nintendo Co., Ltd.
+    Nintendo,
+    /// Belkin International
+    Belkin,
+    /// Espressif Systems
+    Espressif,
+    /// Raspberry Pi Foundation
+    RaspberryPi,
+    /// Synology Inc.
+    Synology,
+    /// Roborock
+    Roborock,
+    /// Rachio, Inc.
+    Rachio,
+    /// eero inc.
+    Eero,
+    /// NVIDIA Corporation
+    Nvidia,
+    /// Spotify AB
+    Spotify,
+    /// Generic Linux-based device
+    Linux,
+    /// Sonos, Inc.
+    Sonos,
+    /// Roku, Inc.
+    Roku,
+    /// D-Link Corporation
+    DLink,
+    /// Bose Corporation
+    Bose,
+    /// Denon
+    Denon,
+    /// Yamaha Corporation
+    Yamaha,
+    /// QNAP Systems
+    Qnap,
+    /// Ring LLC
+    Ring,
+    /// Yealink Network Technology
+    Yealink,
+    /// Polycom, Inc.
+    Polycom,
+    /// Mitel Networks
+    Mitel,
+    /// Avaya Inc.
+    Avaya,
+    /// Juniper Networks
+    Juniper,
+    /// TeamViewer Germany GmbH
+    TeamViewer,
+    /// AgileBits (1Password)
+    OnePassword,
+    /// Xiaomi Corporation
+    Xiaomi,
+    /// TiVo Inc.
+    TiVo,
+    /// KNX Association / generic KNX device
+    Knx,
+    /// LIFX
+    Lifx,
+    /// Hangzhou Hikvision Digital Technology
+    Hikvision,
+    /// Zhejiang Dahua Technology
+    Dahua,
+    /// ONVIF-conformant device (unspecified manufacturer)
+    Onvif,
+    /// Unidentified RTSP-capable camera (no vendor-specific discovery matched)
+    GenericRtsp,
+    /// Eve Systems
+    EveSystems,
+    /// Nanoleaf
+    Nanoleaf,
+    /// Aqara (Lumi United Technology)
+    Aqara,
+    /// Koogeek
+    Koogeek,
+    /// Belkin Wemo product line
+    BelkinWemo,
+    /// ecobee inc.
+    Ecobee,
+    /// Signify (Philips Hue)
+    SignifyPhilipsHue,
+    /// Plex, Inc.
+    Plex,
+    /// Inter IKEA Systems B.V.
+    Ikea,
+    /// Tuya Smart
+    Tuya,
+    /// Somfy
+    Somfy,
+    /// Lutron Electronics
+    Lutron,
+    /// Yale (Assa Abloy)
+    Yale,
+    /// Schneider Electric
+    SchneiderElectric,
+    /// Legrand
+    LeGrand,
+    /// Robert Bosch GmbH
+    Bosch,
+    /// Any other vendor name, preserved verbatim (e.g. a raw IEEE OUI manufacturer string).
+    Other(String),
+}
+
+impl Vendor {
+    /// Returns the canonical display string for this vendor.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Vendor::Apple => "Apple",
+            Vendor::Google => "Google",
+            Vendor::Amazon => "Amazon",
+            Vendor::Microsoft => "Microsoft",
+            Vendor::Samsung => "Samsung",
+            Vendor::Sony => "Sony",
+            Vendor::Lg => "LG",
+            Vendor::Cisco => "Cisco",
+            Vendor::Ubiquiti => "Ubiquiti",
+            Vendor::Netgear => "Netgear",
+            Vendor::TpLink => "TP-Link",
+            Vendor::Philips => "Philips",
+            Vendor::Hp => "HP",
+            Vendor::Canon => "Canon",
+            Vendor::Brother => "Brother",
+            Vendor::Epson => "Epson",
+            Vendor::Lenovo => "Lenovo",
+            Vendor::Dell => "Dell",
+            Vendor::Asus => "Asus",
+            Vendor::Acer => "Acer",
+            Vendor::Motorola => "Motorola",
+            Vendor::Nintendo => "Nintendo",
+            Vendor::Belkin => "Belkin",
+            Vendor::Espressif => "Espressif",
+            Vendor::RaspberryPi => "Raspberry Pi",
+            Vendor::Synology => "Synology",
+            Vendor::Roborock => "Roborock",
+            Vendor::Rachio => "Rachio",
+            Vendor::Eero => "eero inc.",
+            Vendor::Nvidia => "NVIDIA",
+            Vendor::Spotify => "Spotify",
+            Vendor::Linux => "Linux",
+            Vendor::Sonos => "Sonos",
+            Vendor::Roku => "Roku",
+            Vendor::DLink => "D-Link",
+            Vendor::Bose => "Bose",
+            Vendor::Denon => "Denon",
+            Vendor::Yamaha => "Yamaha",
+            Vendor::Qnap => "QNAP",
+            Vendor::Ring => "Ring",
+            Vendor::Yealink => "Yealink",
+            Vendor::Polycom => "Polycom",
+            Vendor::Mitel => "Mitel",
+            Vendor::Avaya => "Avaya",
+            Vendor::Juniper => "Juniper",
+            Vendor::TeamViewer => "TeamViewer",
+            Vendor::OnePassword => "1Password",
+            Vendor::Xiaomi => "Xiaomi",
+            Vendor::TiVo => "TiVo",
+            Vendor::Knx => "KNX",
+            Vendor::Lifx => "LIFX",
+            Vendor::Hikvision => "Hikvision",
+            Vendor::Dahua => "Dahua",
+            Vendor::Onvif => "ONVIF",
+            Vendor::GenericRtsp => "Generic RTSP",
+            Vendor::EveSystems => "Eve Systems",
+            Vendor::Nanoleaf => "Nanoleaf",
+            Vendor::Aqara => "Aqara",
+            Vendor::Koogeek => "Koogeek",
+            Vendor::BelkinWemo => "Belkin (Wemo)",
+            Vendor::Ecobee => "ecobee",
+            Vendor::SignifyPhilipsHue => "Signify (Philips Hue)",
+            Vendor::Plex => "Plex",
+            Vendor::Ikea => "IKEA",
+            Vendor::Tuya => "Tuya",
+            Vendor::Somfy => "Somfy",
+            Vendor::Lutron => "Lutron",
+            Vendor::Yale => "Yale",
+            Vendor::SchneiderElectric => "Schneider Electric",
+            Vendor::LeGrand => "LeGrand",
+            Vendor::Bosch => "Bosch",
+            Vendor::Other(s) => s.as_str(),
+        }
+    }
+
+    /// Returns `true` if this vendor is eero inc. — several classification paths protect
+    /// an eero classification from being overwritten by a weaker signal.
+    pub fn is_eero(&self) -> bool {
+        matches!(self, Vendor::Eero)
+    }
+}
+
+impl std::fmt::Display for Vendor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<&str> for Vendor {
+    fn from(value: &str) -> Self {
+        match value {
+            "Apple" => Vendor::Apple,
+            "Google" => Vendor::Google,
+            "Amazon" => Vendor::Amazon,
+            "Microsoft" => Vendor::Microsoft,
+            "Samsung" => Vendor::Samsung,
+            "Sony" => Vendor::Sony,
+            "LG" => Vendor::Lg,
+            "Cisco" => Vendor::Cisco,
+            "Ubiquiti" => Vendor::Ubiquiti,
+            "Netgear" => Vendor::Netgear,
+            "TP-Link" => Vendor::TpLink,
+            "Philips" => Vendor::Philips,
+            "HP" => Vendor::Hp,
+            "Canon" => Vendor::Canon,
+            "Brother" => Vendor::Brother,
+            "Epson" => Vendor::Epson,
+            "Lenovo" => Vendor::Lenovo,
+            "Dell" => Vendor::Dell,
+            "Asus" => Vendor::Asus,
+            "Acer" => Vendor::Acer,
+            "Motorola" => Vendor::Motorola,
+            "Nintendo" => Vendor::Nintendo,
+            "Belkin" => Vendor::Belkin,
+            "Espressif" => Vendor::Espressif,
+            "Raspberry Pi" => Vendor::RaspberryPi,
+            "Synology" => Vendor::Synology,
+            "Roborock" => Vendor::Roborock,
+            "Rachio" => Vendor::Rachio,
+            "eero inc." => Vendor::Eero,
+            "NVIDIA" => Vendor::Nvidia,
+            "Spotify" => Vendor::Spotify,
+            "Linux" => Vendor::Linux,
+            "Sonos" => Vendor::Sonos,
+            "Roku" => Vendor::Roku,
+            "D-Link" => Vendor::DLink,
+            "Bose" => Vendor::Bose,
+            "Denon" => Vendor::Denon,
+            "Yamaha" => Vendor::Yamaha,
+            "QNAP" => Vendor::Qnap,
+            "Ring" => Vendor::Ring,
+            "Yealink" => Vendor::Yealink,
+            "Polycom" => Vendor::Polycom,
+            "Mitel" => Vendor::Mitel,
+            "Avaya" => Vendor::Avaya,
+            "Juniper" => Vendor::Juniper,
+            "TeamViewer" => Vendor::TeamViewer,
+            "1Password" => Vendor::OnePassword,
+            "Xiaomi" => Vendor::Xiaomi,
+            "TiVo" => Vendor::TiVo,
+            "KNX" => Vendor::Knx,
+            "LIFX" => Vendor::Lifx,
+            "Hikvision" => Vendor::Hikvision,
+            "Dahua" => Vendor::Dahua,
+            "ONVIF" => Vendor::Onvif,
+            "Generic RTSP" => Vendor::GenericRtsp,
+            "Eve Systems" => Vendor::EveSystems,
+            "Nanoleaf" => Vendor::Nanoleaf,
+            "Aqara" => Vendor::Aqara,
+            "Koogeek" => Vendor::Koogeek,
+            "Belkin (Wemo)" => Vendor::BelkinWemo,
+            "ecobee" => Vendor::Ecobee,
+            "Signify (Philips Hue)" => Vendor::SignifyPhilipsHue,
+            "Plex" => Vendor::Plex,
+            "IKEA" => Vendor::Ikea,
+            "Tuya" => Vendor::Tuya,
+            "Somfy" => Vendor::Somfy,
+            "Lutron" => Vendor::Lutron,
+            "Yale" => Vendor::Yale,
+            "Schneider Electric" => Vendor::SchneiderElectric,
+            "LeGrand" => Vendor::LeGrand,
+            "Bosch" => Vendor::Bosch,
+            other => Vendor::Other(other.to_string()),
+        }
+    }
+}
+
+impl From<String> for Vendor {
+    fn from(value: String) -> Self {
+        // Avoid re-allocating when the value doesn't match a known variant by
+        // only falling back to an owned `Other` if `From<&str>` didn't consume it.
+        match Vendor::from(value.as_str()) {
+            Vendor::Other(_) => Vendor::Other(value),
+            known => known,
+        }
+    }
+}
+
+impl serde::Serialize for Vendor {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Vendor {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+        Ok(Vendor::from(value))
+    }
+}
+
+/// Known device category / type, detected from hostname patterns, DHCP fingerprints,
+/// mDNS/SSDP service metadata, or protocol-specific discovery packets (LLDP, CDP, KNX,
+/// CoAP, CCTV, ...).
+///
+/// Any device type that doesn't match a known variant is preserved verbatim in `Other`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceType {
+    /// Router
+    Router,
+    /// Combined router/switch
+    RouterSwitch,
+    /// Network switch
+    Switch,
+    /// Generic network infrastructure device
+    NetworkDevice,
+    /// Generic network equipment (router, switch, or access point)
+    NetworkEquipment,
+    /// Printer
+    Printer,
+    /// Scanner
+    Scanner,
+    /// Laptop computer
+    Laptop,
+    /// Desktop computer / workstation
+    Desktop,
+    /// Apple Mac desktop or laptop
+    Mac,
+    /// Windows PC
+    PcWindows,
+    /// Generic PC/computer
+    PcComputer,
+    /// Unspecified Apple device
+    AppleDevice,
+    /// Apple iPhone
+    AppleIPhone,
+    /// Apple iPad
+    AppleIPad,
+    /// Apple TV
+    AppleTv,
+    /// Google Pixel phone
+    PixelPhone,
+    /// Android phone
+    AndroidPhone,
+    /// Android TV
+    AndroidTv,
+    /// Generic mobile device
+    Mobile,
+    /// Generic mobile device (alternate classification path)
+    MobileDevice,
+    /// Media player (e.g. Roku)
+    MediaPlayer,
+    /// AirPlay/DLNA media streamer
+    MediaStreamer,
+    /// Media server (e.g. Plex, DAAP)
+    MediaServer,
+    /// UPnP/DLNA media renderer
+    MediaRenderer,
+    /// Google Chromecast
+    Chromecast,
+    /// Amazon Fire TV
+    FireTv,
+    /// Generic AirPlay-capable device
+    AirPlayDevice,
+    /// Smart speaker
+    SmartSpeaker,
+    /// Generic speaker
+    Speaker,
+    /// Generic audio device
+    AudioDevice,
+    /// Smart home device (unspecified category)
+    SmartHomeDevice,
+    /// Smart home hub
+    SmartHomeHub,
+    /// Smart doorbell
+    SmartDoorbell,
+    /// Video doorbell
+    VideoDoorbell,
+    /// Smart plug
+    SmartPlug,
+    /// Smart outlet
+    Outlet,
+    /// Smart light
+    SmartLight,
+    /// Smart lightbulb
+    Lightbulb,
+    /// Robotic vacuum / smart cleaning device
+    SmartCleaningDevice,
+    /// Smart irrigation / watering device
+    SmartWateringDevice,
+    /// Thermostat
+    Thermostat,
+    /// Security camera
+    SecurityCamera,
+    /// IP camera
+    IpCamera,
+    /// Security system / alarm panel
+    SecuritySystem,
+    /// Network-attached storage (labelled "Storage (NAS)")
+    StorageNas,
+    /// Network-attached storage (labelled "NAS")
+    Nas,
+    /// File server
+    FileServer,
+    /// Generic server
+    Server,
+    /// IP phone / VoIP handset
+    IpPhone,
+    /// Generic IoT device
+    IotDevice,
+    /// IoT beacon (e.g. Physical Web)
+    IotBeacon,
+    /// Single-board computer (unspecified)
+    SingleBoardComputer,
+    /// Raspberry Pi
+    RaspberryPi,
+    /// Microcontroller (e.g. Arduino)
+    Microcontroller,
+    /// E-reader
+    EReader,
+    /// Game console
+    GameConsole,
+    /// Gaming console (alternate classification path)
+    GamingConsole,
+    /// Gaming device (alternate classification path)
+    GamingDevice,
+    /// Gaming PC
+    GamingPc,
+    /// Digital video recorder
+    Dvr,
+    /// Continuous integration server
+    CiServer,
+    /// NVIDIA Shield
+    NvidiaShield,
+    /// Spotify Connect-enabled device
+    SpotifyConnectDevice,
+    /// Home automation device (e.g. KNX)
+    HomeAutomation,
+    /// Matter-compatible smart device
+    MatterSmartDevice,
+    /// Generic HomeKit device
+    HomeKitDevice,
+    /// HomeKit accessory
+    HomeKitAccessory,
+    /// Generic sensor
+    Sensor,
+    /// Humidity sensor
+    HumiditySensor,
+    /// Occupancy sensor
+    OccupancySensor,
+    /// Contact sensor
+    ContactSensor,
+    /// Air conditioner
+    AirConditioner,
+    /// Air purifier
+    AirPurifier,
+    /// Smart door lock
+    DoorLock,
+    /// Television
+    Tv,
+    /// Set-top box
+    SetTopBox,
+    /// HomeKit bridge accessory
+    Bridge,
+    /// Smart fan
+    Fan,
+    /// Smart garage door opener
+    GarageDoor,
+    /// Smart lock (HomeKit "Lock" category, distinct from `DoorLock`)
+    Lock,
+    /// Smart door sensor/opener (HomeKit "Door" category)
+    Door,
+    /// Smart window sensor/opener
+    Window,
+    /// Smart window covering (blinds/shades)
+    WindowCovering,
+    /// Smart heater
+    Heater,
+    /// Smart cooler
+    Cooler,
+    /// Smart humidifier
+    Humidifier,
+    /// Smart dehumidifier
+    Dehumidifier,
+    /// Smart sprinkler controller
+    Sprinkler,
+    /// Smart faucet
+    Faucet,
+    /// Smart shower system
+    ShowerSystem,
+    /// Television (HomeKit "Television" category, distinct from `Tv`)
+    Television,
+    /// HomeKit target controller (e.g. remote control accessory)
+    TargetController,
+    /// Unclassified device
+    Unknown,
+    /// Any other device type, preserved verbatim.
+    Other(String),
+}
+
+impl DeviceType {
+    /// Returns the canonical display string for this device type.
+    pub fn as_str(&self) -> &str {
+        match self {
+            DeviceType::Router => "Router",
+            DeviceType::RouterSwitch => "Router/Switch",
+            DeviceType::Switch => "Switch",
+            DeviceType::NetworkDevice => "Network Device",
+            DeviceType::NetworkEquipment => "Network Equipment",
+            DeviceType::Printer => "Printer",
+            DeviceType::Scanner => "Scanner",
+            DeviceType::Laptop => "Laptop",
+            DeviceType::Desktop => "Desktop",
+            DeviceType::Mac => "Mac",
+            DeviceType::PcWindows => "PC/Windows",
+            DeviceType::PcComputer => "PC/Computer",
+            DeviceType::AppleDevice => "Apple Device",
+            DeviceType::AppleIPhone => "Apple iPhone",
+            DeviceType::AppleIPad => "Apple iPad",
+            DeviceType::AppleTv => "Apple TV",
+            DeviceType::PixelPhone => "Pixel Phone",
+            DeviceType::AndroidPhone => "Android Phone",
+            DeviceType::AndroidTv => "Android TV",
+            DeviceType::Mobile => "Mobile",
+            DeviceType::MobileDevice => "Mobile Device",
+            DeviceType::MediaPlayer => "Media Player",
+            DeviceType::MediaStreamer => "Media Streamer",
+            DeviceType::MediaServer => "Media Server",
+            DeviceType::MediaRenderer => "Media Renderer",
+            DeviceType::Chromecast => "Chromecast",
+            DeviceType::FireTv => "Fire TV",
+            DeviceType::AirPlayDevice => "AirPlay Device",
+            DeviceType::SmartSpeaker => "Smart Speaker",
+            DeviceType::Speaker => "Speaker",
+            DeviceType::AudioDevice => "Audio Device",
+            DeviceType::SmartHomeDevice => "Smart Home Device",
+            DeviceType::SmartHomeHub => "Smart Home Hub",
+            DeviceType::SmartDoorbell => "Smart Doorbell",
+            DeviceType::VideoDoorbell => "Video Doorbell",
+            DeviceType::SmartPlug => "Smart Plug",
+            DeviceType::Outlet => "Outlet",
+            DeviceType::SmartLight => "Smart Light",
+            DeviceType::Lightbulb => "Lightbulb",
+            DeviceType::SmartCleaningDevice => "Smart Cleaning Device",
+            DeviceType::SmartWateringDevice => "Smart Watering Device",
+            DeviceType::Thermostat => "Thermostat",
+            DeviceType::SecurityCamera => "Security Camera",
+            DeviceType::IpCamera => "IP Camera",
+            DeviceType::SecuritySystem => "Security System",
+            DeviceType::StorageNas => "Storage (NAS)",
+            DeviceType::Nas => "NAS",
+            DeviceType::FileServer => "File Server",
+            DeviceType::Server => "Server",
+            DeviceType::IpPhone => "IP Phone",
+            DeviceType::IotDevice => "IoT Device",
+            DeviceType::IotBeacon => "IoT Beacon",
+            DeviceType::SingleBoardComputer => "Single-board Computer",
+            DeviceType::RaspberryPi => "Raspberry Pi",
+            DeviceType::Microcontroller => "Microcontroller",
+            DeviceType::EReader => "e-Reader",
+            DeviceType::GameConsole => "Game Console",
+            DeviceType::GamingConsole => "Gaming Console",
+            DeviceType::GamingDevice => "Gaming Device",
+            DeviceType::GamingPc => "Gaming PC",
+            DeviceType::Dvr => "DVR",
+            DeviceType::CiServer => "CI Server",
+            DeviceType::NvidiaShield => "NVIDIA Shield",
+            DeviceType::SpotifyConnectDevice => "Spotify Connect Device",
+            DeviceType::HomeAutomation => "Home Automation",
+            DeviceType::MatterSmartDevice => "Matter Smart Device",
+            DeviceType::HomeKitDevice => "HomeKit Device",
+            DeviceType::HomeKitAccessory => "HomeKit Accessory",
+            DeviceType::Sensor => "Sensor",
+            DeviceType::HumiditySensor => "Humidity Sensor",
+            DeviceType::OccupancySensor => "Occupancy Sensor",
+            DeviceType::ContactSensor => "Contact Sensor",
+            DeviceType::AirConditioner => "Air Conditioner",
+            DeviceType::AirPurifier => "Air Purifier",
+            DeviceType::DoorLock => "Door Lock",
+            DeviceType::Tv => "TV",
+            DeviceType::SetTopBox => "Set Top Box",
+            DeviceType::Bridge => "Bridge",
+            DeviceType::Fan => "Fan",
+            DeviceType::GarageDoor => "Garage Door",
+            DeviceType::Lock => "Lock",
+            DeviceType::Door => "Door",
+            DeviceType::Window => "Window",
+            DeviceType::WindowCovering => "Window Covering",
+            DeviceType::Heater => "Heater",
+            DeviceType::Cooler => "Cooler",
+            DeviceType::Humidifier => "Humidifier",
+            DeviceType::Dehumidifier => "Dehumidifier",
+            DeviceType::Sprinkler => "Sprinkler",
+            DeviceType::Faucet => "Faucet",
+            DeviceType::ShowerSystem => "Shower System",
+            DeviceType::Television => "Television",
+            DeviceType::TargetController => "Target Controller",
+            DeviceType::Unknown => "Unknown",
+            DeviceType::Other(s) => s.as_str(),
+        }
+    }
+
+    /// Returns `true` if this is a generic/inferred category that should readily be
+    /// upgraded to a more specific type learned from active discovery (mDNS/SSDP/LLDP/CDP).
+    pub fn is_generic(&self) -> bool {
+        matches!(
+            self,
+            DeviceType::Unknown
+                | DeviceType::AndroidPhone
+                | DeviceType::PcWindows
+                | DeviceType::AppleDevice
+                | DeviceType::IotDevice
+                | DeviceType::SmartHomeDevice
+                | DeviceType::MatterSmartDevice
+                | DeviceType::HomeKitDevice
+                | DeviceType::HomeKitAccessory
+        )
+    }
+}
+
+impl std::fmt::Display for DeviceType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<&str> for DeviceType {
+    fn from(value: &str) -> Self {
+        match value {
+            "Router" => DeviceType::Router,
+            "Router/Switch" => DeviceType::RouterSwitch,
+            "Switch" => DeviceType::Switch,
+            "Network Device" => DeviceType::NetworkDevice,
+            "Network Equipment" => DeviceType::NetworkEquipment,
+            "Printer" => DeviceType::Printer,
+            "Scanner" => DeviceType::Scanner,
+            "Laptop" => DeviceType::Laptop,
+            "Desktop" => DeviceType::Desktop,
+            "Mac" => DeviceType::Mac,
+            "PC/Windows" => DeviceType::PcWindows,
+            "PC/Computer" => DeviceType::PcComputer,
+            "Apple Device" => DeviceType::AppleDevice,
+            "Apple iPhone" => DeviceType::AppleIPhone,
+            "Apple iPad" => DeviceType::AppleIPad,
+            "Apple TV" => DeviceType::AppleTv,
+            "Pixel Phone" => DeviceType::PixelPhone,
+            "Android Phone" => DeviceType::AndroidPhone,
+            "Android TV" => DeviceType::AndroidTv,
+            "Mobile" => DeviceType::Mobile,
+            "Mobile Device" => DeviceType::MobileDevice,
+            "Media Player" => DeviceType::MediaPlayer,
+            "Media Streamer" => DeviceType::MediaStreamer,
+            "Media Server" => DeviceType::MediaServer,
+            "Media Renderer" => DeviceType::MediaRenderer,
+            "Chromecast" => DeviceType::Chromecast,
+            "Fire TV" => DeviceType::FireTv,
+            "AirPlay Device" => DeviceType::AirPlayDevice,
+            "Smart Speaker" => DeviceType::SmartSpeaker,
+            "Speaker" => DeviceType::Speaker,
+            "Audio Device" => DeviceType::AudioDevice,
+            "Smart Home Device" => DeviceType::SmartHomeDevice,
+            "Smart Home Hub" => DeviceType::SmartHomeHub,
+            "Smart Doorbell" => DeviceType::SmartDoorbell,
+            "Video Doorbell" => DeviceType::VideoDoorbell,
+            "Smart Plug" => DeviceType::SmartPlug,
+            "Outlet" => DeviceType::Outlet,
+            "Smart Light" => DeviceType::SmartLight,
+            "Lightbulb" => DeviceType::Lightbulb,
+            "Smart Cleaning Device" => DeviceType::SmartCleaningDevice,
+            "Smart Watering Device" => DeviceType::SmartWateringDevice,
+            "Thermostat" => DeviceType::Thermostat,
+            "Security Camera" => DeviceType::SecurityCamera,
+            "IP Camera" => DeviceType::IpCamera,
+            "Security System" => DeviceType::SecuritySystem,
+            "Storage (NAS)" => DeviceType::StorageNas,
+            "NAS" => DeviceType::Nas,
+            "File Server" => DeviceType::FileServer,
+            "Server" => DeviceType::Server,
+            "IP Phone" => DeviceType::IpPhone,
+            "IoT Device" => DeviceType::IotDevice,
+            "IoT Beacon" => DeviceType::IotBeacon,
+            "Single-board Computer" => DeviceType::SingleBoardComputer,
+            "Raspberry Pi" => DeviceType::RaspberryPi,
+            "Microcontroller" => DeviceType::Microcontroller,
+            "e-Reader" => DeviceType::EReader,
+            "Game Console" => DeviceType::GameConsole,
+            "Gaming Console" => DeviceType::GamingConsole,
+            "Gaming Device" => DeviceType::GamingDevice,
+            "Gaming PC" => DeviceType::GamingPc,
+            "DVR" => DeviceType::Dvr,
+            "CI Server" => DeviceType::CiServer,
+            "NVIDIA Shield" => DeviceType::NvidiaShield,
+            "Spotify Connect Device" => DeviceType::SpotifyConnectDevice,
+            "Home Automation" => DeviceType::HomeAutomation,
+            "Matter Smart Device" => DeviceType::MatterSmartDevice,
+            "HomeKit Device" => DeviceType::HomeKitDevice,
+            "HomeKit Accessory" => DeviceType::HomeKitAccessory,
+            "Sensor" => DeviceType::Sensor,
+            "Humidity Sensor" => DeviceType::HumiditySensor,
+            "Occupancy Sensor" => DeviceType::OccupancySensor,
+            "Contact Sensor" => DeviceType::ContactSensor,
+            "Air Conditioner" => DeviceType::AirConditioner,
+            "Air Purifier" => DeviceType::AirPurifier,
+            "Door Lock" => DeviceType::DoorLock,
+            "TV" => DeviceType::Tv,
+            "Set Top Box" => DeviceType::SetTopBox,
+            "Bridge" => DeviceType::Bridge,
+            "Fan" => DeviceType::Fan,
+            "Garage Door" => DeviceType::GarageDoor,
+            "Lock" => DeviceType::Lock,
+            "Door" => DeviceType::Door,
+            "Window" => DeviceType::Window,
+            "Window Covering" => DeviceType::WindowCovering,
+            "Heater" => DeviceType::Heater,
+            "Cooler" => DeviceType::Cooler,
+            "Humidifier" => DeviceType::Humidifier,
+            "Dehumidifier" => DeviceType::Dehumidifier,
+            "Sprinkler" => DeviceType::Sprinkler,
+            "Faucet" => DeviceType::Faucet,
+            "Shower System" => DeviceType::ShowerSystem,
+            "Television" => DeviceType::Television,
+            "Target Controller" => DeviceType::TargetController,
+            "Unknown" => DeviceType::Unknown,
+            other => DeviceType::Other(other.to_string()),
+        }
+    }
+}
+
+impl From<String> for DeviceType {
+    fn from(value: String) -> Self {
+        match DeviceType::from(value.as_str()) {
+            DeviceType::Other(_) => DeviceType::Other(value),
+            known => known,
+        }
+    }
+}
+
+impl serde::Serialize for DeviceType {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for DeviceType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+        Ok(DeviceType::from(value))
+    }
+}
+
 /// Parsed DHCPv4 packet information
 #[derive(Debug, Clone)]
 pub struct Dhcpv4Packet {
@@ -235,15 +1086,7 @@ impl Dhcpv4Packet {
     ///
     /// This is useful for device identification and tracking keys.
     pub fn client_mac_string(&self) -> String {
-        format!(
-            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-            self.client_mac[0],
-            self.client_mac[1],
-            self.client_mac[2],
-            self.client_mac[3],
-            self.client_mac[4],
-            self.client_mac[5]
-        )
+        format_mac(self.client_mac)
     }
 }
 
@@ -325,7 +1168,7 @@ pub enum DhcpEvent {
 /// Parsed LLDP packet containing system identity and capabilities.
 pub struct LldpPacket {
     /// The source MAC address of the device transmitting the LLDP frame.
-    pub source_mac: String,
+    pub source_mac: [u8; 6],
     /// System name assigned to the transmitting device.
     pub system_name: Option<String>,
     /// Detailed system description of the transmitting device.
@@ -342,7 +1185,7 @@ pub struct LldpPacket {
 /// Parsed CDP packet containing Cisco device identifier, software version, platform and details.
 pub struct CdpPacket {
     /// The source MAC address of the device transmitting the CDP frame.
-    pub source_mac: String,
+    pub source_mac: [u8; 6],
     /// The configured device ID (usually hostname) of the transmitting device.
     pub device_id: Option<String>,
     /// The software version string running on the transmitting device.
@@ -389,14 +1232,14 @@ pub enum NetworkEvent {
     /// ARP packet
     Arp {
         /// Source MAC address from the ARP packet
-        source_mac: String,
+        source_mac: [u8; 6],
         /// Source IP address from the ARP packet
         source_ip: std::net::IpAddr,
     },
     /// NDP packet (IPv6 Neighbor Discovery Protocol)
     Ndp {
         /// Source MAC address from the NDP packet
-        source_mac: String,
+        source_mac: [u8; 6],
         /// Source IP address from the NDP packet
         source_ip: std::net::IpAddr,
     },

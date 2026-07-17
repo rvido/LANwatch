@@ -8,6 +8,8 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
+use crate::types::{DeviceType, Vendor};
+
 /// Information about a known mDNS service type
 #[derive(Debug, Clone)]
 pub struct MdnsServiceInfo {
@@ -16,9 +18,9 @@ pub struct MdnsServiceInfo {
     /// Human-readable description
     pub description: String,
     /// Vendor hint (e.g., "Apple", "Google")
-    pub vendor: Option<String>,
+    pub vendor: Option<Vendor>,
     /// Device type (e.g., "Chromecast", "Apple TV", "Printer")
-    pub device_type: Option<String>,
+    pub device_type: Option<DeviceType>,
 }
 
 /// Registry of known mDNS service types
@@ -48,285 +50,360 @@ impl MdnsServiceRegistry {
         self.add_full(
             "_airplay._tcp",
             "AirPlay",
-            Some("Apple"),
-            Some("Media Streamer"),
+            Some(Vendor::Apple),
+            Some(DeviceType::MediaStreamer),
         );
         self.add_full(
             "_raop._tcp",
             "Remote Audio (AirPlay)",
-            Some("Apple"),
-            Some("Media Streamer"),
+            Some(Vendor::Apple),
+            Some(DeviceType::MediaStreamer),
         );
         self.add_full(
             "_companion-link._tcp",
             "AirPlay 2 Companion",
-            Some("Apple"),
-            Some("Media Streamer"),
+            Some(Vendor::Apple),
+            Some(DeviceType::MediaStreamer),
         );
         self.add_full(
             "_touch-able._tcp",
             "Apple TV Remote",
-            Some("Apple"),
-            Some("Apple TV"),
+            Some(Vendor::Apple),
+            Some(DeviceType::AppleTv),
         );
         self.add_full(
             "_mediaremotetv._tcp",
             "Apple TV Media Remote",
-            Some("Apple"),
-            Some("Apple TV"),
+            Some(Vendor::Apple),
+            Some(DeviceType::AppleTv),
         );
         self.add_full(
             "_appletv-v2._tcp",
             "Apple TV",
-            Some("Apple"),
-            Some("Apple TV"),
+            Some(Vendor::Apple),
+            Some(DeviceType::AppleTv),
         );
 
         // Apple Mobile / Mac devices
         self.add_full(
             "_airdrop._tcp",
             "AirDrop",
-            Some("Apple"),
-            Some("Apple Device"),
+            Some(Vendor::Apple),
+            Some(DeviceType::AppleDevice),
         );
         self.add_full(
             "_device-info._tcp",
             "Device Info",
-            Some("Apple"),
-            Some("Apple Device"),
+            Some(Vendor::Apple),
+            Some(DeviceType::AppleDevice),
         );
         self.add_full(
             "_apple-mobdev._tcp",
             "Apple Mobile Device",
-            Some("Apple"),
-            Some("Apple iPhone"),
+            Some(Vendor::Apple),
+            Some(DeviceType::AppleIPhone),
         );
         self.add_full(
             "_apple-mobdev2._tcp",
             "Apple Mobile Device",
-            Some("Apple"),
-            Some("Apple iPhone"),
+            Some(Vendor::Apple),
+            Some(DeviceType::AppleIPhone),
         );
         self.add_full(
             "_remotepairing._tcp",
             "Apple Remote Pairing",
-            Some("Apple"),
-            Some("Apple iPhone"),
+            Some(Vendor::Apple),
+            Some(DeviceType::AppleIPhone),
         );
         self.add_full(
             "_atc._tcp",
             "Apple Transfer Control",
-            Some("Apple"),
-            Some("Apple iPhone"),
+            Some(Vendor::Apple),
+            Some(DeviceType::AppleIPhone),
         );
         self.add_full(
             "_rdlink._tcp",
             "Apple Remote Device Link",
-            Some("Apple"),
-            Some("Apple iPhone"),
+            Some(Vendor::Apple),
+            Some(DeviceType::AppleIPhone),
         );
 
         // Apple Smart Home
         self.add_full(
             "_homekit._tcp",
             "HomeKit",
-            Some("Apple"),
-            Some("Smart Home Hub"),
+            Some(Vendor::Apple),
+            Some(DeviceType::SmartHomeHub),
         );
         self.add_full(
             "_hap._tcp",
             "HomeKit Accessory",
-            Some("Apple"),
-            Some("Smart Home Device"),
+            Some(Vendor::Apple),
+            Some(DeviceType::SmartHomeDevice),
         );
 
         // Apple Network/Storage
         self.add_full(
             "_airport._tcp",
             "AirPort Base Station",
-            Some("Apple"),
-            Some("Router"),
+            Some(Vendor::Apple),
+            Some(DeviceType::Router),
         );
         self.add_full(
             "_daap._tcp",
             "iTunes Library (DAAP)",
-            Some("Apple"),
-            Some("Media Server"),
+            Some(Vendor::Apple),
+            Some(DeviceType::MediaServer),
         );
         self.add_full(
             "_dpap._tcp",
             "iPhoto Library",
-            Some("Apple"),
-            Some("Media Server"),
+            Some(Vendor::Apple),
+            Some(DeviceType::MediaServer),
         );
         self.add_full(
             "_afpovertcp._tcp",
             "Apple File Sharing (AFP)",
-            Some("Apple"),
-            Some("File Server"),
+            Some(Vendor::Apple),
+            Some(DeviceType::FileServer),
         );
 
         // Google Chromecast / Android TV
         self.add_full(
             "_googlecast._tcp",
             "Google Chromecast",
-            Some("Google"),
-            Some("Chromecast"),
+            Some(Vendor::Google),
+            Some(DeviceType::Chromecast),
         );
         self.add_full(
             "_googlezone._tcp",
             "Google Zone",
-            Some("Google"),
-            Some("Chromecast"),
+            Some(Vendor::Google),
+            Some(DeviceType::Chromecast),
         );
         self.add_full(
             "_androidtvremote._tcp",
             "Android TV Remote",
-            Some("Google"),
-            Some("Android TV"),
+            Some(Vendor::Google),
+            Some(DeviceType::AndroidTv),
         );
         self.add_full(
             "_physicalweb._tcp",
             "Physical Web",
-            Some("Google"),
-            Some("IoT Beacon"),
+            Some(Vendor::Google),
+            Some(DeviceType::IotBeacon),
         );
 
         // Amazon Fire TV
         self.add_full(
             "_amzn-wplay._tcp",
             "Amazon Fire TV",
-            Some("Amazon"),
-            Some("Fire TV"),
+            Some(Vendor::Amazon),
+            Some(DeviceType::FireTv),
         );
 
         // Printers & Scanners
-        self.add_full("_printer._tcp", "LPR Printer", None, Some("Printer"));
-        self.add_full("_ipp._tcp", "IPP Printer", None, Some("Printer"));
-        self.add_full("_ipps._tcp", "IPP Printer (Secure)", None, Some("Printer"));
-        self.add_full("_ippusb._tcp", "IPP USB Printer", None, Some("Printer"));
-        self.add_full("_pdl-datastream._tcp", "PDL Printer", None, Some("Printer"));
-        self.add_full("_scanner._tcp", "Network Scanner", None, Some("Scanner"));
-        self.add_full("_uscan._tcp", "USB Scanner", None, Some("Scanner"));
+        self.add_full(
+            "_printer._tcp",
+            "LPR Printer",
+            None,
+            Some(DeviceType::Printer),
+        );
+        self.add_full("_ipp._tcp", "IPP Printer", None, Some(DeviceType::Printer));
+        self.add_full(
+            "_ipps._tcp",
+            "IPP Printer (Secure)",
+            None,
+            Some(DeviceType::Printer),
+        );
+        self.add_full(
+            "_ippusb._tcp",
+            "IPP USB Printer",
+            None,
+            Some(DeviceType::Printer),
+        );
+        self.add_full(
+            "_pdl-datastream._tcp",
+            "PDL Printer",
+            None,
+            Some(DeviceType::Printer),
+        );
+        self.add_full(
+            "_scanner._tcp",
+            "Network Scanner",
+            None,
+            Some(DeviceType::Scanner),
+        );
+        self.add_full(
+            "_uscan._tcp",
+            "USB Scanner",
+            None,
+            Some(DeviceType::Scanner),
+        );
 
         // Servers / Workstations
-        self.add_full("_http._tcp", "Web Server (HTTP)", None, Some("Server"));
-        self.add_full("_https._tcp", "Web Server (HTTPS)", None, Some("Server"));
-        self.add_full("_ssh._tcp", "SSH Server", None, Some("Server"));
-        self.add_full("_sftp-ssh._tcp", "SFTP over SSH", None, Some("Server"));
-        self.add_full("_ftp._tcp", "FTP Server", None, Some("Server"));
+        self.add_full(
+            "_http._tcp",
+            "Web Server (HTTP)",
+            None,
+            Some(DeviceType::Server),
+        );
+        self.add_full(
+            "_https._tcp",
+            "Web Server (HTTPS)",
+            None,
+            Some(DeviceType::Server),
+        );
+        self.add_full("_ssh._tcp", "SSH Server", None, Some(DeviceType::Server));
+        self.add_full(
+            "_sftp-ssh._tcp",
+            "SFTP over SSH",
+            None,
+            Some(DeviceType::Server),
+        );
+        self.add_full("_ftp._tcp", "FTP Server", None, Some(DeviceType::Server));
         self.add_full(
             "_smb._tcp",
             "Windows/Samba Sharing",
             None,
-            Some("File Server"),
+            Some(DeviceType::FileServer),
         );
         self.add_full(
             "_nfs._tcp",
             "Network File System",
             None,
-            Some("File Server"),
+            Some(DeviceType::FileServer),
         );
-        self.add_full("_rfb._tcp", "Screen Sharing (VNC)", None, Some("Desktop"));
-        self.add_full("_telnet._tcp", "Telnet", None, Some("Server"));
-        self.add_full("_workstation._tcp", "Workstation", None, Some("Desktop"));
+        self.add_full(
+            "_rfb._tcp",
+            "Screen Sharing (VNC)",
+            None,
+            Some(DeviceType::Desktop),
+        );
+        self.add_full("_telnet._tcp", "Telnet", None, Some(DeviceType::Server));
+        self.add_full(
+            "_workstation._tcp",
+            "Workstation",
+            None,
+            Some(DeviceType::Desktop),
+        );
 
         // Media/Entertainment
         self.add_full(
             "_spotify-connect._tcp",
             "Spotify Connect",
-            Some("Spotify"),
-            Some("Speaker"),
+            Some(Vendor::Spotify),
+            Some(DeviceType::Speaker),
         );
         self.add_full(
             "_nvstream_dbd._tcp",
             "NVIDIA GameStream",
-            Some("NVIDIA"),
-            Some("Gaming PC"),
+            Some(Vendor::Nvidia),
+            Some(DeviceType::GamingPc),
         );
 
         // Smart Home / IoT
         self.add_full(
             "_hue._tcp",
             "Philips Hue",
-            Some("Philips"),
-            Some("Smart Light"),
+            Some(Vendor::Philips),
+            Some(DeviceType::SmartLight),
         );
         self.add_full(
             "_miio._udp",
             "Xiaomi IoT",
-            Some("Xiaomi"),
-            Some("IoT Device"),
+            Some(Vendor::Xiaomi),
+            Some(DeviceType::IotDevice),
         );
         self.add_full(
             "_matter._tcp",
             "Matter Commissioned Device",
             None,
-            Some("Smart Home Device"),
+            Some(DeviceType::SmartHomeDevice),
         );
         self.add_full(
             "_matter._udp",
             "Matter Operational Device",
             None,
-            Some("Smart Home Device"),
+            Some(DeviceType::SmartHomeDevice),
         );
         self.add_full(
             "_matterc._udp",
             "Matter Commissionable Device",
             None,
-            Some("Smart Home Device"),
+            Some(DeviceType::SmartHomeDevice),
         );
 
         // NAS / Storage
         self.add_full(
             "_readynas._tcp",
             "Netgear ReadyNAS",
-            Some("Netgear"),
-            Some("NAS"),
+            Some(Vendor::Netgear),
+            Some(DeviceType::Nas),
         );
         self.add_full(
             "_udisks-ssh._tcp",
             "Linux Disk Service",
-            Some("Linux"),
-            Some("NAS"),
+            Some(Vendor::Linux),
+            Some(DeviceType::Nas),
         );
 
         // Network Equipment
         self.add_full(
             "_csco-sb._tcp",
             "Cisco Small Business",
-            Some("Cisco"),
-            Some("Router/Switch"),
+            Some(Vendor::Cisco),
+            Some(DeviceType::RouterSwitch),
         );
 
         // Other
         self.add_full(
             "_teamviewer._tcp",
             "TeamViewer",
-            Some("TeamViewer"),
-            Some("Desktop"),
+            Some(Vendor::TeamViewer),
+            Some(DeviceType::Desktop),
         );
         self.add_full(
             "_1password4._tcp",
             "1Password Sync",
-            Some("1Password"),
-            Some("Desktop"),
+            Some(Vendor::OnePassword),
+            Some(DeviceType::Desktop),
         );
         self.add_full(
             "_privet._tcp",
             "Google Cloud Print",
-            Some("Google"),
-            Some("Printer"),
+            Some(Vendor::Google),
+            Some(DeviceType::Printer),
         );
-        self.add_full("_arduino._tcp", "Arduino", None, Some("Microcontroller"));
-        self.add_full("_tivo-videos._tcp", "TiVo", Some("TiVo"), Some("DVR"));
-        self.add_full("_psia._tcp", "IP Camera (PSIA)", None, Some("IP Camera"));
+        self.add_full(
+            "_arduino._tcp",
+            "Arduino",
+            None,
+            Some(DeviceType::Microcontroller),
+        );
+        self.add_full(
+            "_tivo-videos._tcp",
+            "TiVo",
+            Some(Vendor::TiVo),
+            Some(DeviceType::Dvr),
+        );
+        self.add_full(
+            "_psia._tcp",
+            "IP Camera (PSIA)",
+            None,
+            Some(DeviceType::IpCamera),
+        );
     }
 
     /// Add a service to the registry (without device_type, for backward compatibility)
     pub fn add(&mut self, service_type: &str, description: &str, vendor: Option<&str>) {
         let device_type = Self::detect_device_type_from_description(description);
-        self.add_full(service_type, description, vendor, device_type);
+        self.add_full(
+            service_type,
+            description,
+            vendor.map(Vendor::from),
+            device_type,
+        );
     }
 
     /// Adds a service to the registry with explicit vendor and device type metadata.
@@ -334,8 +411,8 @@ impl MdnsServiceRegistry {
         &mut self,
         service_type: &str,
         description: &str,
-        vendor: Option<&str>,
-        device_type: Option<&str>,
+        vendor: Option<Vendor>,
+        device_type: Option<DeviceType>,
     ) {
         let normalized = Self::normalize_service_type(service_type);
         self.services.insert(
@@ -343,8 +420,8 @@ impl MdnsServiceRegistry {
             MdnsServiceInfo {
                 service_type: normalized,
                 description: description.to_string(),
-                vendor: vendor.map(|s| s.to_string()),
-                device_type: device_type.map(|s| s.to_string()),
+                vendor,
+                device_type,
             },
         );
     }
@@ -399,7 +476,7 @@ impl MdnsServiceRegistry {
     }
 
     /// Detect device type from description text
-    fn detect_device_type_from_description(description: &str) -> Option<&'static str> {
+    fn detect_device_type_from_description(description: &str) -> Option<DeviceType> {
         let desc_lower = description.to_lowercase();
 
         for rule in DEVICE_TYPE_RULES {
@@ -408,19 +485,19 @@ impl MdnsServiceRegistry {
             let matches_all = rule.all_patterns.is_empty()
                 || rule.all_patterns.iter().all(|p| desc_lower.contains(p));
             if matches_any && matches_all {
-                return Some(rule.device_type);
+                return Some(rule.device_type.clone());
             }
         }
         None
     }
 
     /// Detect vendor from description text
-    fn detect_vendor_from_description(description: &str) -> Option<&'static str> {
+    fn detect_vendor_from_description(description: &str) -> Option<Vendor> {
         let desc_lower = description.to_lowercase();
 
         for rule in VENDOR_RULES {
             if rule.patterns.iter().any(|p| desc_lower.contains(p)) {
-                return Some(rule.vendor);
+                return Some(rule.vendor.clone());
             }
         }
         None
@@ -446,14 +523,14 @@ impl MdnsServiceRegistry {
     }
 
     /// Returns the detected vendor associated with a service type.
-    pub fn get_vendor(&self, service_type: &str) -> Option<&str> {
-        self.lookup(service_type).and_then(|s| s.vendor.as_deref())
+    pub fn get_vendor(&self, service_type: &str) -> Option<&Vendor> {
+        self.lookup(service_type).and_then(|s| s.vendor.as_ref())
     }
 
     /// Returns the inferred device type associated with a service type.
-    pub fn get_device_type(&self, service_type: &str) -> Option<&str> {
+    pub fn get_device_type(&self, service_type: &str) -> Option<&DeviceType> {
         self.lookup(service_type)
-            .and_then(|s| s.device_type.as_deref())
+            .and_then(|s| s.device_type.as_ref())
     }
 
     /// Returns a reference to the internal map of registered services.
@@ -475,7 +552,7 @@ impl MdnsServiceRegistry {
 struct DeviceTypeRule {
     any_patterns: &'static [&'static str],
     all_patterns: &'static [&'static str],
-    device_type: &'static str,
+    device_type: DeviceType,
 }
 
 const DEVICE_TYPE_RULES: &[DeviceTypeRule] = &[
@@ -483,124 +560,124 @@ const DEVICE_TYPE_RULES: &[DeviceTypeRule] = &[
     DeviceTypeRule {
         any_patterns: &["chromecast", "chrome cast"],
         all_patterns: &[],
-        device_type: "Chromecast",
+        device_type: DeviceType::Chromecast,
     },
     DeviceTypeRule {
         any_patterns: &["apple tv", "appletv"],
         all_patterns: &[],
-        device_type: "Apple TV",
+        device_type: DeviceType::AppleTv,
     },
     DeviceTypeRule {
         any_patterns: &["fire tv", "firetv"],
         all_patterns: &[],
-        device_type: "Fire TV",
+        device_type: DeviceType::FireTv,
     },
     DeviceTypeRule {
         any_patterns: &["airplay"],
         all_patterns: &[],
-        device_type: "Media Streamer",
+        device_type: DeviceType::MediaStreamer,
     },
     DeviceTypeRule {
         any_patterns: &["android tv"],
         all_patterns: &[],
-        device_type: "Android TV",
+        device_type: DeviceType::AndroidTv,
     },
     DeviceTypeRule {
         any_patterns: &["tivo"],
         all_patterns: &[],
-        device_type: "DVR",
+        device_type: DeviceType::Dvr,
     },
     // Mobile devices
     DeviceTypeRule {
         any_patterns: &["iphone", "ipad", "ios device"],
         all_patterns: &[],
-        device_type: "Apple iPhone",
+        device_type: DeviceType::AppleIPhone,
     },
     DeviceTypeRule {
         any_patterns: &["mobile device"],
         all_patterns: &[],
-        device_type: "Mobile Device",
+        device_type: DeviceType::MobileDevice,
     },
     // Printers & Scanners
     DeviceTypeRule {
         any_patterns: &["printer", "printing"],
         all_patterns: &[],
-        device_type: "Printer",
+        device_type: DeviceType::Printer,
     },
     DeviceTypeRule {
         any_patterns: &["scanner", "scanning"],
         all_patterns: &[],
-        device_type: "Scanner",
+        device_type: DeviceType::Scanner,
     },
     // Network equipment
     DeviceTypeRule {
         any_patterns: &["router", "base station"],
         all_patterns: &[],
-        device_type: "Router",
+        device_type: DeviceType::Router,
     },
     DeviceTypeRule {
         any_patterns: &["switch"],
         all_patterns: &[],
-        device_type: "Router/Switch",
+        device_type: DeviceType::RouterSwitch,
     },
     DeviceTypeRule {
         any_patterns: &["nas", "network attached storage", "readynas"],
         all_patterns: &[],
-        device_type: "NAS",
+        device_type: DeviceType::Nas,
     },
     // Smart home
     DeviceTypeRule {
         any_patterns: &[],
         all_patterns: &["homekit", "accessory"],
-        device_type: "Smart Home Device",
+        device_type: DeviceType::SmartHomeDevice,
     },
     DeviceTypeRule {
         any_patterns: &["homekit"],
         all_patterns: &[],
-        device_type: "Smart Home Hub",
+        device_type: DeviceType::SmartHomeHub,
     },
     DeviceTypeRule {
         any_patterns: &["smart light", "hue"],
         all_patterns: &[],
-        device_type: "Smart Light",
+        device_type: DeviceType::SmartLight,
     },
     DeviceTypeRule {
         any_patterns: &["smart speaker", "speaker"],
         all_patterns: &[],
-        device_type: "Speaker",
+        device_type: DeviceType::Speaker,
     },
     // Cameras
     DeviceTypeRule {
         any_patterns: &["camera", "ip cam"],
         all_patterns: &[],
-        device_type: "IP Camera",
+        device_type: DeviceType::IpCamera,
     },
     // Servers
     DeviceTypeRule {
         any_patterns: &["file sharing", "file server"],
         all_patterns: &[],
-        device_type: "File Server",
+        device_type: DeviceType::FileServer,
     },
     DeviceTypeRule {
         any_patterns: &["web server", "http", "ssh", "ftp", "telnet"],
         all_patterns: &[],
-        device_type: "Server",
+        device_type: DeviceType::Server,
     },
     // Development
     DeviceTypeRule {
         any_patterns: &["arduino"],
         all_patterns: &[],
-        device_type: "Microcontroller",
+        device_type: DeviceType::Microcontroller,
     },
     DeviceTypeRule {
         any_patterns: &["raspberry"],
         all_patterns: &[],
-        device_type: "Raspberry Pi",
+        device_type: DeviceType::RaspberryPi,
     },
     DeviceTypeRule {
         any_patterns: &["jenkins"],
         all_patterns: &[],
-        device_type: "CI Server",
+        device_type: DeviceType::CiServer,
     },
     // Desktop/Workstation
     DeviceTypeRule {
@@ -612,71 +689,71 @@ const DEVICE_TYPE_RULES: &[DeviceTypeRule] = &[
             "workgroup",
         ],
         all_patterns: &[],
-        device_type: "Desktop",
+        device_type: DeviceType::Desktop,
     },
     // Media servers
     DeviceTypeRule {
         any_patterns: &["itunes", "media server", "plex"],
         all_patterns: &[],
-        device_type: "Media Server",
+        device_type: DeviceType::MediaServer,
     },
     DeviceTypeRule {
         any_patterns: &["spotify"],
         all_patterns: &[],
-        device_type: "Speaker",
+        device_type: DeviceType::Speaker,
     },
     // Gaming
     DeviceTypeRule {
         any_patterns: &["gamestream", "nvidia shield"],
         all_patterns: &[],
-        device_type: "Gaming Device",
+        device_type: DeviceType::GamingDevice,
     },
 ];
 
 struct VendorRule {
     patterns: &'static [&'static str],
-    vendor: &'static str,
+    vendor: Vendor,
 }
 
 const VENDOR_RULES: &[VendorRule] = &[
     VendorRule {
         patterns: &["apple", "osx", "itunes", "iphone", "ipad"],
-        vendor: "Apple",
+        vendor: Vendor::Apple,
     },
     VendorRule {
         patterns: &["google", "chrome", "android"],
-        vendor: "Google",
+        vendor: Vendor::Google,
     },
     VendorRule {
         patterns: &["amazon", "fire tv", "alexa"],
-        vendor: "Amazon",
+        vendor: Vendor::Amazon,
     },
     VendorRule {
         patterns: &["samsung"],
-        vendor: "Samsung",
+        vendor: Vendor::Samsung,
     },
     VendorRule {
         patterns: &["nvidia"],
-        vendor: "NVIDIA",
+        vendor: Vendor::Nvidia,
     },
     VendorRule {
         patterns: &["hp"],
-        vendor: "HP",
+        vendor: Vendor::Hp,
     },
     VendorRule {
         patterns: &["canon"],
-        vendor: "Canon",
+        vendor: Vendor::Canon,
     },
     VendorRule {
         patterns: &["ubuntu", "linux", "raspberry"],
-        vendor: "Linux",
+        vendor: Vendor::Linux,
     },
     VendorRule {
         patterns: &["cisco"],
-        vendor: "Cisco",
+        vendor: Vendor::Cisco,
     },
     VendorRule {
         patterns: &["netgear"],
-        vendor: "Netgear",
+        vendor: Vendor::Netgear,
     },
 ];

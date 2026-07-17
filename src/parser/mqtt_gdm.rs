@@ -16,7 +16,7 @@ pub const GDM_PORTS: &[u16] = &[32410, 32412, 32414];
 #[cfg_attr(feature = "http-api", derive(serde::Serialize, serde::Deserialize))]
 pub struct MqttPacket {
     /// Source MAC address
-    pub source_mac: String,
+    pub source_mac: [u8; 6],
     /// Source IP address
     pub source_ip: std::net::IpAddr,
     /// Client ID parsed from CONNECT payload
@@ -30,7 +30,7 @@ pub struct MqttPacket {
 #[cfg_attr(feature = "http-api", derive(serde::Serialize, serde::Deserialize))]
 pub struct GdmPacket {
     /// Source MAC address
-    pub source_mac: String,
+    pub source_mac: [u8; 6],
     /// Source IP address
     pub source_ip: std::net::IpAddr,
     /// Friendly Name of the Plex device
@@ -56,7 +56,7 @@ pub fn is_gdm_port(port: u16) -> bool {
 /// Parses a standard MQTT over TCP CONNECT payload.
 pub fn parse_mqtt_connect(
     payload: &[u8],
-    source_mac: String,
+    source_mac: [u8; 6],
     source_ip: std::net::IpAddr,
 ) -> Option<MqttPacket> {
     if payload.len() < 12 {
@@ -134,7 +134,7 @@ pub fn parse_mqtt_connect(
 /// Parses an MQTT-SN over UDP CONNECT payload.
 pub fn parse_mqtt_sn_connect(
     payload: &[u8],
-    source_mac: String,
+    source_mac: [u8; 6],
     source_ip: std::net::IpAddr,
 ) -> Option<MqttPacket> {
     if payload.is_empty() {
@@ -168,7 +168,7 @@ pub fn parse_mqtt_sn_connect(
 /// Parses a Plex GDM payload.
 pub fn parse_gdm_payload(
     payload: &[u8],
-    source_mac: String,
+    source_mac: [u8; 6],
     source_ip: std::net::IpAddr,
 ) -> Option<GdmPacket> {
     let s = std::str::from_utf8(payload).ok()?;

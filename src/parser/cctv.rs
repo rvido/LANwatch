@@ -5,6 +5,8 @@
 
 //! IP Camera & CCTV discovery parsers (ONVIF, Hikvision SADP, Dahua, RTSP).
 
+use crate::types::{Vendor, parse_mac};
+
 /// Hikvision SADP discovery port
 pub const SADP_PORT: u16 = 9999;
 
@@ -22,11 +24,11 @@ pub const RTSP_PORT: u16 = 554;
 #[cfg_attr(feature = "http-api", derive(serde::Serialize, serde::Deserialize))]
 pub struct CctvPacket {
     /// Source MAC address
-    pub source_mac: String,
+    pub source_mac: [u8; 6],
     /// Source IP address
     pub source_ip: std::net::IpAddr,
-    /// Inferred vendor (e.g. "Hikvision", "Dahua", "ONVIF", "Generic RTSP")
-    pub vendor: String,
+    /// Inferred vendor (e.g. Hikvision, Dahua, ONVIF, Generic RTSP)
+    pub vendor: Vendor,
     /// Specific model name/information
     pub model: Option<String>,
     /// Serial number of the camera
@@ -43,7 +45,7 @@ pub fn is_cctv_port(port: u16) -> bool {
 /// Parses a Hikvision SADP UDP payload.
 pub fn parse_sadp_payload(
     payload: &[u8],
-    source_mac: String,
+    source_mac: [u8; 6],
     source_ip: std::net::IpAddr,
 ) -> Option<CctvPacket> {
     let s = std::str::from_utf8(payload).ok()?;
@@ -63,12 +65,14 @@ pub fn parse_sadp_payload(
     let payload_mac =
         extract_xml_tag_bytes(payload, "MAC").or_else(|| extract_xml_tag_bytes(payload, "Mac"));
 
-    let final_mac = payload_mac.unwrap_or(source_mac);
+    let final_mac = payload_mac
+        .and_then(|s| parse_mac(&s))
+        .unwrap_or(source_mac);
 
     Some(CctvPacket {
         source_mac: final_mac,
         source_ip,
-        vendor: "Hikvision".to_string(),
+        vendor: Vendor::Hikvision,
         model,
         serial_number: serial,
         protocol: "SADP".to_string(),
@@ -78,7 +82,7 @@ pub fn parse_sadp_payload(
 /// Parses a Dahua discovery packet.
 pub fn parse_dahua_payload(
     payload: &[u8],
-    source_mac: String,
+    source_mac: [u8; 6],
     source_ip: std::net::IpAddr,
 ) -> Option<CctvPacket> {
     // If it's DHIP binary or text
@@ -104,12 +108,14 @@ pub fn parse_dahua_payload(
         payload_mac = extract_json_field_bytes(payload, "mac");
     }
 
-    let final_mac = payload_mac.unwrap_or(source_mac);
+    let final_mac = payload_mac
+        .and_then(|s| parse_mac(&s))
+        .unwrap_or(source_mac);
 
     Some(CctvPacket {
         source_mac: final_mac,
         source_ip,
-        vendor: "Dahua".to_string(),
+        vendor: Vendor::Dahua,
         model,
         serial_number: serial,
         protocol: "Dahua Discovery".to_string(),

@@ -8,6 +8,8 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
+use crate::types::{DeviceType, Vendor};
+
 /// LIFX UDP discovery port
 pub const LIFX_PORT: u16 = 56700;
 
@@ -16,11 +18,11 @@ pub const LIFX_PORT: u16 = 56700;
 #[cfg_attr(feature = "http-api", derive(serde::Serialize, serde::Deserialize))]
 pub struct LifxPacket {
     /// Source MAC address of the LIFX device
-    pub source_mac: String,
+    pub source_mac: [u8; 6],
     /// Source IP address of the LIFX device
     pub source_ip: std::net::IpAddr,
     /// Target MAC address specified in the frame header (usually zero for broadcasts)
-    pub target_mac: String,
+    pub target_mac: [u8; 6],
     /// LIFX Message type (e.g. 2 = GetService, 3 = StateService)
     pub msg_type: u16,
     /// Size of the packet in bytes
@@ -37,7 +39,7 @@ pub fn is_lifx_port(port: u16) -> bool {
 /// Returns `Some(LifxPacket)` if parsing succeeds and the protocol number matches.
 pub fn parse_lifx_payload(
     payload: &[u8],
-    source_mac: String,
+    source_mac: [u8; 6],
     source_ip: std::net::IpAddr,
 ) -> Option<LifxPacket> {
     if payload.len() < 36 {
@@ -58,16 +60,7 @@ pub fn parse_lifx_payload(
     let msg_type = u16::from_le_bytes([payload[32], payload[33]]);
 
     // Extract target MAC address (starts at byte index 8, 6 bytes long)
-    let target_bytes = &payload[8..14];
-    let target_mac = format!(
-        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        target_bytes[0],
-        target_bytes[1],
-        target_bytes[2],
-        target_bytes[3],
-        target_bytes[4],
-        target_bytes[5]
-    );
+    let target_mac: [u8; 6] = payload[8..14].try_into().unwrap();
 
     Some(LifxPacket {
         source_mac,
@@ -82,9 +75,9 @@ pub fn parse_lifx_payload(
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IotMetadata<'a> {
     /// Inferred vendor name
-    pub vendor: Option<Cow<'a, str>>,
+    pub vendor: Option<Vendor>,
     /// Inferred device type
-    pub device_type: Option<Cow<'a, str>>,
+    pub device_type: Option<DeviceType>,
     /// Specific model name/information
     pub model: Option<Cow<'a, str>>,
     /// Status description (e.g. "Unpaired / Pairing Mode")
@@ -102,7 +95,7 @@ pub fn extract_iot_metadata<'a>(
 
     // 1. Matter Protocol Identification
     if services.iter().any(|s| s.contains("_matter")) {
-        meta.device_type = Some(Cow::Borrowed("Matter Smart Device"));
+        meta.device_type = Some(DeviceType::MatterSmartDevice);
 
         let mut vid_str = None;
         let mut pid_str = None;
@@ -117,24 +110,24 @@ pub fn extract_iot_metadata<'a>(
 
             if let Some(v) = parsed_vid {
                 meta.vendor = match v {
-                    0x10B1 => Some(Cow::Borrowed("Google")),
-                    0x1141 => Some(Cow::Borrowed("Apple")),
-                    0x121A => Some(Cow::Borrowed("Amazon")),
-                    0x111D => Some(Cow::Borrowed("Samsung")),
-                    0x100B => Some(Cow::Borrowed("Signify (Philips Hue)")),
-                    0x1224 => Some(Cow::Borrowed("Eve Systems")),
-                    0x115C => Some(Cow::Borrowed("Aqara")),
-                    0x118C => Some(Cow::Borrowed("IKEA")),
-                    0x1339 => Some(Cow::Borrowed("Nanoleaf")),
-                    0x10F2 => Some(Cow::Borrowed("Tuya")),
-                    0x120F => Some(Cow::Borrowed("Somfy")),
-                    0x135A => Some(Cow::Borrowed("TP-Link")),
-                    0x120D => Some(Cow::Borrowed("Lutron")),
-                    0x130B => Some(Cow::Borrowed("Yale")),
-                    0x1325 => Some(Cow::Borrowed("Schneider Electric")),
-                    0x1249 => Some(Cow::Borrowed("LeGrand")),
-                    0x135E => Some(Cow::Borrowed("Belkin")),
-                    0x139B => Some(Cow::Borrowed("Bosch")),
+                    0x10B1 => Some(Vendor::Google),
+                    0x1141 => Some(Vendor::Apple),
+                    0x121A => Some(Vendor::Amazon),
+                    0x111D => Some(Vendor::Samsung),
+                    0x100B => Some(Vendor::SignifyPhilipsHue),
+                    0x1224 => Some(Vendor::EveSystems),
+                    0x115C => Some(Vendor::Aqara),
+                    0x118C => Some(Vendor::Ikea),
+                    0x1339 => Some(Vendor::Nanoleaf),
+                    0x10F2 => Some(Vendor::Tuya),
+                    0x120F => Some(Vendor::Somfy),
+                    0x135A => Some(Vendor::TpLink),
+                    0x120D => Some(Vendor::Lutron),
+                    0x130B => Some(Vendor::Yale),
+                    0x1325 => Some(Vendor::SchneiderElectric),
+                    0x1249 => Some(Vendor::LeGrand),
+                    0x135E => Some(Vendor::Belkin),
+                    0x139B => Some(Vendor::Bosch),
                     _ => None,
                 };
             }
@@ -163,19 +156,19 @@ pub fn extract_iot_metadata<'a>(
             };
             if let Some(d) = parsed_dt {
                 match d {
-                    769 => meta.device_type = Some(Cow::Borrowed("Thermostat")),
-                    256 | 257 | 268 | 269 => meta.device_type = Some(Cow::Borrowed("Smart Light")),
-                    266 | 267 => meta.device_type = Some(Cow::Borrowed("Smart Plug")),
-                    15 | 16 => meta.device_type = Some(Cow::Borrowed("Switch")),
-                    90 => meta.device_type = Some(Cow::Borrowed("Door Lock")),
-                    768 => meta.device_type = Some(Cow::Borrowed("Sensor")),
-                    772 => meta.device_type = Some(Cow::Borrowed("Humidity Sensor")),
-                    774 => meta.device_type = Some(Cow::Borrowed("Occupancy Sensor")),
-                    775 => meta.device_type = Some(Cow::Borrowed("Contact Sensor")),
-                    10 | 113 => meta.device_type = Some(Cow::Borrowed("Air Conditioner")),
-                    43 => meta.device_type = Some(Cow::Borrowed("Air Purifier")),
-                    18 => meta.device_type = Some(Cow::Borrowed("Video Doorbell")),
-                    34 => meta.device_type = Some(Cow::Borrowed("Chromecast")),
+                    769 => meta.device_type = Some(DeviceType::Thermostat),
+                    256 | 257 | 268 | 269 => meta.device_type = Some(DeviceType::SmartLight),
+                    266 | 267 => meta.device_type = Some(DeviceType::SmartPlug),
+                    15 | 16 => meta.device_type = Some(DeviceType::Switch),
+                    90 => meta.device_type = Some(DeviceType::DoorLock),
+                    768 => meta.device_type = Some(DeviceType::Sensor),
+                    772 => meta.device_type = Some(DeviceType::HumiditySensor),
+                    774 => meta.device_type = Some(DeviceType::OccupancySensor),
+                    775 => meta.device_type = Some(DeviceType::ContactSensor),
+                    10 | 113 => meta.device_type = Some(DeviceType::AirConditioner),
+                    43 => meta.device_type = Some(DeviceType::AirPurifier),
+                    18 => meta.device_type = Some(DeviceType::VideoDoorbell),
+                    34 => meta.device_type = Some(DeviceType::Chromecast),
                     _ => {}
                 }
             }
@@ -188,56 +181,56 @@ pub fn extract_iot_metadata<'a>(
 
             let model_lower = md.to_lowercase();
             if model_lower.starts_with("eve") {
-                meta.vendor = Some(Cow::Borrowed("Eve Systems"));
+                meta.vendor = Some(Vendor::EveSystems);
             } else if model_lower.starts_with("nanoleaf") {
-                meta.vendor = Some(Cow::Borrowed("Nanoleaf"));
+                meta.vendor = Some(Vendor::Nanoleaf);
             } else if model_lower.starts_with("aqara") {
-                meta.vendor = Some(Cow::Borrowed("Aqara"));
+                meta.vendor = Some(Vendor::Aqara);
             } else if model_lower.starts_with("koogeek") {
-                meta.vendor = Some(Cow::Borrowed("Koogeek"));
+                meta.vendor = Some(Vendor::Koogeek);
             } else if model_lower.starts_with("wemo") {
-                meta.vendor = Some(Cow::Borrowed("Belkin (Wemo)"));
+                meta.vendor = Some(Vendor::BelkinWemo);
             } else if model_lower.starts_with("ecobee") {
-                meta.vendor = Some(Cow::Borrowed("ecobee"));
+                meta.vendor = Some(Vendor::Ecobee);
             } else if model_lower.starts_with("hue") || model_lower.contains("philips") {
-                meta.vendor = Some(Cow::Borrowed("Signify (Philips Hue)"));
+                meta.vendor = Some(Vendor::SignifyPhilipsHue);
             }
         }
 
         if let Some(ci) = txt_attrs.get("ci") {
             meta.device_type = match *ci {
-                "1" => Some(Cow::Borrowed("HomeKit Accessory")),
-                "2" => Some(Cow::Borrowed("Bridge")),
-                "3" => Some(Cow::Borrowed("Fan")),
-                "4" => Some(Cow::Borrowed("Garage Door")),
-                "5" => Some(Cow::Borrowed("Lightbulb")),
-                "6" => Some(Cow::Borrowed("Lock")),
-                "7" => Some(Cow::Borrowed("Outlet")),
-                "8" => Some(Cow::Borrowed("Switch")),
-                "9" => Some(Cow::Borrowed("Thermostat")),
-                "10" => Some(Cow::Borrowed("Sensor")),
-                "11" => Some(Cow::Borrowed("Security System")),
-                "12" => Some(Cow::Borrowed("Door")),
-                "13" => Some(Cow::Borrowed("Window")),
-                "14" => Some(Cow::Borrowed("Window Covering")),
-                "15" => Some(Cow::Borrowed("Switch")),
-                "17" => Some(Cow::Borrowed("IP Camera")),
-                "18" => Some(Cow::Borrowed("Video Doorbell")),
-                "19" => Some(Cow::Borrowed("Air Purifier")),
-                "20" => Some(Cow::Borrowed("Heater")),
-                "21" => Some(Cow::Borrowed("Cooler")),
-                "22" => Some(Cow::Borrowed("Humidifier")),
-                "23" => Some(Cow::Borrowed("Dehumidifier")),
-                "24" => Some(Cow::Borrowed("Apple TV")),
-                "28" => Some(Cow::Borrowed("Sprinkler")),
-                "29" => Some(Cow::Borrowed("Faucet")),
-                "30" => Some(Cow::Borrowed("Shower System")),
-                "32" => Some(Cow::Borrowed("Television")),
-                "33" => Some(Cow::Borrowed("Target Controller")),
-                _ => Some(Cow::Borrowed("HomeKit Device")),
+                "1" => Some(DeviceType::HomeKitAccessory),
+                "2" => Some(DeviceType::Bridge),
+                "3" => Some(DeviceType::Fan),
+                "4" => Some(DeviceType::GarageDoor),
+                "5" => Some(DeviceType::Lightbulb),
+                "6" => Some(DeviceType::Lock),
+                "7" => Some(DeviceType::Outlet),
+                "8" => Some(DeviceType::Switch),
+                "9" => Some(DeviceType::Thermostat),
+                "10" => Some(DeviceType::Sensor),
+                "11" => Some(DeviceType::SecuritySystem),
+                "12" => Some(DeviceType::Door),
+                "13" => Some(DeviceType::Window),
+                "14" => Some(DeviceType::WindowCovering),
+                "15" => Some(DeviceType::Switch),
+                "17" => Some(DeviceType::IpCamera),
+                "18" => Some(DeviceType::VideoDoorbell),
+                "19" => Some(DeviceType::AirPurifier),
+                "20" => Some(DeviceType::Heater),
+                "21" => Some(DeviceType::Cooler),
+                "22" => Some(DeviceType::Humidifier),
+                "23" => Some(DeviceType::Dehumidifier),
+                "24" => Some(DeviceType::AppleTv),
+                "28" => Some(DeviceType::Sprinkler),
+                "29" => Some(DeviceType::Faucet),
+                "30" => Some(DeviceType::ShowerSystem),
+                "32" => Some(DeviceType::Television),
+                "33" => Some(DeviceType::TargetController),
+                _ => Some(DeviceType::HomeKitDevice),
             };
         } else {
-            meta.device_type = Some(Cow::Borrowed("HomeKit Device"));
+            meta.device_type = Some(DeviceType::HomeKitDevice);
         }
 
         if let Some(sf) = txt_attrs.get("sf")
@@ -267,7 +260,7 @@ pub fn is_coap_port(port: u16) -> bool {
 #[cfg_attr(feature = "http-api", derive(serde::Serialize, serde::Deserialize))]
 pub struct CoapPacket {
     /// Source MAC address
-    pub source_mac: String,
+    pub source_mac: [u8; 6],
     /// Source IP address
     pub source_ip: std::net::IpAddr,
     /// CoAP message code (class and detail)
@@ -281,7 +274,7 @@ pub struct CoapPacket {
 /// Parses a CoAP packet from UDP payload bytes.
 pub fn parse_coap_payload(
     payload: &[u8],
-    source_mac: String,
+    source_mac: [u8; 6],
     source_ip: std::net::IpAddr,
 ) -> Option<CoapPacket> {
     if payload.len() < 4 {
@@ -383,7 +376,7 @@ pub fn is_knx_port(port: u16) -> bool {
 #[cfg_attr(feature = "http-api", derive(serde::Serialize, serde::Deserialize))]
 pub struct KnxPacket {
     /// Source MAC address
-    pub source_mac: String,
+    pub source_mac: [u8; 6],
     /// Source IP address
     pub source_ip: std::net::IpAddr,
     /// Service Type Identifier
@@ -397,7 +390,7 @@ pub struct KnxPacket {
 /// Parses a KNXnet/IP packet from UDP payload bytes.
 pub fn parse_knx_payload(
     payload: &[u8],
-    source_mac: String,
+    source_mac: [u8; 6],
     source_ip: std::net::IpAddr,
 ) -> Option<KnxPacket> {
     if payload.len() < 6 {

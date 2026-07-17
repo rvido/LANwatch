@@ -8,6 +8,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::types::{DeviceType, Vendor};
+
 /// Information about a detected DHCP device
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceInfo {
@@ -35,9 +37,9 @@ pub struct DeviceInfo {
     /// Detected mDNS services (e.g., "_http._tcp", "_airplay._tcp")
     pub services: Vec<String>,
     /// Vendor hint based on services or MAC OUI (e.g., "Apple", "Google")
-    pub vendor: Option<String>,
+    pub vendor: Option<Vendor>,
     /// Device type based on mDNS services (e.g., "Chromecast", "Apple TV", "Printer")
-    pub device_type: Option<String>,
+    pub device_type: Option<DeviceType>,
     /// First seen timestamp (ISO 8601 format)
     #[serde(
         serialize_with = "serialize_system_time",
@@ -140,9 +142,9 @@ impl DeviceInfo {
     ///
     /// # Returns
     /// `true` if the vendor was set, `false` if a vendor already existed.
-    pub fn set_vendor(&mut self, vendor: &str) -> bool {
+    pub fn set_vendor(&mut self, vendor: impl Into<Vendor>) -> bool {
         if self.vendor.is_none() {
-            self.vendor = Some(vendor.to_string());
+            self.vendor = Some(vendor.into());
             true
         } else {
             false
@@ -153,9 +155,9 @@ impl DeviceInfo {
     ///
     /// # Returns
     /// `true` if the device type was set, `false` if it already existed.
-    pub fn set_device_type(&mut self, device_type: &str) -> bool {
+    pub fn set_device_type(&mut self, device_type: impl Into<DeviceType>) -> bool {
         if self.device_type.is_none() {
-            self.device_type = Some(device_type.to_string());
+            self.device_type = Some(device_type.into());
             true
         } else {
             false
@@ -216,8 +218,11 @@ impl DeviceInfo {
                 .map(|ip| ip.to_string())
                 .unwrap_or_default(),
             self.hostname.as_deref().unwrap_or(""),
-            self.device_type.as_deref().unwrap_or(""),
-            self.vendor.as_deref().unwrap_or(""),
+            self.device_type
+                .as_ref()
+                .map(DeviceType::as_str)
+                .unwrap_or(""),
+            self.vendor.as_ref().map(Vendor::as_str).unwrap_or(""),
             services_str,
             self.system_description.as_deref().unwrap_or(""),
             v6_addresses_str
@@ -266,7 +271,7 @@ impl DeviceInfo {
             if t.is_empty() {
                 None
             } else {
-                Some(t.to_string())
+                Some(DeviceType::from(t))
             }
         } else {
             None
@@ -276,7 +281,7 @@ impl DeviceInfo {
             if v.is_empty() {
                 None
             } else {
-                Some(v.to_string())
+                Some(Vendor::from(v))
             }
         } else {
             None

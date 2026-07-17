@@ -123,7 +123,7 @@ pub enum MdnsRecordData {
 #[derive(Debug, Clone)]
 pub struct NbnsPacket {
     /// Source MAC address
-    pub source_mac: String,
+    pub source_mac: [u8; 6],
     /// Source IP address
     pub source_ip: std::net::IpAddr,
     /// NetBIOS name parsed from the packet
@@ -136,7 +136,7 @@ pub struct NbnsPacket {
 #[derive(Debug, Clone)]
 pub struct MdnsPacket {
     /// Source MAC address
-    pub source_mac: String,
+    pub source_mac: [u8; 6],
     /// Source IP address
     pub source_ip: std::net::IpAddr,
     /// Destination IP address
@@ -216,7 +216,7 @@ pub struct MdnsRecordView<'a> {
 #[derive(Debug, Clone)]
 pub struct MdnsPacketView<'a> {
     /// Source MAC address
-    pub source_mac: &'a str,
+    pub source_mac: [u8; 6],
     /// Source IP address
     pub source_ip: std::net::IpAddr,
     /// Destination IP address
@@ -239,7 +239,7 @@ impl MdnsPacket {
     /// Creates a borrowed view of this packet.
     pub fn view(&self) -> MdnsPacketView<'_> {
         MdnsPacketView {
-            source_mac: self.source_mac.as_str(),
+            source_mac: self.source_mac,
             source_ip: self.source_ip,
             dest_ip: self.dest_ip,
             transaction_id: self.transaction_id,
@@ -522,7 +522,7 @@ pub fn decode_netbios_name(payload: &[u8], offset: usize) -> Option<(String, u8,
 /// Parses a raw NetBIOS (NBNS) UDP payload into a structured `NbnsPacket`.
 pub fn parse_nbns_payload(
     payload: &[u8],
-    source_mac: String,
+    source_mac: [u8; 6],
     source_ip: std::net::IpAddr,
 ) -> Option<NbnsPacket> {
     if payload.len() < 12 {
@@ -593,12 +593,12 @@ pub fn parse_nbns_payload(
 ///
 /// # Arguments
 /// * `payload` - The raw bytes of the UDP payload.
-/// * `source_mac` - The source MAC address as a string.
+/// * `source_mac` - The source MAC address, as raw bytes.
 /// * `source_ip` - The sender's IP address.
 /// * `dest_ip` - The destination IP address.
 pub fn parse_mdns_payload(
     payload: &[u8],
-    source_mac: String,
+    source_mac: [u8; 6],
     source_ip: std::net::IpAddr,
     dest_ip: std::net::IpAddr,
 ) -> Option<MdnsPacket> {

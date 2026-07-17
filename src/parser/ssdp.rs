@@ -5,7 +5,7 @@
 
 #![cfg(feature = "ssdp")]
 
-use crate::types::{CdpPacket, LldpPacket};
+use crate::types::{CdpPacket, DeviceType, LldpPacket, Vendor};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -59,7 +59,7 @@ impl std::fmt::Display for SsdpMessageType {
 #[derive(Debug, Clone)]
 pub struct SsdpPacket {
     /// Source MAC address
-    pub source_mac: String,
+    pub source_mac: [u8; 6],
     /// Source IP address
     pub source_ip: std::net::IpAddr,
     /// Destination IP address
@@ -76,7 +76,7 @@ pub struct SsdpPacket {
 #[derive(Debug, Clone)]
 pub struct SsdpPacketView<'a> {
     /// Source MAC address
-    pub source_mac: &'a str,
+    pub source_mac: [u8; 6],
     /// Source IP address
     pub source_ip: std::net::IpAddr,
     /// Destination IP address
@@ -93,7 +93,7 @@ impl SsdpPacket {
     /// Creates a borrowed view of this packet.
     pub fn view(&self) -> SsdpPacketView<'_> {
         SsdpPacketView {
-            source_mac: self.source_mac.as_str(),
+            source_mac: self.source_mac,
             source_ip: self.source_ip,
             dest_ip: self.dest_ip,
             message_type: match &self.message_type {
@@ -186,23 +186,23 @@ impl<'a> SsdpPacketView<'a> {
     }
 
     /// Detect vendor from SSDP fingerprints without allocating a combined string.
-    pub fn detect_vendor_from_view(&self) -> Option<&'static str> {
+    pub fn detect_vendor_from_view(&self) -> Option<Vendor> {
         for rule in SSDP_VENDOR_RULES {
             if self.view_contains_any(rule.patterns) {
-                return Some(rule.vendor);
+                return Some(rule.vendor.clone());
             }
         }
         None
     }
 
     /// Detect device type from SSDP fingerprints without allocating a combined string.
-    pub fn detect_device_type_from_view(&self) -> Option<&'static str> {
+    pub fn detect_device_type_from_view(&self) -> Option<DeviceType> {
         for rule in SSDP_DEVICE_TYPE_RULES {
             let matches_any = self.view_contains_any(rule.any_patterns);
             let matches_extra =
                 rule.extra_patterns.is_empty() || self.view_contains_any(rule.extra_patterns);
             if matches_any && matches_extra {
-                return Some(rule.device_type);
+                return Some(rule.device_type.clone());
             }
         }
         None
@@ -225,108 +225,108 @@ impl<'a> SsdpPacketView<'a> {
 
 struct SsdpVendorRule {
     patterns: &'static [&'static str],
-    vendor: &'static str,
+    vendor: Vendor,
 }
 
 const SSDP_VENDOR_RULES: &[SsdpVendorRule] = &[
     SsdpVendorRule {
         patterns: &["apple", "airport", "airplay"],
-        vendor: "Apple",
+        vendor: Vendor::Apple,
     },
     SsdpVendorRule {
         patterns: &["lenovo", "legion", "thinkpad", "ideapad", "yoga"],
-        vendor: "Lenovo",
+        vendor: Vendor::Lenovo,
     },
     SsdpVendorRule {
         patterns: &["google", "chromecast", "android tv"],
-        vendor: "Google",
+        vendor: Vendor::Google,
     },
     SsdpVendorRule {
         patterns: &["amazon", "alexa", "fire tv"],
-        vendor: "Amazon",
+        vendor: Vendor::Amazon,
     },
     SsdpVendorRule {
         patterns: &["samsung"],
-        vendor: "Samsung",
+        vendor: Vendor::Samsung,
     },
     SsdpVendorRule {
         patterns: &["lg ", "lge"],
-        vendor: "LG",
+        vendor: Vendor::Lg,
     },
     SsdpVendorRule {
         patterns: &["sony"],
-        vendor: "Sony",
+        vendor: Vendor::Sony,
     },
     SsdpVendorRule {
         patterns: &["roku"],
-        vendor: "Roku",
+        vendor: Vendor::Roku,
     },
     SsdpVendorRule {
         patterns: &["sonos"],
-        vendor: "Sonos",
+        vendor: Vendor::Sonos,
     },
     SsdpVendorRule {
         patterns: &["microsoft", "windows"],
-        vendor: "Microsoft",
+        vendor: Vendor::Microsoft,
     },
     SsdpVendorRule {
         patterns: &["philips", "hue"],
-        vendor: "Philips",
+        vendor: Vendor::Philips,
     },
     SsdpVendorRule {
         patterns: &["netgear"],
-        vendor: "Netgear",
+        vendor: Vendor::Netgear,
     },
     SsdpVendorRule {
         patterns: &["tp-link", "tplink"],
-        vendor: "TP-Link",
+        vendor: Vendor::TpLink,
     },
     SsdpVendorRule {
         patterns: &["ubiquiti", "unifi"],
-        vendor: "Ubiquiti",
+        vendor: Vendor::Ubiquiti,
     },
     SsdpVendorRule {
         patterns: &["d-link"],
-        vendor: "D-Link",
+        vendor: Vendor::DLink,
     },
     SsdpVendorRule {
         patterns: &["bose"],
-        vendor: "Bose",
+        vendor: Vendor::Bose,
     },
     SsdpVendorRule {
         patterns: &["denon"],
-        vendor: "Denon",
+        vendor: Vendor::Denon,
     },
     SsdpVendorRule {
         patterns: &["yamaha"],
-        vendor: "Yamaha",
+        vendor: Vendor::Yamaha,
     },
     SsdpVendorRule {
         patterns: &["synology"],
-        vendor: "Synology",
+        vendor: Vendor::Synology,
     },
     SsdpVendorRule {
         patterns: &["qnap"],
-        vendor: "QNAP",
+        vendor: Vendor::Qnap,
     },
 ];
 
 struct SsdpDeviceTypeRule {
     any_patterns: &'static [&'static str],
     extra_patterns: &'static [&'static str],
-    device_type: &'static str,
+    device_type: DeviceType,
 }
 
 const SSDP_DEVICE_TYPE_RULES: &[SsdpDeviceTypeRule] = &[
     SsdpDeviceTypeRule {
         any_patterns: &["mediarenderer", "renderer"],
         extra_patterns: &[],
-        device_type: "Media Renderer",
+        device_type: DeviceType::MediaRenderer,
     },
     SsdpDeviceTypeRule {
         any_patterns: &["lenovo", "legion", "thinkpad", "ideapad", "yoga"],
         extra_patterns: &[],
-        device_type: "Laptop",
+        device_type: DeviceType::Laptop,
     },
     SsdpDeviceTypeRule {
         any_patterns: &[
@@ -335,62 +335,62 @@ const SSDP_DEVICE_TYPE_RULES: &[SsdpDeviceTypeRule] = &[
             "internetgatewaydevice",
         ],
         extra_patterns: &["windows", "rvd_", "pc", "lenovo", "legion"],
-        device_type: "Laptop",
+        device_type: DeviceType::Laptop,
     },
     SsdpDeviceTypeRule {
         any_patterns: &["mediaserver"],
         extra_patterns: &[],
-        device_type: "Media Server",
+        device_type: DeviceType::MediaServer,
     },
     SsdpDeviceTypeRule {
         any_patterns: &["internetgatewaydevice", "wanconnectiondevice", "router"],
         extra_patterns: &[],
-        device_type: "Router",
+        device_type: DeviceType::Router,
     },
     SsdpDeviceTypeRule {
         any_patterns: &["printer", "print"],
         extra_patterns: &[],
-        device_type: "Printer",
+        device_type: DeviceType::Printer,
     },
     SsdpDeviceTypeRule {
         any_patterns: &["scanner"],
         extra_patterns: &[],
-        device_type: "Scanner",
+        device_type: DeviceType::Scanner,
     },
     SsdpDeviceTypeRule {
         any_patterns: &["television", "tvdevice", "smarttv"],
         extra_patterns: &[],
-        device_type: "TV",
+        device_type: DeviceType::Tv,
     },
     SsdpDeviceTypeRule {
         any_patterns: &["camera", "ipcamera"],
         extra_patterns: &[],
-        device_type: "IP Camera",
+        device_type: DeviceType::IpCamera,
     },
     SsdpDeviceTypeRule {
         any_patterns: &["speaker", "soundbar"],
         extra_patterns: &[],
-        device_type: "Speaker",
+        device_type: DeviceType::Speaker,
     },
     SsdpDeviceTypeRule {
         any_patterns: &["gameconsole", "xbox", "playstation"],
         extra_patterns: &[],
-        device_type: "Gaming Console",
+        device_type: DeviceType::GamingConsole,
     },
     SsdpDeviceTypeRule {
         any_patterns: &["set-top", "settop"],
         extra_patterns: &[],
-        device_type: "Set Top Box",
+        device_type: DeviceType::SetTopBox,
     },
     SsdpDeviceTypeRule {
         any_patterns: &["nas", "storage"],
         extra_patterns: &[],
-        device_type: "NAS",
+        device_type: DeviceType::Nas,
     },
     SsdpDeviceTypeRule {
         any_patterns: &["bridge", "light", "bulb", "homekit"],
         extra_patterns: &[],
-        device_type: "Smart Home Device",
+        device_type: DeviceType::SmartHomeDevice,
     },
 ];
 
@@ -502,19 +502,19 @@ pub fn is_wsd_ports(src: u16, dest: u16) -> bool {
 #[derive(Debug, Clone)]
 pub struct WsdPacket {
     /// Source MAC address
-    pub source_mac: String,
+    pub source_mac: [u8; 6],
     /// Source IP address
     pub source_ip: std::net::IpAddr,
     /// Detected device type (if any)
-    pub device_type: Option<String>,
+    pub device_type: Option<DeviceType>,
     /// Detected vendor (if any)
-    pub vendor: Option<String>,
+    pub vendor: Option<Vendor>,
 }
 
 /// Parses a raw WS-Discovery UDP payload into a structured `WsdPacket`.
 pub fn parse_wsd_payload(
     payload: &[u8],
-    source_mac: String,
+    source_mac: [u8; 6],
     source_ip: std::net::IpAddr,
 ) -> Option<WsdPacket> {
     let max_len = std::cmp::min(payload.len(), 8192);
@@ -528,12 +528,12 @@ pub fn parse_wsd_payload(
     let mut vendor = None;
 
     if s.contains("NetworkVideoTransmitter") {
-        device_type = Some("IP Camera".to_string());
-        vendor = Some("ONVIF".to_string());
+        device_type = Some(DeviceType::IpCamera);
+        vendor = Some(Vendor::Onvif);
     } else if s.contains("PrintDevice") || s.contains("Printer") {
-        device_type = Some("Printer".to_string());
+        device_type = Some(DeviceType::Printer);
     } else if s.contains("Computer") {
-        device_type = Some("PC/Computer".to_string());
+        device_type = Some(DeviceType::PcComputer);
     }
 
     if let Some((start, end)) = s
@@ -544,13 +544,13 @@ pub fn parse_wsd_payload(
         if !model.is_empty() {
             let m = model.to_lowercase();
             if m.contains("canon") {
-                vendor = Some("Canon".to_string());
+                vendor = Some(Vendor::Canon);
             } else if m.contains("hp") {
-                vendor = Some("HP".to_string());
+                vendor = Some(Vendor::Hp);
             } else if m.contains("epson") {
-                vendor = Some("Epson".to_string());
+                vendor = Some(Vendor::Epson);
             } else if m.contains("brother") {
-                vendor = Some("Brother".to_string());
+                vendor = Some(Vendor::Brother);
             }
         }
     }
@@ -571,12 +571,12 @@ pub fn parse_wsd_payload(
 ///
 /// # Arguments
 /// * `payload` - The raw bytes of the UDP payload.
-/// * `source_mac` - The source MAC address as a string.
+/// * `source_mac` - The source MAC address, as raw bytes.
 /// * `source_ip` - The sender's IP address.
 /// * `dest_ip` - The destination IP address.
 pub fn parse_ssdp_payload(
     payload: &[u8],
-    source_mac: String,
+    source_mac: [u8; 6],
     source_ip: std::net::IpAddr,
     dest_ip: std::net::IpAddr,
 ) -> Option<SsdpPacket> {
@@ -632,7 +632,7 @@ fn starts_with_ascii_case_insensitive(value: &str, prefix: &str) -> bool {
 /// Parses an LLDP (Link Layer Discovery Protocol) Ethernet payload.
 ///
 /// Returns a parsed `LldpPacket` on success, or `None` if parsing fails or crucial TLVs are missing.
-pub fn parse_lldp_payload(payload: &[u8], source_mac: String) -> Option<LldpPacket> {
+pub fn parse_lldp_payload(payload: &[u8], source_mac: [u8; 6]) -> Option<LldpPacket> {
     let mut system_name = None;
     let mut system_description = None;
     let mut port_id = None;
@@ -736,7 +736,7 @@ pub fn parse_lldp_payload(payload: &[u8], source_mac: String) -> Option<LldpPack
 /// Parses a CDP (Cisco Discovery Protocol) Ethernet payload.
 ///
 /// Returns a parsed `CdpPacket` on success, or `None` if parsing fails or crucial fields are missing.
-pub fn parse_cdp_payload(payload: &[u8], source_mac: String) -> Option<CdpPacket> {
+pub fn parse_cdp_payload(payload: &[u8], source_mac: [u8; 6]) -> Option<CdpPacket> {
     if payload.len() < 4 {
         return None;
     }

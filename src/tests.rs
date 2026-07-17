@@ -336,8 +336,8 @@ mod tests {
             hostname: Some("testhost".to_string()),
             system_description: Some("My LLDP Device Description".to_string()),
             services: vec!["_http._tcp".to_string(), "_ssh._tcp".to_string()],
-            vendor: Some("TestVendor".to_string()),
-            device_type: Some("Server".to_string()),
+            vendor: Some(Vendor::Other("TestVendor".to_string())),
+            device_type: Some(DeviceType::Server),
             first_seen: parse_timestamp("2026-01-15T10:00:00Z").unwrap(),
             last_seen: parse_timestamp("2026-01-15T12:00:00Z").unwrap(),
         };
@@ -596,8 +596,8 @@ mod tests {
         tracker.update_from_dhcpv4(&packet);
 
         let device = tracker.devices().get("48:45:e6:48:4c:85").unwrap();
-        assert_eq!(device.vendor.as_deref(), Some("Lenovo"));
-        assert_eq!(device.device_type.as_deref(), Some("Laptop"));
+        assert_eq!(device.vendor, Some(Vendor::Lenovo));
+        assert_eq!(device.device_type, Some(DeviceType::Laptop));
 
         let _ = std::fs::remove_file(temp_path);
     }
@@ -613,8 +613,8 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(192, 168, 4, 36)),
             Some("rachio-188dcc".to_string()),
         );
-        device.device_type = Some("Security Camera".to_string());
-        device.vendor = Some("Murata Manufacturing Co., Ltd.".to_string());
+        device.device_type = Some(DeviceType::SecurityCamera);
+        device.vendor = Some(Vendor::Other("Murata Manufacturing Co., Ltd.".to_string()));
         tracker.devices.insert(device.mac_address.clone(), device);
 
         let mut registry = OuiRegistry::new();
@@ -639,8 +639,8 @@ mod tests {
         tracker.update_from_dhcpv4(&packet);
 
         let device = tracker.devices().get("9c:50:d1:18:8d:cc").unwrap();
-        assert_eq!(device.vendor.as_deref(), Some("Rachio"));
-        assert_eq!(device.device_type.as_deref(), Some("Smart Watering Device"));
+        assert_eq!(device.vendor, Some(Vendor::Rachio));
+        assert_eq!(device.device_type, Some(DeviceType::SmartWateringDevice));
 
         let _ = std::fs::remove_file(temp_path);
     }
@@ -656,8 +656,8 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(192, 168, 4, 36)),
             Some("rachio-188dcc".to_string()),
         );
-        device.device_type = Some("Thermostat".to_string());
-        device.vendor = Some("Google".to_string());
+        device.device_type = Some(DeviceType::Thermostat);
+        device.vendor = Some(Vendor::Google);
         device.services.push("_hap._tcp".to_string());
         tracker.devices.insert(device.mac_address.clone(), device);
 
@@ -683,8 +683,8 @@ mod tests {
         tracker.update_from_dhcpv4(&packet);
 
         let device = tracker.devices().get("9c:50:d1:18:8d:cc").unwrap();
-        assert_eq!(device.vendor.as_deref(), Some("Rachio"));
-        assert_eq!(device.device_type.as_deref(), Some("Smart Watering Device"));
+        assert_eq!(device.vendor, Some(Vendor::Rachio));
+        assert_eq!(device.device_type, Some(DeviceType::SmartWateringDevice));
 
         let _ = std::fs::remove_file(temp_path);
     }
@@ -703,8 +703,8 @@ mod tests {
         tracker.update_device("3c:31:74:e2:af:8a", "192.168.7.204".parse().unwrap(), None);
 
         let device = tracker.devices().get("3c:31:74:e2:af:8a").unwrap();
-        assert_eq!(device.vendor.as_deref(), Some("Google Nest Thermostat"));
-        assert_eq!(device.device_type.as_deref(), Some("Thermostat"));
+        assert_eq!(device.vendor, Some(Vendor::Other("Google Nest Thermostat".to_string())));
+        assert_eq!(device.device_type, Some(DeviceType::Thermostat));
 
         let _ = std::fs::remove_file(temp_path);
     }
@@ -720,14 +720,14 @@ mod tests {
             "192.168.7.204".parse().unwrap(),
             None,
         );
-        device.device_type = Some("Matter Smart Device".to_string());
-        device.vendor = Some("Google".to_string());
+        device.device_type = Some(DeviceType::MatterSmartDevice);
+        device.vendor = Some(Vendor::Google);
         tracker.devices.insert(device.mac_address.clone(), device);
 
         tracker.update_device("3c:31:74:e2:af:8a", "192.168.7.204".parse().unwrap(), Some("Nest-Thermostat-AF8A"));
 
         let device = tracker.devices().get("3c:31:74:e2:af:8a").unwrap();
-        assert_eq!(device.device_type.as_deref(), Some("Thermostat"));
+        assert_eq!(device.device_type, Some(DeviceType::Thermostat));
 
         let _ = std::fs::remove_file(temp_path);
     }
@@ -743,8 +743,8 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(192, 168, 7, 193)),
             Some("roborock-vacuum-a75".to_string()),
         );
-        device.device_type = Some("Security Camera".to_string());
-        device.vendor = Some("Beijing Roborock Technology Co., Ltd.".to_string());
+        device.device_type = Some(DeviceType::SecurityCamera);
+        device.vendor = Some(Vendor::Other("Beijing Roborock Technology Co., Ltd.".to_string()));
         tracker.devices.insert(device.mac_address.clone(), device);
 
         let mut registry = OuiRegistry::new();
@@ -769,8 +769,8 @@ mod tests {
         tracker.update_from_dhcpv4(&packet);
 
         let device = tracker.devices().get("b0:4a:39:e3:3f:da").unwrap();
-        assert_eq!(device.vendor.as_deref(), Some("Roborock"));
-        assert_eq!(device.device_type.as_deref(), Some("Smart Cleaning Device"));
+        assert_eq!(device.vendor, Some(Vendor::Roborock));
+        assert_eq!(device.device_type, Some(DeviceType::SmartCleaningDevice));
 
         let _ = std::fs::remove_file(temp_path);
     }
@@ -803,8 +803,8 @@ mod tests {
         tracker.update_from_dhcpv4(&packet);
 
         let device = tracker.devices().get("dc:69:b5:95:58:b2").unwrap();
-        assert_eq!(device.vendor.as_deref(), Some("eero inc."));
-        assert_eq!(device.device_type.as_deref(), Some("Router"));
+        assert_eq!(device.vendor, Some(Vendor::Eero));
+        assert_eq!(device.device_type, Some(DeviceType::Router));
 
         let _ = std::fs::remove_file(temp_path);
     }
@@ -821,7 +821,7 @@ mod tests {
         tracker.set_oui_registry(registry);
 
         let packet = MdnsPacket {
-            source_mac: "dc:69:b5:95:58:b2".to_string(),
+            source_mac: parse_mac("dc:69:b5:95:58:b2").unwrap(),
             source_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 7, 10)),
             dest_ip: IpAddr::V4(Ipv4Addr::new(224, 0, 0, 251)),
             transaction_id: 1234,
@@ -835,7 +835,7 @@ mod tests {
         tracker.update_from_mdns(&packet);
 
         let device = tracker.devices().get("dc:69:b5:95:58:b2").unwrap();
-        assert_eq!(device.vendor.as_deref(), Some("eero inc."));
+        assert_eq!(device.vendor, Some(Vendor::Eero));
 
         let _ = std::fs::remove_file(temp_path);
     }
@@ -856,19 +856,21 @@ mod tests {
         let router_mac = "dc:69:b5:95:58:b2";
         let router_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 7, 1));
         let mut router_device = DeviceInfo::new(router_mac.to_string(), router_ip, Some("eero-02j6".to_string()));
-        router_device.vendor = Some("eero inc.".to_string());
-        router_device.device_type = Some("Router".to_string());
+        router_device.vendor = Some(Vendor::Eero);
+        router_device.device_type = Some(DeviceType::Router);
         tracker.devices.insert(router_mac.to_string(), router_device);
+        tracker.ip_index.insert(router_ip, router_mac.to_string());
 
         let printer_mac = "00:11:22:33:44:55";
         let printer_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 7, 50));
         let printer_device = DeviceInfo::new(printer_mac.to_string(), printer_ip, None);
         tracker.devices.insert(printer_mac.to_string(), printer_device);
+        tracker.ip_index.insert(printer_ip, printer_mac.to_string());
 
         // Create an mDNS packet representing a proxied advertisement for the HP printer
         // sent from the Eero router's MAC/IP, but with target IPs in the records
         let packet = MdnsPacket {
-            source_mac: router_mac.to_string(),
+            source_mac: parse_mac(router_mac).unwrap(),
             source_ip: router_ip,
             dest_ip: IpAddr::V4(Ipv4Addr::new(224, 0, 0, 251)),
             transaction_id: 42,
@@ -905,19 +907,19 @@ mod tests {
         // Verify the printer device was updated
         let printer = tracker.devices().get(printer_mac).unwrap();
         assert_eq!(printer.hostname.as_deref(), Some("HP-Printer"));
-        assert_eq!(printer.vendor.as_deref(), Some("HP"));
-        assert_eq!(printer.device_type.as_deref(), Some("Printer"));
+        assert_eq!(printer.vendor, Some(Vendor::Hp));
+        assert_eq!(printer.device_type, Some(DeviceType::Printer));
 
         // Verify the Eero router was NOT polluted or updated by the printer's mDNS records
         let router = tracker.devices().get(router_mac).unwrap();
         assert_eq!(router.hostname.as_deref(), Some("eero-02j6"));
-        assert_eq!(router.vendor.as_deref(), Some("eero inc."));
-        assert_eq!(router.device_type.as_deref(), Some("Router"));
+        assert_eq!(router.vendor, Some(Vendor::Eero));
+        assert_eq!(router.device_type, Some(DeviceType::Router));
         assert!(!router.services.iter().any(|s| s == "_printer._tcp"));
 
         // Test a proxied packet for an UNTRACKED IP - should be ignored to avoid pollution
         let untracked_packet = MdnsPacket {
-            source_mac: router_mac.to_string(),
+            source_mac: parse_mac(router_mac).unwrap(),
             source_ip: router_ip,
             dest_ip: IpAddr::V4(Ipv4Addr::new(224, 0, 0, 251)),
             transaction_id: 43,
@@ -946,9 +948,73 @@ mod tests {
 
         // Verify again that the Eero router has not been polluted
         let router_after = tracker.devices().get(router_mac).unwrap();
-        assert_eq!(router_after.vendor.as_deref(), Some("eero inc."));
-        assert_eq!(router_after.device_type.as_deref(), Some("Router"));
+        assert_eq!(router_after.vendor, Some(Vendor::Eero));
+        assert_eq!(router_after.device_type, Some(DeviceType::Router));
         assert_ne!(router_after.system_description.as_deref(), Some("Rachio-188DCC"));
+
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+    }
+
+    #[test]
+    #[cfg(feature = "mdns")]
+    fn test_device_tracker_ip_index_deindexes_stale_address_on_release() {
+        // Regression test for the IP->MAC index used to resolve relayed/proxied mDNS
+        // packets: when a device's primary IP address changes (e.g. a DHCP re-lease),
+        // the old address must be removed from the index, not just overwritten, or a
+        // later relay packet advertising the abandoned address could incorrectly be
+        // attributed to the device that no longer holds it.
+        let temp_path = "/tmp/lanwatch_test_ip_index_deindex.csv";
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+
+        let mut tracker = DeviceTracker::new(temp_path).unwrap();
+
+        let device_mac = "aa:aa:aa:aa:aa:aa";
+        let old_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 9, 50));
+        let new_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 9, 51));
+
+        // Device first seen at old_ip...
+        tracker.update_device(device_mac, old_ip, None);
+        assert_eq!(tracker.ip_index.get(&old_ip).map(String::as_str), Some(device_mac));
+
+        // ...then re-leased to new_ip (DHCP re-lease). The index must move with it.
+        tracker.update_device(device_mac, new_ip, None);
+        assert_eq!(tracker.ip_index.get(&new_ip).map(String::as_str), Some(device_mac));
+        assert!(
+            !tracker.ip_index.contains_key(&old_ip),
+            "stale IP must be removed from the index after the device moves to a new address"
+        );
+
+        // A relayed mDNS packet from an unrelated router, advertising the now-abandoned
+        // old_ip, must NOT resolve to device_mac (it no longer owns that address).
+        let router_mac = "bb:bb:bb:bb:bb:bb";
+        let router_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 9, 1));
+        let packet = MdnsPacket {
+            source_mac: parse_mac(router_mac).unwrap(),
+            source_ip: router_ip,
+            dest_ip: IpAddr::V4(Ipv4Addr::new(224, 0, 0, 251)),
+            transaction_id: 1,
+            is_response: true,
+            questions: vec![],
+            answers: vec![MdnsRecord {
+                name: "Stale-Device.local".to_string(),
+                record_type: MdnsRecordType::A,
+                ttl: 120,
+                data: MdnsRecordData::A(Ipv4Addr::new(192, 168, 9, 50)),
+            }],
+            authority: vec![],
+            additional: vec![],
+        };
+
+        let changes = tracker.update_from_mdns(&packet);
+        assert_eq!(
+            changes, 0,
+            "relay packet for an abandoned IP must not be attributed to the device that used to own it"
+        );
+        let device = tracker.devices().get(device_mac).unwrap();
+        assert_eq!(device.ip_address, new_ip);
+        assert_ne!(device.hostname.as_deref(), Some("Stale-Device"));
 
         let _ = std::fs::remove_file(temp_path);
         let _ = std::fs::remove_file(format!("{}.journal", temp_path));
@@ -966,7 +1032,7 @@ mod tests {
         tracker.set_oui_registry(registry);
 
         let packet = SsdpPacket {
-            source_mac: "dc:69:b5:95:58:b2".to_string(),
+            source_mac: parse_mac("dc:69:b5:95:58:b2").unwrap(),
             source_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 7, 10)),
             dest_ip: IpAddr::V4(Ipv4Addr::new(239, 255, 255, 250)),
             message_type: SsdpMessageType::Response,
@@ -977,7 +1043,7 @@ mod tests {
         tracker.update_from_ssdp(&packet);
 
         let device = tracker.devices().get("dc:69:b5:95:58:b2").unwrap();
-        assert_eq!(device.vendor.as_deref(), Some("eero inc."));
+        assert_eq!(device.vendor, Some(Vendor::Eero));
 
         let _ = std::fs::remove_file(temp_path);
     }
@@ -998,8 +1064,8 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)),
             None,
         );
-        device.device_type = Some("Chromecast".to_string());
-        device.vendor = Some("eero inc.".to_string());
+        device.device_type = Some(DeviceType::Chromecast);
+        device.vendor = Some(Vendor::Eero);
         tracker.devices.insert(device.mac_address.clone(), device);
 
         // 2. Updated with Motorola hostname - should override Chromecast type and eero vendor!
@@ -1010,8 +1076,8 @@ mod tests {
         );
 
         let device = tracker.devices().get("dc:69:b5:33:44:55").unwrap();
-        assert_eq!(device.vendor.as_deref(), Some("Motorola"));
-        assert_eq!(device.device_type.as_deref(), Some("Android Phone"));
+        assert_eq!(device.vendor, Some(Vendor::Motorola));
+        assert_eq!(device.device_type, Some(DeviceType::AndroidPhone));
 
         let _ = std::fs::remove_file(temp_path);
     }
@@ -1029,15 +1095,15 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(192, 168, 5, 14)),
             Some("moto-g-stylus-2025".to_string()),
         );
-        device.device_type = Some("Android Phone".to_string());
-        device.vendor = Some("Motorola".to_string());
+        device.device_type = Some(DeviceType::AndroidPhone);
+        device.vendor = Some(Vendor::Motorola);
         tracker.devices.insert(device.mac_address.clone(), device);
 
         // 2. Try to update via mDNS with Google Cast service (which would normally identify as Chromecast)
         #[cfg(feature = "mdns")]
         {
             let packet = crate::parser::mdns::MdnsPacket {
-                source_mac: "f6:b8:c0:de:63:9b".to_string(),
+                source_mac: parse_mac("f6:b8:c0:de:63:9b").unwrap(),
                 source_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 5, 14)),
                 dest_ip: IpAddr::V4(Ipv4Addr::new(224, 0, 0, 251)),
                 transaction_id: 1234,
@@ -1056,8 +1122,8 @@ mod tests {
 
             // 3. Verify it remains an Android Phone (Motorola), and was NOT changed to Chromecast / Google!
             let device = tracker.devices().get("f6:b8:c0:de:63:9b").unwrap();
-            assert_eq!(device.device_type.as_deref(), Some("Android Phone"));
-            assert_eq!(device.vendor.as_deref(), Some("Motorola"));
+            assert_eq!(device.device_type, Some(DeviceType::AndroidPhone));
+            assert_eq!(device.vendor, Some(Vendor::Motorola));
         }
 
         let _ = std::fs::remove_file(temp_path);
@@ -1079,8 +1145,8 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(192, 168, 5, 14)),
             Some("moto-g-stylus-2025".to_string()),
         );
-        device.device_type = Some("Chromecast".to_string());
-        device.vendor = Some("Google".to_string());
+        device.device_type = Some(DeviceType::Chromecast);
+        device.vendor = Some(Vendor::Google);
         device.services.push("_googlecast._tcp.local".to_string());
         tracker.devices.insert(device.mac_address.clone(), device);
 
@@ -1093,8 +1159,8 @@ mod tests {
 
         // 4. Verify it was corrected to Android Phone / Motorola!
         let device = tracker.devices().get("f6:b8:c0:de:63:9b").unwrap();
-        assert_eq!(device.device_type.as_deref(), Some("Android Phone"));
-        assert_eq!(device.vendor.as_deref(), Some("Motorola"));
+        assert_eq!(device.device_type, Some(DeviceType::AndroidPhone));
+        assert_eq!(device.vendor, Some(Vendor::Motorola));
 
         let _ = std::fs::remove_file(temp_path);
         let _ = std::fs::remove_file(format!("{}-journal", temp_path));
@@ -1115,8 +1181,8 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(192, 168, 7, 96)),
             Some("d50d84c4-d385-360b-f730-3a2034b24f87".to_string()),
         );
-        device.device_type = Some("Chromecast".to_string());
-        device.vendor = Some("Google".to_string());
+        device.device_type = Some(DeviceType::Chromecast);
+        device.vendor = Some(Vendor::Google);
         device.add_service("_googlecast._tcp");
         tracker.devices.insert(device.mac_address.clone(), device);
 
@@ -1141,8 +1207,8 @@ mod tests {
 
         // 3. Verify it is still a Chromecast
         let device = tracker.devices().get("14:c1:4e:6e:f2:7e").unwrap();
-        assert_eq!(device.device_type.as_deref(), Some("Chromecast"));
-        assert_eq!(device.vendor.as_deref(), Some("Google"));
+        assert_eq!(device.device_type, Some(DeviceType::Chromecast));
+        assert_eq!(device.vendor, Some(Vendor::Google));
 
         let _ = std::fs::remove_file(temp_path);
     }
@@ -1219,8 +1285,8 @@ mod tests {
             hostname: Some("jsonhost".to_string()),
             system_description: None,
             services: vec!["_airplay._tcp".to_string()],
-            vendor: Some("Apple".to_string()),
-            device_type: Some("AirPlay Device".to_string()),
+            vendor: Some(Vendor::Apple),
+            device_type: Some(DeviceType::AirPlayDevice),
             first_seen: parse_timestamp("2026-01-15T10:00:00Z").unwrap(),
             last_seen: parse_timestamp("2026-01-15T12:00:00Z").unwrap(),
         };
@@ -1612,7 +1678,7 @@ mod tests {
         let payload = vec![0u8; 10];
         let result = parse_mdns_payload(
             &payload,
-            "00:11:22:33:44:55".to_string(),
+            parse_mac("00:11:22:33:44:55").unwrap(),
             std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
             std::net::IpAddr::V4(MDNS_IPV4_MULTICAST),
         );
@@ -1648,14 +1714,14 @@ mod tests {
 
         let result = parse_mdns_payload(
             &payload,
-            "aa:bb:cc:dd:ee:ff".to_string(),
+            parse_mac("aa:bb:cc:dd:ee:ff").unwrap(),
             std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
             std::net::IpAddr::V4(MDNS_IPV4_MULTICAST),
         );
 
         assert!(result.is_some());
         let packet = result.unwrap();
-        assert_eq!(packet.source_mac, "aa:bb:cc:dd:ee:ff");
+        assert_eq!(packet.source_mac, parse_mac("aa:bb:cc:dd:ee:ff").unwrap());
         assert!(!packet.is_response);
         assert_eq!(packet.questions.len(), 1);
         assert_eq!(packet.questions[0].name, "_http._tcp.local");
@@ -1678,7 +1744,7 @@ mod tests {
 
         let result = parse_mdns_payload(
             &payload,
-            "aa:bb:cc:dd:ee:ff".to_string(),
+            parse_mac("aa:bb:cc:dd:ee:ff").unwrap(),
             std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
             std::net::IpAddr::V4(MDNS_IPV4_MULTICAST),
         );
@@ -1716,14 +1782,14 @@ mod tests {
 
         let result = parse_mdns_payload(
             &payload,
-            "11:22:33:44:55:66".to_string(),
+            parse_mac("11:22:33:44:55:66").unwrap(),
             std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)),
             std::net::IpAddr::V4(MDNS_IPV4_MULTICAST),
         );
 
         assert!(result.is_some());
         let packet = result.unwrap();
-        assert_eq!(packet.source_mac, "11:22:33:44:55:66");
+        assert_eq!(packet.source_mac, parse_mac("11:22:33:44:55:66").unwrap());
         assert!(packet.is_response);
         assert_eq!(packet.answers.len(), 1);
         assert_eq!(packet.answers[0].name, "mydevice.local");
@@ -1753,7 +1819,7 @@ mod tests {
         // Parse it back
         let parsed = parse_mdns_payload(
             &query,
-            "de:ad:be:ef:00:01".to_string(),
+            parse_mac("de:ad:be:ef:00:01").unwrap(),
             std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
             std::net::IpAddr::V4(MDNS_IPV4_MULTICAST),
         );
@@ -1768,7 +1834,7 @@ mod tests {
     #[cfg(feature = "mdns")]
     fn test_mdns_packet_get_ipv4_addresses() {
         let packet = MdnsPacket {
-            source_mac: "00:11:22:33:44:55".to_string(),
+            source_mac: parse_mac("00:11:22:33:44:55").unwrap(),
             source_ip: std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
             dest_ip: std::net::IpAddr::V4(MDNS_IPV4_MULTICAST),
             transaction_id: 0,
@@ -1821,10 +1887,10 @@ mod tests {
         let airplay = registry.lookup("_airplay._tcp");
         assert!(airplay.is_some());
         let airplay = airplay.unwrap();
-        assert_eq!(airplay.vendor, Some("Apple".to_string()));
+        assert_eq!(airplay.vendor, Some(Vendor::Apple));
 
         // Test Google service lookup
-        assert_eq!(registry.get_vendor("_googlecast._tcp"), Some("Google"));
+        assert_eq!(registry.get_vendor("_googlecast._tcp"), Some(&Vendor::Google));
 
         // Test service without vendor
         let http = registry.lookup("_http._tcp");
@@ -1842,7 +1908,10 @@ mod tests {
         let service = registry.lookup("_custom._tcp");
         assert!(service.is_some());
         assert_eq!(service.unwrap().description, "Custom Service");
-        assert_eq!(registry.get_vendor("_custom._tcp"), Some("MyVendor"));
+        assert_eq!(
+            registry.get_vendor("_custom._tcp"),
+            Some(&Vendor::Other("MyVendor".to_string()))
+        );
     }
 
     #[test]
@@ -1894,11 +1963,11 @@ mod tests {
 
         // Setting vendor first time should return true
         assert!(device.set_vendor("Apple"));
-        assert_eq!(device.vendor, Some("Apple".to_string()));
+        assert_eq!(device.vendor, Some(Vendor::Apple));
 
         // Setting vendor again should return false (first wins)
         assert!(!device.set_vendor("Google"));
-        assert_eq!(device.vendor, Some("Apple".to_string()));
+        assert_eq!(device.vendor, Some(Vendor::Apple));
     }
 
     #[test]
@@ -1911,11 +1980,11 @@ mod tests {
 
         // Setting device type first time should return true
         assert!(device.set_device_type("Chromecast"));
-        assert_eq!(device.device_type, Some("Chromecast".to_string()));
+        assert_eq!(device.device_type, Some(DeviceType::Chromecast));
 
         // Setting device type again should return false (first wins)
         assert!(!device.set_device_type("Apple TV"));
-        assert_eq!(device.device_type, Some("Chromecast".to_string()));
+        assert_eq!(device.device_type, Some(DeviceType::Chromecast));
     }
 
     #[test]
@@ -2331,8 +2400,8 @@ mod tests {
         tracker.update_from_dhcpv4(&packet_win);
         {
             let device = tracker.devices.get("11:22:33:44:55:66").unwrap();
-            assert_eq!(device.vendor.as_deref(), Some("Microsoft"));
-            assert_eq!(device.device_type.as_deref(), Some("PC/Windows"));
+            assert_eq!(device.vendor, Some(Vendor::Microsoft));
+            assert_eq!(device.device_type, Some(DeviceType::PcWindows));
         }
 
         // 2. Apple Option 55 Fingerprint: contains 95 (LDAP) and lacks 26/28
@@ -2353,8 +2422,8 @@ mod tests {
         tracker.update_from_dhcpv4(&packet_apple);
         {
             let device = tracker.devices.get("22:33:44:55:66:77").unwrap();
-            assert_eq!(device.vendor.as_deref(), Some("Apple"));
-            assert_eq!(device.device_type.as_deref(), Some("Apple Device"));
+            assert_eq!(device.vendor, Some(Vendor::Apple));
+            assert_eq!(device.device_type, Some(DeviceType::AppleDevice));
         }
 
         // 3. Android Option 55 Fingerprint: contains 26 and 28
@@ -2375,8 +2444,8 @@ mod tests {
         tracker.update_from_dhcpv4(&packet_android);
         {
             let device = tracker.devices.get("33:44:55:66:77:88").unwrap();
-            assert_eq!(device.vendor.as_deref(), Some("Google"));
-            assert_eq!(device.device_type.as_deref(), Some("Android Phone"));
+            assert_eq!(device.vendor, Some(Vendor::Google));
+            assert_eq!(device.device_type, Some(DeviceType::AndroidPhone));
         }
 
         // 4. Windows Option 60 Fingerprint
@@ -2397,8 +2466,8 @@ mod tests {
         tracker.update_from_dhcpv4(&packet_win60);
         {
             let device = tracker.devices.get("44:55:66:77:88:99").unwrap();
-            assert_eq!(device.vendor.as_deref(), Some("Microsoft"));
-            assert_eq!(device.device_type.as_deref(), Some("PC/Windows"));
+            assert_eq!(device.vendor, Some(Vendor::Microsoft));
+            assert_eq!(device.device_type, Some(DeviceType::PcWindows));
         }
 
         // 5. HP Option 60 Fingerprint
@@ -2419,8 +2488,8 @@ mod tests {
         tracker.update_from_dhcpv4(&packet_hp60);
         {
             let device = tracker.devices.get("55:66:77:88:99:aa").unwrap();
-            assert_eq!(device.vendor.as_deref(), Some("HP"));
-            assert_eq!(device.device_type.as_deref(), Some("Printer"));
+            assert_eq!(device.vendor, Some(Vendor::Hp));
+            assert_eq!(device.device_type, Some(DeviceType::Printer));
         }
 
         let _ = std::fs::remove_file(temp_path);
@@ -2465,7 +2534,7 @@ mod tests {
                 source_mac,
                 source_ip,
             } => {
-                assert_eq!(source_mac, "00:11:22:33:44:55");
+                assert_eq!(source_mac, parse_mac("00:11:22:33:44:55").unwrap());
                 assert_eq!(
                     source_ip,
                     std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 50))
@@ -2498,14 +2567,14 @@ mod tests {
 
         let result = parse_mdns_payload(
             &full_payload,
-            "00:11:22:33:44:55".to_string(),
+            parse_mac("00:11:22:33:44:55").unwrap(),
             IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
             IpAddr::V4(Ipv4Addr::new(224, 0, 0, 252)),
         );
 
         assert!(result.is_some());
         let packet = result.unwrap();
-        assert_eq!(packet.source_mac, "00:11:22:33:44:55");
+        assert_eq!(packet.source_mac, parse_mac("00:11:22:33:44:55").unwrap());
         assert_eq!(packet.answers.len(), 1);
         assert_eq!(packet.answers[0].name, "myhost");
 
@@ -2559,8 +2628,8 @@ mod tests {
             let mut tracker = DeviceTracker::new(temp_path).unwrap();
             tracker.update_from_dhcpv4(&packet);
             let device = tracker.devices.get("aa:bb:cc:dd:ee:11").unwrap();
-            assert_eq!(device.vendor.as_deref(), Some("Ubiquiti"));
-            assert_eq!(device.device_type.as_deref(), Some("Network Device"));
+            assert_eq!(device.vendor, Some(Vendor::Ubiquiti));
+            assert_eq!(device.device_type, Some(DeviceType::NetworkDevice));
         }
         let _ = std::fs::remove_file(temp_path);
         let _ = std::fs::remove_file(format!("{}.journal", temp_path));
@@ -2571,71 +2640,71 @@ mod tests {
         // Test Sonos mapping
         assert_eq!(
             DeviceTracker::detect_vendor_from_hostname(Some("sonos-living")),
-            Some("Sonos")
+            Some(Vendor::Sonos)
         );
         assert_eq!(
             DeviceTracker::detect_device_type_from_hostname(Some("sonos-living")),
-            Some("Smart Speaker")
+            Some(DeviceType::SmartSpeaker)
         );
 
         // Test ESP32 mapping
         assert_eq!(
             DeviceTracker::detect_vendor_from_hostname(Some("esp32-weather")),
-            Some("Espressif")
+            Some(Vendor::Espressif)
         );
         assert_eq!(
             DeviceTracker::detect_device_type_from_hostname(Some("esp32-weather")),
-            Some("IoT Device")
+            Some(DeviceType::IotDevice)
         );
 
         // Test HP printer mapping
         assert_eq!(
             DeviceTracker::detect_vendor_from_hostname(Some("hp-printer-12")),
-            Some("HP")
+            Some(Vendor::Hp)
         );
         assert_eq!(
             DeviceTracker::detect_device_type_from_hostname(Some("hp-printer-12")),
-            Some("Printer")
+            Some(DeviceType::Printer)
         );
 
         // Test Kindle mapping
         assert_eq!(
             DeviceTracker::detect_vendor_from_hostname(Some("kindle-reader")),
-            Some("Amazon")
+            Some(Vendor::Amazon)
         );
         assert_eq!(
             DeviceTracker::detect_device_type_from_hostname(Some("kindle-reader")),
-            Some("e-Reader")
+            Some(DeviceType::EReader)
         );
 
         // Test Synology mapping
         assert_eq!(
             DeviceTracker::detect_vendor_from_hostname(Some("synology-nas")),
-            Some("Synology")
+            Some(Vendor::Synology)
         );
         assert_eq!(
             DeviceTracker::detect_device_type_from_hostname(Some("synology-nas")),
-            Some("Storage (NAS)")
+            Some(DeviceType::StorageNas)
         );
 
         // Test PlayStation mapping
         assert_eq!(
             DeviceTracker::detect_vendor_from_hostname(Some("playstation-5")),
-            Some("Sony")
+            Some(Vendor::Sony)
         );
         assert_eq!(
             DeviceTracker::detect_device_type_from_hostname(Some("playstation-5")),
-            Some("Game Console")
+            Some(DeviceType::GameConsole)
         );
 
         // Test Inspiron laptop mapping
         assert_eq!(
             DeviceTracker::detect_vendor_from_hostname(Some("VD-Inspiron")),
-            Some("Dell")
+            Some(Vendor::Dell)
         );
         assert_eq!(
             DeviceTracker::detect_device_type_from_hostname(Some("VD-Inspiron")),
-            Some("Laptop")
+            Some(DeviceType::Laptop)
         );
     }
 
@@ -2650,7 +2719,7 @@ mod tests {
 
         // 1. Apple TV TXT record (key: model)
         let packet_appletv = MdnsPacket {
-            source_mac: "00:11:22:33:44:55".to_string(),
+            source_mac: parse_mac("00:11:22:33:44:55").unwrap(),
             source_ip: std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)),
             dest_ip: std::net::IpAddr::V4(Ipv4Addr::new(224, 0, 0, 251)),
             transaction_id: 1,
@@ -2668,13 +2737,13 @@ mod tests {
         tracker.update_from_mdns(&packet_appletv);
         {
             let device = tracker.devices.get("00:11:22:33:44:55").unwrap();
-            assert_eq!(device.vendor.as_deref(), Some("Apple"));
-            assert_eq!(device.device_type.as_deref(), Some("Apple TV"));
+            assert_eq!(device.vendor, Some(Vendor::Apple));
+            assert_eq!(device.device_type, Some(DeviceType::AppleTv));
         }
 
         // 2. Sonos TXT record (key: md)
         let packet_sonos = MdnsPacket {
-            source_mac: "00:11:22:33:44:66".to_string(),
+            source_mac: parse_mac("00:11:22:33:44:66").unwrap(),
             source_ip: std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 1, 51)),
             dest_ip: std::net::IpAddr::V4(Ipv4Addr::new(224, 0, 0, 251)),
             transaction_id: 2,
@@ -2692,13 +2761,13 @@ mod tests {
         tracker.update_from_mdns(&packet_sonos);
         {
             let device = tracker.devices.get("00:11:22:33:44:66").unwrap();
-            assert_eq!(device.vendor.as_deref(), Some("Sonos"));
-            assert_eq!(device.device_type.as_deref(), Some("Smart Speaker"));
+            assert_eq!(device.vendor, Some(Vendor::Sonos));
+            assert_eq!(device.device_type, Some(DeviceType::SmartSpeaker));
         }
 
         // 3. Printer TXT record (key: ty)
         let packet_printer = MdnsPacket {
-            source_mac: "00:11:22:33:44:77".to_string(),
+            source_mac: parse_mac("00:11:22:33:44:77").unwrap(),
             source_ip: std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 1, 52)),
             dest_ip: std::net::IpAddr::V4(Ipv4Addr::new(224, 0, 0, 251)),
             transaction_id: 3,
@@ -2716,8 +2785,8 @@ mod tests {
         tracker.update_from_mdns(&packet_printer);
         {
             let device = tracker.devices.get("00:11:22:33:44:77").unwrap();
-            assert_eq!(device.vendor.as_deref(), Some("HP"));
-            assert_eq!(device.device_type.as_deref(), Some("Printer"));
+            assert_eq!(device.vendor, Some(Vendor::Hp));
+            assert_eq!(device.device_type, Some(DeviceType::Printer));
         }
 
         let _ = std::fs::remove_file(temp_path);
@@ -2743,7 +2812,7 @@ mod tests {
 
         let result = parse_nbns_payload(
             &payload,
-            "aa:bb:cc:dd:ee:ff".to_string(),
+            parse_mac("aa:bb:cc:dd:ee:ff").unwrap(),
             std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
         );
 
@@ -2761,8 +2830,8 @@ mod tests {
             tracker.update_from_nbns(&packet);
             let device = tracker.devices.get("aa:bb:cc:dd:ee:ff").unwrap();
             assert_eq!(device.hostname.as_deref(), Some("SAMBA"));
-            assert_eq!(device.vendor.as_deref(), Some("Linux"));
-            assert_eq!(device.device_type.as_deref(), Some("File Server"));
+            assert_eq!(device.vendor, Some(Vendor::Linux));
+            assert_eq!(device.device_type, Some(DeviceType::FileServer));
         }
         let _ = std::fs::remove_file(temp_path);
         let _ = std::fs::remove_file(format!("{}.journal", temp_path));
@@ -2785,14 +2854,14 @@ mod tests {
 
         let result = parse_wsd_payload(
             xml_payload.as_bytes(),
-            "00:11:22:33:44:55".to_string(),
+            parse_mac("00:11:22:33:44:55").unwrap(),
             std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
         );
 
         assert!(result.is_some());
         let packet = result.unwrap();
-        assert_eq!(packet.device_type, Some("IP Camera".to_string()));
-        assert_eq!(packet.vendor, Some("Canon".to_string()));
+        assert_eq!(packet.device_type, Some(DeviceType::IpCamera));
+        assert_eq!(packet.vendor, Some(Vendor::Canon));
 
         // Also test how DeviceTracker updates from WS-Discovery
         let temp_path = "/tmp/lanwatch_test_wsd_device.csv";
@@ -2802,8 +2871,8 @@ mod tests {
             let mut tracker = DeviceTracker::new(temp_path).unwrap();
             tracker.update_from_wsd(&packet);
             let device = tracker.devices.get("00:11:22:33:44:55").unwrap();
-            assert_eq!(device.vendor.as_deref(), Some("Canon"));
-            assert_eq!(device.device_type.as_deref(), Some("IP Camera"));
+            assert_eq!(device.vendor, Some(Vendor::Canon));
+            assert_eq!(device.device_type, Some(DeviceType::IpCamera));
         }
         let _ = std::fs::remove_file(temp_path);
         let _ = std::fs::remove_file(format!("{}.journal", temp_path));
@@ -2843,7 +2912,7 @@ mod tests {
                 source_mac,
                 source_ip: ip,
             } => {
-                assert_eq!(source_mac, "00:11:22:33:44:55");
+                assert_eq!(source_mac, parse_mac("00:11:22:33:44:55").unwrap());
                 assert_eq!(ip, IpAddr::V6(source_ip));
             }
             _ => panic!("Expected NetworkEvent::Ndp"),
@@ -2889,7 +2958,7 @@ mod tests {
         // TLV 0: End
         payload.extend_from_slice(&[0x00, 0x00]);
 
-        let packet = parse_lldp_payload(&payload, "00:11:22:33:44:55".to_string()).unwrap();
+        let packet = parse_lldp_payload(&payload, parse_mac("00:11:22:33:44:55").unwrap()).unwrap();
         assert_eq!(packet.system_name.as_deref(), Some("MySwitch.net"));
         assert_eq!(packet.port_id.as_deref(), Some("eth0"));
         assert_eq!(
@@ -2907,8 +2976,8 @@ mod tests {
             assert!(is_new);
             let device = tracker.devices.get("00:11:22:33:44:55").unwrap();
             assert_eq!(device.hostname.as_deref(), Some("MySwitch.net"));
-            assert_eq!(device.vendor.as_deref(), Some("Cisco"));
-            assert_eq!(device.device_type.as_deref(), Some("Network Device"));
+            assert_eq!(device.vendor, Some(Vendor::Cisco));
+            assert_eq!(device.device_type, Some(DeviceType::NetworkDevice));
         }
         let _ = std::fs::remove_file(temp_path);
         let _ = std::fs::remove_file(format!("{}.journal", temp_path));
@@ -2957,7 +3026,7 @@ mod tests {
         payload.extend_from_slice(&((platform.len() + 4) as u16).to_be_bytes());
         payload.extend_from_slice(platform);
 
-        let packet = parse_cdp_payload(&payload, "00:aa:bb:cc:dd:ee".to_string()).unwrap();
+        let packet = parse_cdp_payload(&payload, parse_mac("00:aa:bb:cc:dd:ee").unwrap()).unwrap();
         assert_eq!(packet.device_id.as_deref(), Some("Cisco-Switch-3560"));
         assert_eq!(packet.port_id.as_deref(), Some("GigabitEthernet0/1"));
         assert_eq!(packet.platform.as_deref(), Some("cisco WS-C3560G-24TS"));
@@ -2976,8 +3045,8 @@ mod tests {
             assert!(is_new);
             let device = tracker.devices.get("00:aa:bb:cc:dd:ee").unwrap();
             assert_eq!(device.hostname.as_deref(), Some("Cisco-Switch-3560"));
-            assert_eq!(device.vendor.as_deref(), Some("Cisco"));
-            assert_eq!(device.device_type.as_deref(), Some("Switch"));
+            assert_eq!(device.vendor, Some(Vendor::Cisco));
+            assert_eq!(device.device_type, Some(DeviceType::Switch));
         }
         let _ = std::fs::remove_file(temp_path);
         let _ = std::fs::remove_file(format!("{}.journal", temp_path));
@@ -3089,7 +3158,7 @@ mod tests {
             let is_new = tracker.update_from_dhcpv6(&packet);
             assert!(is_new);
             let device = tracker.devices.get("00:11:22:33:44:55").unwrap();
-            assert_eq!(device.vendor.as_deref(), Some("Microsoft"));
+            assert_eq!(device.vendor, Some(Vendor::Microsoft));
         }
         let _ = std::fs::remove_file(temp_path);
         let _ = std::fs::remove_file(format!("{}.journal", temp_path));
@@ -3156,7 +3225,7 @@ mod tests {
         {
             let mut tracker = DeviceTracker::new(temp_path).unwrap();
             let packet = LldpPacket {
-                source_mac: "dc:69:b5:a5:8c:a0".to_string(),
+                source_mac: parse_mac("dc:69:b5:a5:8c:a0").unwrap(),
                 system_name: Some("eero".to_string()),
                 system_description: Some("eero Pro 6E GGB1UD22435506MW".to_string()),
                 port_id: Some("2".to_string()),
@@ -3171,8 +3240,8 @@ mod tests {
                 device.system_description.as_deref(),
                 Some("eero Pro 6E GGB1UD22435506MW")
             );
-            assert_eq!(device.vendor.as_deref(), Some("eero inc."));
-            assert_eq!(device.device_type.as_deref(), Some("Router"));
+            assert_eq!(device.vendor, Some(Vendor::Eero));
+            assert_eq!(device.device_type, Some(DeviceType::Router));
             assert_eq!(device.hostname.as_deref(), Some("eero"));
         }
 
@@ -3244,11 +3313,11 @@ mod tests {
         payload[32] = 3; // msg_type = 3
 
         let source_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10));
-        let result = parse_lifx_payload(&payload, "11:22:33:44:55:66".to_string(), source_ip);
+        let result = parse_lifx_payload(&payload, parse_mac("11:22:33:44:55:66").unwrap(), source_ip);
         assert!(result.is_some());
         let packet = result.unwrap();
-        assert_eq!(packet.source_mac, "11:22:33:44:55:66");
-        assert_eq!(packet.target_mac, "aa:bb:cc:dd:ee:ff");
+        assert_eq!(packet.source_mac, parse_mac("11:22:33:44:55:66").unwrap());
+        assert_eq!(packet.target_mac, parse_mac("aa:bb:cc:dd:ee:ff").unwrap());
         assert_eq!(packet.msg_type, 3);
         assert_eq!(packet.size, 36);
         assert_eq!(packet.source_ip, source_ip);
@@ -3266,14 +3335,14 @@ mod tests {
         txt.insert("pid".to_string(), "0x0001");
 
         let meta = extract_iot_metadata(&services, &txt);
-        assert_eq!(meta.vendor.as_deref(), Some("Google"));
-        assert_eq!(meta.device_type.as_deref(), Some("Matter Smart Device"));
+        assert_eq!(meta.vendor, Some(Vendor::Google));
+        assert_eq!(meta.device_type, Some(DeviceType::MatterSmartDevice));
         assert_eq!(meta.model.as_deref(), Some("Matter Device (VID: 0x10B1, PID: 0x0001)"));
 
         // Test with dt = 769 (Thermostat)
         txt.insert("dt".to_string(), "769");
         let meta2 = extract_iot_metadata(&services, &txt);
-        assert_eq!(meta2.device_type.as_deref(), Some("Thermostat"));
+        assert_eq!(meta2.device_type, Some(DeviceType::Thermostat));
     }
 
     #[test]
@@ -3289,8 +3358,8 @@ mod tests {
         txt.insert("sf".to_string(), "1"); // Unpaired flag
 
         let meta = extract_iot_metadata(&services, &txt);
-        assert_eq!(meta.vendor.as_deref(), Some("Eve Systems"));
-        assert_eq!(meta.device_type.as_deref(), Some("Outlet"));
+        assert_eq!(meta.vendor, Some(Vendor::EveSystems));
+        assert_eq!(meta.device_type, Some(DeviceType::Outlet));
         assert_eq!(meta.model.as_deref(), Some("Eve Energy"));
         assert_eq!(meta.status.as_deref(), Some("Unpaired / Pairing Mode"));
     }
@@ -3305,9 +3374,9 @@ mod tests {
         {
             let mut tracker = DeviceTracker::new(temp_path).unwrap();
             let packet = crate::parser::iot::LifxPacket {
-                source_mac: "11:22:33:44:55:66".to_string(),
+                source_mac: parse_mac("11:22:33:44:55:66").unwrap(),
                 source_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 55)),
-                target_mac: "00:00:00:00:00:00".to_string(),
+                target_mac: parse_mac("00:00:00:00:00:00").unwrap(),
                 msg_type: 3,
                 size: 36,
             };
@@ -3316,8 +3385,8 @@ mod tests {
             assert!(updates > 0);
 
             let device = tracker.devices.get("11:22:33:44:55:66").unwrap();
-            assert_eq!(device.vendor.as_deref(), Some("LIFX"));
-            assert_eq!(device.device_type.as_deref(), Some("Lightbulb"));
+            assert_eq!(device.vendor, Some(Vendor::Lifx));
+            assert_eq!(device.device_type, Some(DeviceType::Lightbulb));
             assert_eq!(device.ip_address, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 55)));
             assert_eq!(device.system_description.as_deref(), Some("LIFX device (msg_type: 3)"));
         }
@@ -3357,10 +3426,10 @@ mod tests {
         payload.extend_from_slice(b"temp");
 
         let source_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10));
-        let result = parse_coap_payload(&payload, "11:22:33:44:55:66".to_string(), source_ip);
+        let result = parse_coap_payload(&payload, parse_mac("11:22:33:44:55:66").unwrap(), source_ip);
         assert!(result.is_some());
         let packet = result.unwrap();
-        assert_eq!(packet.source_mac, "11:22:33:44:55:66");
+        assert_eq!(packet.source_mac, parse_mac("11:22:33:44:55:66").unwrap());
         assert_eq!(packet.code, 1);
         assert_eq!(packet.message_id, 0x1234);
         assert_eq!(packet.payload.as_deref(), Some("temp"));
@@ -3397,10 +3466,10 @@ mod tests {
         payload.extend_from_slice(&dib);
 
         let source_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10));
-        let result = parse_knx_payload(&payload, "11:22:33:44:55:66".to_string(), source_ip);
+        let result = parse_knx_payload(&payload, parse_mac("11:22:33:44:55:66").unwrap(), source_ip);
         assert!(result.is_some());
         let packet = result.unwrap();
-        assert_eq!(packet.source_mac, "11:22:33:44:55:66");
+        assert_eq!(packet.source_mac, parse_mac("11:22:33:44:55:66").unwrap());
         assert_eq!(packet.service_type, 0x0202);
         assert_eq!(packet.friendly_name.as_deref(), Some("KNX Thermostat"));
         assert_eq!(packet.serial_number.as_deref(), Some("001122334455"));
@@ -3417,7 +3486,7 @@ mod tests {
         {
             let mut tracker = DeviceTracker::new(temp_path).unwrap();
             let packet = crate::parser::iot::CoapPacket {
-                source_mac: "11:22:33:44:55:66".to_string(),
+                source_mac: parse_mac("11:22:33:44:55:66").unwrap(),
                 source_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 55)),
                 code: 69,
                 message_id: 1234,
@@ -3428,7 +3497,7 @@ mod tests {
             assert!(updates > 0);
 
             let device = tracker.devices.get("11:22:33:44:55:66").unwrap();
-            assert_eq!(device.device_type.as_deref(), Some("Sensor"));
+            assert_eq!(device.device_type, Some(DeviceType::Sensor));
             assert_eq!(device.ip_address, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 55)));
             assert_eq!(device.system_description.as_deref(), Some("temp sensor"));
         }
@@ -3447,7 +3516,7 @@ mod tests {
         {
             let mut tracker = DeviceTracker::new(temp_path).unwrap();
             let packet = crate::parser::iot::KnxPacket {
-                source_mac: "11:22:33:44:55:66".to_string(),
+                source_mac: parse_mac("11:22:33:44:55:66").unwrap(),
                 source_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 55)),
                 service_type: 0x0202,
                 friendly_name: Some("KNX Light".to_string()),
@@ -3458,8 +3527,8 @@ mod tests {
             assert!(updates > 0);
 
             let device = tracker.devices.get("11:22:33:44:55:66").unwrap();
-            assert_eq!(device.vendor.as_deref(), Some("KNX"));
-            assert_eq!(device.device_type.as_deref(), Some("Home Automation"));
+            assert_eq!(device.vendor, Some(Vendor::Knx));
+            assert_eq!(device.device_type, Some(DeviceType::HomeAutomation));
             assert_eq!(device.hostname.as_deref(), Some("KNX Light"));
             assert_eq!(
                 device.system_description.as_deref(),
@@ -3486,11 +3555,11 @@ mod tests {
     fn test_parse_sadp_payload() {
         let payload = r#"<?xml version="1.0" encoding="utf-8"?><Response><DeviceType>DS-2CD2132F-I</DeviceType><DeviceDescription>IP Camera</DeviceDescription><DeviceSN>DS-2CD2132F-I20140922AAWR481234567</DeviceSN><IPv4Address>192.168.1.64</IPv4Address><MAC>70:3d:15:ab:cd:ef</MAC></Response>"#.as_bytes();
         let source_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 64));
-        let result = crate::parser::cctv::parse_sadp_payload(payload, "00:11:22:33:44:55".to_string(), source_ip);
+        let result = crate::parser::cctv::parse_sadp_payload(payload, parse_mac("00:11:22:33:44:55").unwrap(), source_ip);
         assert!(result.is_some());
         let packet = result.unwrap();
-        assert_eq!(packet.source_mac, "70:3d:15:ab:cd:ef");
-        assert_eq!(packet.vendor, "Hikvision");
+        assert_eq!(packet.source_mac, parse_mac("70:3d:15:ab:cd:ef").unwrap());
+        assert_eq!(packet.vendor, Vendor::Hikvision);
         assert_eq!(packet.model.as_deref(), Some("DS-2CD2132F-I"));
         assert_eq!(packet.serial_number.as_deref(), Some("DS-2CD2132F-I20140922AAWR481234567"));
         assert_eq!(packet.protocol, "SADP");
@@ -3501,11 +3570,11 @@ mod tests {
     fn test_parse_dahua_payload() {
         let payload = r#"{ "method": "client.notifyDeviceIP", "params": { "mac": "00:1a:2b:3c:4d:5e", "ip": "192.168.1.108", "deviceType": "IPC-HFW4431R-ZS", "serial": "XYZ98765" } }"#.as_bytes();
         let source_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 108));
-        let result = crate::parser::cctv::parse_dahua_payload(payload, "00:11:22:33:44:55".to_string(), source_ip);
+        let result = crate::parser::cctv::parse_dahua_payload(payload, parse_mac("00:11:22:33:44:55").unwrap(), source_ip);
         assert!(result.is_some());
         let packet = result.unwrap();
-        assert_eq!(packet.source_mac, "00:1a:2b:3c:4d:5e");
-        assert_eq!(packet.vendor, "Dahua");
+        assert_eq!(packet.source_mac, parse_mac("00:1a:2b:3c:4d:5e").unwrap());
+        assert_eq!(packet.vendor, Vendor::Dahua);
         assert_eq!(packet.model.as_deref(), Some("IPC-HFW4431R-ZS"));
         assert_eq!(packet.serial_number.as_deref(), Some("XYZ98765"));
         assert_eq!(packet.protocol, "Dahua Discovery");
@@ -3521,9 +3590,9 @@ mod tests {
         {
             let mut tracker = DeviceTracker::new(temp_path).unwrap();
             let packet = crate::parser::cctv::CctvPacket {
-                source_mac: "11:22:33:44:55:66".to_string(),
+                source_mac: parse_mac("11:22:33:44:55:66").unwrap(),
                 source_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 55)),
-                vendor: "Hikvision".to_string(),
+                vendor: Vendor::Hikvision,
                 model: Some("DS-ABC1234".to_string()),
                 serial_number: Some("SN987654".to_string()),
                 protocol: "SADP".to_string(),
@@ -3533,8 +3602,8 @@ mod tests {
             assert!(updates > 0);
 
             let device = tracker.devices.get("11:22:33:44:55:66").unwrap();
-            assert_eq!(device.vendor.as_deref(), Some("Hikvision"));
-            assert_eq!(device.device_type.as_deref(), Some("IP Camera"));
+            assert_eq!(device.vendor, Some(Vendor::Hikvision));
+            assert_eq!(device.device_type, Some(DeviceType::IpCamera));
             assert_eq!(device.hostname.as_deref(), Some("DS-ABC1234"));
             assert_eq!(
                 device.system_description.as_deref(),
@@ -3563,14 +3632,14 @@ mod tests {
         let source_ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 100));
         let result = crate::parser::mqtt_gdm::parse_mqtt_connect(
             &payload,
-            "00:11:22:33:44:55".to_string(),
+            parse_mac("00:11:22:33:44:55").unwrap(),
             source_ip,
         );
         assert!(result.is_some());
         let packet = result.unwrap();
         assert_eq!(packet.client_id, "mycli");
         assert_eq!(packet.protocol, "MQTT");
-        assert_eq!(packet.source_mac, "00:11:22:33:44:55");
+        assert_eq!(packet.source_mac, parse_mac("00:11:22:33:44:55").unwrap());
         assert_eq!(packet.source_ip, source_ip);
     }
 
@@ -3588,14 +3657,14 @@ mod tests {
         let source_ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 101));
         let result = crate::parser::mqtt_gdm::parse_mqtt_sn_connect(
             &payload,
-            "00:11:22:33:44:66".to_string(),
+            parse_mac("00:11:22:33:44:66").unwrap(),
             source_ip,
         );
         assert!(result.is_some());
         let packet = result.unwrap();
         assert_eq!(packet.client_id, "mysncli");
         assert_eq!(packet.protocol, "MQTT-SN");
-        assert_eq!(packet.source_mac, "00:11:22:33:44:66");
+        assert_eq!(packet.source_mac, parse_mac("00:11:22:33:44:66").unwrap());
         assert_eq!(packet.source_ip, source_ip);
     }
 
@@ -3606,7 +3675,7 @@ mod tests {
         let source_ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 102));
         let result = crate::parser::mqtt_gdm::parse_gdm_payload(
             payload,
-            "00:11:22:33:44:77".to_string(),
+            parse_mac("00:11:22:33:44:77").unwrap(),
             source_ip,
         );
         assert!(result.is_some());
@@ -3615,7 +3684,7 @@ mod tests {
         assert_eq!(packet.port, Some(32400));
         assert_eq!(packet.product.as_deref(), Some("Plex Media Server"));
         assert_eq!(packet.resource_id.as_deref(), Some("12345678-abcd-ef01-2345-6789abcdef01"));
-        assert_eq!(packet.source_mac, "00:11:22:33:44:77");
+        assert_eq!(packet.source_mac, parse_mac("00:11:22:33:44:77").unwrap());
         assert_eq!(packet.source_ip, source_ip);
     }
 
@@ -3629,7 +3698,7 @@ mod tests {
         {
             let mut tracker = DeviceTracker::new(temp_path).unwrap();
             let packet = crate::parser::mqtt_gdm::MqttPacket {
-                source_mac: "11:22:33:44:55:66".to_string(),
+                source_mac: parse_mac("11:22:33:44:55:66").unwrap(),
                 source_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 55)),
                 client_id: "test-client".to_string(),
                 protocol: "MQTT".to_string(),
@@ -3639,7 +3708,7 @@ mod tests {
             assert!(updates > 0);
 
             let device = tracker.devices.get("11:22:33:44:55:66").unwrap();
-            assert_eq!(device.device_type.as_deref(), Some("IoT Device"));
+            assert_eq!(device.device_type, Some(DeviceType::IotDevice));
             assert_eq!(
                 device.system_description.as_deref(),
                 Some("MQTT Client ID: test-client via MQTT")
@@ -3660,7 +3729,7 @@ mod tests {
         {
             let mut tracker = DeviceTracker::new(temp_path).unwrap();
             let packet = crate::parser::mqtt_gdm::GdmPacket {
-                source_mac: "22:33:44:55:66:77".to_string(),
+                source_mac: parse_mac("22:33:44:55:66:77").unwrap(),
                 source_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 56)),
                 name: Some("PlexServer".to_string()),
                 product: Some("Plex Media Server".to_string()),
@@ -3672,8 +3741,8 @@ mod tests {
             assert!(updates > 0);
 
             let device = tracker.devices.get("22:33:44:55:66:77").unwrap();
-            assert_eq!(device.vendor.as_deref(), Some("Plex"));
-            assert_eq!(device.device_type.as_deref(), Some("Media Server"));
+            assert_eq!(device.vendor, Some(Vendor::Plex));
+            assert_eq!(device.device_type, Some(DeviceType::MediaServer));
             assert_eq!(device.hostname.as_deref(), Some("PlexServer"));
             assert_eq!(
                 device.system_description.as_deref(),
@@ -3707,7 +3776,7 @@ mod tests {
         let result = parse_arp_packet(&arp_payload);
         assert!(result.is_some());
         let (mac, ip) = result.unwrap();
-        assert_eq!(mac, "00:11:22:33:44:55");
+        assert_eq!(mac, parse_mac("00:11:22:33:44:55").unwrap());
         assert_eq!(ip, std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 10)));
 
         // Test invalid packet
@@ -3725,22 +3794,22 @@ mod tests {
         use crate::parser::network::parse_ndp_packet;
         let ndp_payload = vec![135, 0, 0, 0, 0, 0, 0, 0]; // type 135 (solicitation)
         let source_ip = std::net::Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
-        let result = parse_ndp_packet(&ndp_payload, source_ip, "00:11:22:33:44:55".to_string());
+        let result = parse_ndp_packet(&ndp_payload, source_ip, parse_mac("00:11:22:33:44:55").unwrap());
         assert!(result.is_some());
         let (mac, ip) = result.unwrap();
-        assert_eq!(mac, "00:11:22:33:44:55");
+        assert_eq!(mac, parse_mac("00:11:22:33:44:55").unwrap());
         assert_eq!(ip, std::net::IpAddr::V6(source_ip));
 
         // Test invalid payload size
         let invalid = vec![135, 0];
-        assert!(parse_ndp_packet(&invalid, source_ip, "00:11:22:33:44:55".to_string()).is_none());
+        assert!(parse_ndp_packet(&invalid, source_ip, parse_mac("00:11:22:33:44:55").unwrap()).is_none());
 
         // Test invalid ICMPv6 type (e.g. 1)
         let invalid_type = vec![1, 0, 0, 0, 0, 0, 0, 0];
-        assert!(parse_ndp_packet(&invalid_type, source_ip, "00:11:22:33:44:55".to_string()).is_none());
+        assert!(parse_ndp_packet(&invalid_type, source_ip, parse_mac("00:11:22:33:44:55").unwrap()).is_none());
 
         // Test unspecified source IP
         let unspecified = std::net::Ipv6Addr::UNSPECIFIED;
-        assert!(parse_ndp_packet(&ndp_payload, unspecified, "00:11:22:33:44:55".to_string()).is_none());
+        assert!(parse_ndp_packet(&ndp_payload, unspecified, parse_mac("00:11:22:33:44:55").unwrap()).is_none());
     }
 }

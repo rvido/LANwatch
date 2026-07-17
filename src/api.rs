@@ -387,8 +387,8 @@ mod tests {
                 "192.168.1.100".parse().unwrap(),
                 Some("test-device".to_string()),
             );
-            device.device_type = Some("Laptop".to_string());
-            device.vendor = Some("Dell".to_string());
+            device.device_type = Some(crate::types::DeviceType::Laptop);
+            device.vendor = Some(crate::types::Vendor::Dell);
             let mac = device.mac_address.clone();
             guard.devices.insert(mac.clone(), device);
             guard.dirty_devices.lock().unwrap().insert(mac);
