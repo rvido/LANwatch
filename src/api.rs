@@ -514,7 +514,9 @@ mod tests {
         {
             let mut stream = TcpStream::connect(&bound_addr).unwrap();
             stream
-                .write_all(b"GET /logo.png HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .write_all(
+                    b"GET /logo.png HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                )
                 .unwrap();
             let mut response = Vec::new();
             stream.read_to_end(&mut response).unwrap();
