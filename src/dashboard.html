@@ -57,14 +57,12 @@
             gap: 1rem;
         }
 
-        .logo-icon {
-            background: linear-gradient(135deg, var(--primary), var(--accent-blue));
-            padding: 0.75rem;
-            border-radius: 12px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            box-shadow: 0 4px 20px rgba(139, 92, 246, 0.3);
+        .logo-img {
+            width: 52px;
+            height: 52px;
+            display: block;
+            object-fit: contain;
+            filter: drop-shadow(0 2px 12px rgba(139, 92, 246, 0.35));
         }
 
         h1 {
@@ -74,6 +72,20 @@
             background: linear-gradient(to right, #ffffff, #a1a1aa);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
+        }
+
+        .version-badge {
+            display: inline-block;
+            vertical-align: middle;
+            font-size: 0.7rem;
+            font-weight: 700;
+            letter-spacing: 0;
+            color: var(--primary);
+            background: var(--primary-glow);
+            border: 1px solid rgba(139, 92, 246, 0.25);
+            padding: 0.1rem 0.4rem;
+            border-radius: 6px;
+            -webkit-text-fill-color: var(--primary);
         }
 
         .pulse-badge {
@@ -428,16 +440,9 @@
 <body>
     <header>
         <div class="logo-section">
-            <div class="logo-icon">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                    <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
-                    <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
-                    <line x1="6" y1="6" x2="6.01" y2="6"></line>
-                    <line x1="6" y1="18" x2="6.01" y2="18"></line>
-                </svg>
-            </div>
+            <img class="logo-img" src="/logo.png" width="52" height="52" alt="LANwatch logo" />
             <div>
-                <h1>LANwatch Dashboard</h1>
+                <h1>LANwatch Dashboard <span class="version-badge" title="LANwatch release version">v{{VERSION}}</span></h1>
                 <p style="color: var(--text-muted); font-size: 0.85rem;">Local Network Scanner & Device Registry</p>
             </div>
         </div>

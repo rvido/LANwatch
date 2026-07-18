@@ -112,6 +112,7 @@ impl ApiServer {
             ("GET", "/devices/count") | ("GET", "/device/count") => self.handle_device_count(),
             ("GET", "/health") => self.handle_health(),
             ("GET", "/") => self.handle_root(),
+            ("GET", "/logo.png") => self.handle_logo(),
             ("GET", p)
                 if p == "/devices"
                     || p.starts_with("/devices?")
@@ -311,8 +312,19 @@ impl ApiServer {
             .with_header(tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap())
     }
 
+    /// Serves the LANwatch logo, compiled into the binary so the dashboard is
+    /// fully self-contained with no external asset dependencies.
+    fn handle_logo(&self) -> Response<std::io::Cursor<Vec<u8>>> {
+        let bytes = include_bytes!("../assets/lanwatch_logo_icon.png").to_vec();
+        Response::from_data(bytes)
+            .with_header(tiny_http::Header::from_bytes("Content-Type", "image/png").unwrap())
+            .with_header(
+                tiny_http::Header::from_bytes("Cache-Control", "public, max-age=86400").unwrap(),
+            )
+    }
+
     fn handle_root(&self) -> Response<std::io::Cursor<Vec<u8>>> {
-        let html = include_str!("dashboard.html");
+        let html = include_str!("dashboard.html").replace("{{VERSION}}", env!("CARGO_PKG_VERSION"));
         Response::from_string(html).with_header(
             tiny_http::Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap(),
         )
@@ -491,6 +503,38 @@ mod tests {
             stream.read_to_string(&mut response).unwrap();
             let body = get_http_body(&response);
             assert!(body.contains("<!DOCTYPE html>"));
+            // Release version is injected into the dashboard and the placeholder is gone.
+            assert!(body.contains(&format!("v{}", env!("CARGO_PKG_VERSION"))));
+            assert!(!body.contains("{{VERSION}}"));
+            // The dashboard references the embedded logo endpoint.
+            assert!(body.contains("/logo.png"));
+        }
+
+        // 7b. Test /logo.png (embedded binary asset)
+        {
+            let mut stream = TcpStream::connect(&bound_addr).unwrap();
+            stream
+                .write_all(b"GET /logo.png HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).unwrap();
+
+            let sep = b"\r\n\r\n";
+            let header_end = response
+                .windows(sep.len())
+                .position(|w| w == sep)
+                .expect("response must have a header/body separator");
+            let headers = String::from_utf8_lossy(&response[..header_end]);
+            assert!(headers.contains("200 OK"));
+            assert!(headers.contains("Content-Type: image/png"));
+
+            // Body may be chunk-framed; confirm the PNG magic number is present.
+            let body = &response[header_end + sep.len()..];
+            let png_magic = b"\x89PNG\r\n\x1a\n";
+            assert!(
+                body.windows(png_magic.len()).any(|w| w == png_magic),
+                "logo response body must contain PNG data"
+            );
         }
 
         // 8. Test parse_query_params
