@@ -127,7 +127,10 @@ fn main() {
                 Some((mac, type_str)) => {
                     tracker.add_override(mac, Some(DeviceType::from(type_str)), None);
                 }
-                None => eprintln!("Warning: Ignoring malformed --override '{}' (expected MAC=Type)", spec),
+                None => eprintln!(
+                    "Warning: Ignoring malformed --override '{}' (expected MAC=Type)",
+                    spec
+                ),
             }
         }
         if tracker.override_count() > 0 {
@@ -1230,9 +1233,7 @@ fn print_usage() {
     println!(
         "  --override <MAC=Type>  Pin a device's type (e.g. c0:84:7d:b8:58:5e=\"Security System\"); repeatable"
     );
-    println!(
-        "  --overrides <FILE>     Load per-device overrides (lines: MAC,DeviceType[,Vendor])"
-    );
+    println!("  --overrides <FILE>     Load per-device overrides (lines: MAC,DeviceType[,Vendor])");
     #[cfg(feature = "http-api")]
     {
         println!("  -a, --api <ADDR:PORT>  Start HTTP API server (e.g., 127.0.0.1:8080)");

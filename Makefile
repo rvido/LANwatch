@@ -48,15 +48,15 @@ fmt:
 	$(CARGO) fmt --all
 
 ## fmt-check: Check if codebase is formatted
-fmt-check:
-	$(CARGO) fmt --all -- --check
+fmt-check: fmt
+	$(CARGO) fmt --check
 
 ## clippy: Lint the project with clippy with warnings treated as errors
 clippy:
 	$(CARGO) clippy --all-targets --all-features -- -D warnings
 
 ## check: Check codebase quickly
-check: fmt fmt-check clippy
+check: fmt-check clippy
 	$(CARGO) check --all-features
 
 ## examples: Build all example binaries with all features enabled
