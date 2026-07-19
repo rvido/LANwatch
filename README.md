@@ -272,7 +272,13 @@ When started with `--api` or `--api-default`, the tool exposes a REST API for qu
 | `/devices` | GET | List all devices as JSON (sorted by last_seen) |
 | `/devices/{mac}` | GET | Get a specific device by MAC address |
 | `/devices/count` | GET | Get device count |
+| `/devices/{mac}` | DELETE | Remove a single device by MAC address |
+| `/devices` | DELETE | Remove all tracked devices (flush) |
 | `/health` | GET | Health check endpoint |
+
+> **Note:** Removal only clears current state (in-memory and the database row). Discovery
+> is passive and keyed solely by MAC address, so a device still active on the LAN will simply
+> reappear as a new entry the next time it's observed (DHCP renewal, ARP, mDNS, etc.).
 
 **Example Requests:**
 
@@ -288,6 +294,12 @@ curl http://localhost:3000/devices/AA:BB:CC:DD:EE:FF
 
 # Health check
 curl http://localhost:3000/health
+
+# Remove a single device
+curl -X DELETE http://localhost:3000/devices/AA:BB:CC:DD:EE:FF
+
+# Remove all devices
+curl -X DELETE http://localhost:3000/devices
 ```
 
 **Example Response (`/devices`):**
@@ -321,6 +333,7 @@ LANwatch features a premium web-based dashboard accessible directly at `http://l
 - **Simultaneous IPv4 & IPv6 Tracking**: Displays both IPv4 and multiple IPv6 addresses (link-local, local, global unicast) for each device tile, including a themed badge for additional detected IPv6 addresses.
 - **Scope-based IP Classification**: In the inspection drawer, addresses are clearly organized and labeled by scope (`IPv4`, `IPv6 Link-Local`, `IPv6 Unique Local`, `IPv6 Global`).
 - **Secure Context Clipboard Fallback**: Integrated copy-to-clipboard buttons for all IP and MAC addresses that work seamlessly in both secure contexts (HTTPS/localhost) and insecure contexts (HTTP/remote IP) with visual green success animations.
+- **Remove / Flush Devices**: Each device tile and the inspection drawer offer a "Remove Device" action, and a toolbar "Flush All" button clears the entire tracked list — both gated behind a confirmation prompt.
 
 ![Device Inspection Info](assets/lanwatch_dashboard_device_info_blurred.jpg)
 
