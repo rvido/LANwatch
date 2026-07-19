@@ -435,6 +435,72 @@
         .copy-btn:hover {
             background: rgba(255, 255, 255, 0.1);
         }
+
+        .flush-btn {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            background: rgba(239, 68, 68, 0.08);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            color: #ef4444;
+            padding: 0.75rem 1.25rem;
+            border-radius: 12px;
+            font-family: inherit;
+            font-size: 0.9rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s, border-color 0.2s;
+            white-space: nowrap;
+        }
+
+        .flush-btn:hover {
+            background: rgba(239, 68, 68, 0.18);
+            border-color: #ef4444;
+        }
+
+        .card-remove-btn {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--border);
+            color: var(--text-muted);
+            width: 30px;
+            height: 30px;
+            border-radius: 8px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+            transition: background 0.2s, border-color 0.2s, color 0.2s;
+        }
+
+        .card-remove-btn:hover {
+            background: rgba(239, 68, 68, 0.15);
+            border-color: #ef4444;
+            color: #ef4444;
+        }
+
+        .remove-device-btn {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            width: 100%;
+            background: rgba(239, 68, 68, 0.08);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            color: #ef4444;
+            padding: 0.75rem 1rem;
+            border-radius: 12px;
+            font-family: inherit;
+            font-size: 0.9rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s, border-color 0.2s;
+        }
+
+        .remove-device-btn:hover {
+            background: rgba(239, 68, 68, 0.18);
+            border-color: #ef4444;
+        }
     </style>
 </head>
 <body>
@@ -487,6 +553,13 @@
             </svg>
             <input type="text" class="search-input" id="search" placeholder="Search devices by IP, MAC, Name, Category...">
         </div>
+        <button class="flush-btn" id="flush-btn" onclick="flushAllDevices()" title="Remove all devices">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="3 6 5 6 21 6"></polyline>
+                <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3-2a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+            </svg>
+            Flush All
+        </button>
     </div>
 
     <div class="devices-grid" id="devices-grid">
@@ -544,6 +617,13 @@
                     <span class="detail-label" style="margin-bottom: 0.5rem; display: block;">Raw JSON Endpoint Data</span>
                     <pre class="json-preview" id="modal-json"></pre>
                 </div>
+                <button class="remove-device-btn" id="modal-remove-btn" onclick="removeDeviceFromModal()">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <polyline points="3 6 5 6 21 6"></polyline>
+                        <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3-2a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                    </svg>
+                    Remove Device
+                </button>
             </div>
         </div>
     </div>
@@ -576,6 +656,7 @@
         let devicesData = [];
         let currentCategory = 'all';
         let lastRenderedKeys = '';
+        let currentModalMac = null;
 
         function matchesCategory(device, category) {
             if (category === 'all') return true;
@@ -703,6 +784,81 @@
                 }
             } catch (error) {
                 console.error("Error fetching devices:", error);
+            }
+        }
+
+        function deviceDisplayName(device) {
+            if (!device) return 'this device';
+            if (device.hostname) return device.hostname;
+            if (device.vendor === 'Private MAC Address') {
+                return `Private Device (${device.mac_address.slice(-8)})`.toUpperCase();
+            }
+            return device.vendor || device.mac_address;
+        }
+
+        async function removeDevice(mac, displayName) {
+            const confirmed = confirm(
+                `Remove "${displayName}" (${mac})?\n\n` +
+                `If this device is still active on the network, it may reappear the next time it's seen.`
+            );
+            if (!confirmed) return;
+
+            try {
+                const response = await fetch(`/devices/${encodeURIComponent(mac)}`, { method: 'DELETE' });
+                const result = await response.json();
+                if (result.success) {
+                    devicesData = devicesData.filter(d => d.mac_address !== mac);
+                    if (currentModalMac === mac) {
+                        toggleModal(false);
+                        currentModalMac = null;
+                    }
+                    renderStats();
+                    renderDevices();
+                } else {
+                    alert('Failed to remove device.');
+                }
+            } catch (error) {
+                console.error("Error removing device:", error);
+                alert('Failed to remove device.');
+            }
+        }
+
+        function removeDeviceFromButton(el) {
+            const mac = el.dataset.mac;
+            const device = devicesData.find(d => d.mac_address === mac);
+            removeDevice(mac, deviceDisplayName(device));
+        }
+
+        function removeDeviceFromModal() {
+            if (!currentModalMac) return;
+            const device = devicesData.find(d => d.mac_address === currentModalMac);
+            removeDevice(currentModalMac, deviceDisplayName(device));
+        }
+
+        async function flushAllDevices() {
+            if (devicesData.length === 0) return;
+
+            const confirmed = confirm(
+                `Remove all ${devicesData.length} devices?\n\n` +
+                `This cannot be undone. Devices still active on the network may reappear as new entries.`
+            );
+            if (!confirmed) return;
+
+            try {
+                const response = await fetch('/devices', { method: 'DELETE' });
+                const result = await response.json();
+                if (result.success) {
+                    devicesData = [];
+                    toggleModal(false);
+                    currentModalMac = null;
+                    renderStats();
+                    renderDevices();
+                } else {
+                    alert('Failed to flush devices.');
+                }
+            } catch (error) {
+                console.error("Error flushing devices:", error);
+                alert('Failed to flush devices.');
             }
         }
 
@@ -836,7 +992,15 @@
                         <div class="device-icon-box">
                             ${getIconForType(type)}
                         </div>
-                        <span class="device-badge">${escapeHtml(type)}</span>
+                        <div style="display: flex; align-items: center; gap: 0.5rem;">
+                            <span class="device-badge">${escapeHtml(type)}</span>
+                            <button class="card-remove-btn" title="Remove device" data-mac="${escapeHtml(mac)}" onclick="event.stopPropagation(); removeDeviceFromButton(this)">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <polyline points="3 6 5 6 21 6"></polyline>
+                                    <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3-2a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                                </svg>
+                            </button>
+                        </div>
                     </div>
                     <div class="device-info">
                         <span class="device-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
@@ -864,6 +1028,7 @@
         }
 
         function showDeviceDetails(device) {
+            currentModalMac = device.mac_address;
             document.getElementById('modal-icon-box').innerHTML = getIconForType(device.device_type);
             let title = device.hostname || device.vendor || "Unknown Device";
             if (!device.hostname && device.vendor === "Private MAC Address") {

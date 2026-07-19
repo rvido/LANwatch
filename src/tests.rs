@@ -477,6 +477,89 @@ mod tests {
     }
 
     #[test]
+    fn test_device_tracker_remove_device() {
+        let temp_path = "/tmp/lanwatch_test_remove_device.csv";
+        let _ = std::fs::remove_file(temp_path);
+
+        let mut tracker = DeviceTracker::new(temp_path).unwrap();
+
+        let packet = Dhcpv4Packet {
+            source_ip: Ipv4Addr::new(0, 0, 0, 0),
+            dest_ip: Ipv4Addr::new(255, 255, 255, 255),
+            source_port: 68,
+            dest_port: 67,
+            operation: Dhcpv4Operation::BootRequest,
+            client_mac: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+            message_type: Some(Dhcpv4MessageType::Discover),
+            hostname: Some("testhost".to_string()),
+            requested_ip: Some(Ipv4Addr::new(192, 168, 1, 100)),
+            parameter_request_list: None,
+            vendor_class_id: None,
+            vendor_specific_info: None,
+        };
+        tracker.update_from_dhcpv4(&packet);
+        assert_eq!(tracker.device_count(), 1);
+        tracker.save_to_db().unwrap();
+
+        // Removing an unknown MAC is a no-op.
+        assert!(!tracker.remove_device("11:22:33:44:55:66").unwrap());
+        assert_eq!(tracker.device_count(), 1);
+
+        // Removing the known device clears memory, the IP index, and the DB row.
+        assert!(tracker.remove_device("aa:bb:cc:dd:ee:ff").unwrap());
+        assert_eq!(tracker.device_count(), 0);
+        assert!(tracker.get_device("aa:bb:cc:dd:ee:ff").is_none());
+        assert!(
+            !tracker
+                .ip_index
+                .contains_key(&IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)))
+        );
+
+        // Reloading from the DB must not resurrect the removed device.
+        let reloaded = DeviceTracker::new(temp_path).unwrap();
+        assert_eq!(reloaded.device_count(), 0);
+
+        let _ = std::fs::remove_file(temp_path);
+    }
+
+    #[test]
+    fn test_device_tracker_clear_all_devices() {
+        let temp_path = "/tmp/lanwatch_test_clear_all_devices.csv";
+        let _ = std::fs::remove_file(temp_path);
+
+        let mut tracker = DeviceTracker::new(temp_path).unwrap();
+
+        for i in 0..3u8 {
+            let packet = Dhcpv4Packet {
+                source_ip: Ipv4Addr::new(0, 0, 0, 0),
+                dest_ip: Ipv4Addr::new(255, 255, 255, 255),
+                source_port: 68,
+                dest_port: 67,
+                operation: Dhcpv4Operation::BootRequest,
+                client_mac: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, i],
+                message_type: Some(Dhcpv4MessageType::Discover),
+                hostname: Some(format!("testhost{}", i)),
+                requested_ip: Some(Ipv4Addr::new(192, 168, 1, 100 + i)),
+                parameter_request_list: None,
+                vendor_class_id: None,
+                vendor_specific_info: None,
+            };
+            tracker.update_from_dhcpv4(&packet);
+        }
+        assert_eq!(tracker.device_count(), 3);
+        tracker.save_to_db().unwrap();
+
+        assert_eq!(tracker.clear_all_devices().unwrap(), 3);
+        assert_eq!(tracker.device_count(), 0);
+        assert!(tracker.ip_index.is_empty());
+
+        let reloaded = DeviceTracker::new(temp_path).unwrap();
+        assert_eq!(reloaded.device_count(), 0);
+
+        let _ = std::fs::remove_file(temp_path);
+    }
+
+    #[test]
     fn test_device_tracker_dhcpv4_does_not_use_server_source_ip() {
         let temp_path = "/tmp/lanwatch_test_dhcpv4_server_ip.csv";
         let _ = std::fs::remove_file(temp_path);

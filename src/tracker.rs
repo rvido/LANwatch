@@ -2531,6 +2531,68 @@ impl DeviceTracker {
         self.devices.get(&normalize_device_identifier(mac))
     }
 
+    /// Removes a single device by MAC address from memory and the database.
+    ///
+    /// This is purely a removal of current state, not a persistent block: since
+    /// discovery is passive and keyed solely by MAC address, a device that is
+    /// still active on the LAN will simply reappear the next time traffic from
+    /// it is observed (DHCP renewal, ARP, mDNS, etc.).
+    ///
+    /// Returns `true` if a matching device was found and removed.
+    pub fn remove_device(&mut self, mac: &str) -> std::io::Result<bool> {
+        let key = if self.devices.contains_key(mac) {
+            mac.to_string()
+        } else {
+            let lower = mac.to_lowercase();
+            if self.devices.contains_key(&lower) {
+                lower
+            } else {
+                normalize_device_identifier(mac)
+            }
+        };
+
+        let Some(device) = self.devices.remove(&key) else {
+            return Ok(false);
+        };
+
+        self.ip_index.remove(&device.ip_address);
+        if let Some(v6) = device.ipv6_address {
+            self.ip_index.remove(&v6);
+        }
+        for v6 in &device.ipv6_addresses {
+            self.ip_index.remove(&IpAddr::V6(*v6));
+        }
+
+        self.dirty_devices.lock().unwrap().remove(&key);
+
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM devices WHERE mac_address = ?", params![key])
+            .map_err(|e| {
+                std::io::Error::other(format!("Failed to delete device {}: {}", key, e))
+            })?;
+
+        Ok(true)
+    }
+
+    /// Removes every tracked device from memory and the database.
+    ///
+    /// Same caveat as [`DeviceTracker::remove_device`]: any device still active
+    /// on the LAN will simply reappear as a new entry the next time it's seen.
+    ///
+    /// Returns the number of devices removed.
+    pub fn clear_all_devices(&mut self) -> std::io::Result<usize> {
+        let count = self.devices.len();
+        self.devices.clear();
+        self.ip_index.clear();
+        self.dirty_devices.lock().unwrap().clear();
+
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM devices", [])
+            .map_err(|e| std::io::Error::other(format!("Failed to clear devices table: {}", e)))?;
+
+        Ok(count)
+    }
+
     /// Returns the path to the CSV file used for persistence.
     pub fn db_path(&self) -> &str {
         &self.db_path

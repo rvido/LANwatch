@@ -69,6 +69,8 @@ impl ApiServer {
             "  GET /devices     - List all devices (JSON, pagination supported: ?limit=50&offset=0)"
         );
         println!("  GET /devices/count - Get device count");
+        println!("  DELETE /devices/{{mac}} - Remove a single device");
+        println!("  DELETE /devices - Remove all devices");
         println!("  GET /health      - Health check");
         println!();
 
@@ -131,6 +133,12 @@ impl ApiServer {
                     mac
                 };
                 self.handle_device_by_mac(mac_clean)
+            }
+            ("DELETE", "/devices") | ("DELETE", "/device") => self.handle_flush_devices(),
+            ("DELETE", p) if p.starts_with("/devices/") || p.starts_with("/device/") => {
+                let prefix_len = if p.starts_with("/devices/") { 9 } else { 8 };
+                let mac = &p[prefix_len..];
+                self.handle_delete_device(mac)
             }
             _ => self.handle_not_found(),
         }
@@ -271,6 +279,51 @@ impl ApiServer {
             )
         } else {
             self.handle_not_found()
+        }
+    }
+
+    /// Deletes a single device by MAC address.
+    ///
+    /// This only removes current state: since discovery is passive, a device
+    /// still active on the LAN will reappear the next time it's observed.
+    fn handle_delete_device(&self, mac: &str) -> Response<std::io::Cursor<Vec<u8>>> {
+        let removed = match self.tracker.write() {
+            Ok(mut tracker) => tracker.remove_device(mac),
+            Err(_) => return self.handle_error("Failed to acquire device lock"),
+        };
+
+        match removed {
+            Ok(true) => {
+                *self.cache.lock().unwrap() = None;
+                let json = serde_json::json!({ "success": true, "removed": mac });
+                Response::from_string(json.to_string()).with_header(
+                    tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap(),
+                )
+            }
+            Ok(false) => self.handle_not_found(),
+            Err(_) => self.handle_error("Failed to remove device"),
+        }
+    }
+
+    /// Deletes every tracked device.
+    ///
+    /// Same caveat as [`ApiServer::handle_delete_device`]: devices still active
+    /// on the LAN will simply reappear as new entries the next time they're seen.
+    fn handle_flush_devices(&self) -> Response<std::io::Cursor<Vec<u8>>> {
+        let cleared = match self.tracker.write() {
+            Ok(mut tracker) => tracker.clear_all_devices(),
+            Err(_) => return self.handle_error("Failed to acquire device lock"),
+        };
+
+        match cleared {
+            Ok(count) => {
+                *self.cache.lock().unwrap() = None;
+                let json = serde_json::json!({ "success": true, "removed": count });
+                Response::from_string(json.to_string()).with_header(
+                    tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap(),
+                )
+            }
+            Err(_) => self.handle_error("Failed to flush devices"),
         }
     }
 
@@ -543,6 +596,80 @@ mod tests {
         let (limit, offset) = ApiServer::parse_query_params("/devices?limit=10&offset=5");
         assert_eq!(limit, Some(10));
         assert_eq!(offset, 5);
+
+        // 9. Test DELETE /devices/{mac} for an unknown MAC (404)
+        {
+            let mut stream = TcpStream::connect(&bound_addr).unwrap();
+            stream.write_all(b"DELETE /devices/11:22:33:44:55:66 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            let body = get_http_body(&response);
+            assert!(body.contains("\"success\":false"));
+        }
+
+        // 10. Test DELETE /devices/{mac} for a known MAC, then confirm it's gone
+        {
+            let mut stream = TcpStream::connect(&bound_addr).unwrap();
+            stream.write_all(b"DELETE /devices/aa:bb:cc:dd:ee:ff HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            let body = get_http_body(&response);
+            assert!(body.contains("\"success\":true"));
+
+            let mut stream = TcpStream::connect(&bound_addr).unwrap();
+            stream
+                .write_all(
+                    b"GET /devices/count HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            let body = get_http_body(&response);
+            assert!(
+                body.contains("\"count\":0"),
+                "device should be removed immediately (cache must be invalidated): {:?}",
+                body
+            );
+        }
+
+        // 11. Test DELETE /devices (flush all)
+        {
+            let mut device = DeviceInfo::new(
+                "11:22:33:44:55:66".to_string(),
+                "192.168.1.101".parse().unwrap(),
+                Some("second-device".to_string()),
+            );
+            device.device_type = Some(crate::types::DeviceType::Laptop);
+            let mac = device.mac_address.clone();
+            let mut guard = tracker.write().unwrap();
+            guard.devices.insert(mac.clone(), device);
+            guard.dirty_devices.lock().unwrap().insert(mac);
+            guard.save_to_db().unwrap();
+            drop(guard);
+
+            let mut stream = TcpStream::connect(&bound_addr).unwrap();
+            stream
+                .write_all(
+                    b"DELETE /devices HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            let body = get_http_body(&response);
+            assert!(body.contains("\"success\":true"));
+            assert!(body.contains("\"removed\":1"));
+
+            let mut stream = TcpStream::connect(&bound_addr).unwrap();
+            stream
+                .write_all(
+                    b"GET /devices/count HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            let body = get_http_body(&response);
+            assert!(body.contains("\"count\":0"));
+        }
 
         // Terminate the server to stop the thread loop
         drop(api_server);
