@@ -3072,6 +3072,102 @@ mod tests {
 
     #[test]
     #[cfg(feature = "mdns")]
+    fn test_mdns_friendly_name_from_ptr_and_srv() {
+        let temp_path = "/tmp/lanwatch_test_mdns_friendly_name.csv";
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+
+        let mut tracker = DeviceTracker::new(temp_path).unwrap();
+
+        // 1. PTR record whose target is a service instance name (e.g. an iPhone
+        // advertising Continuity/Handoff via _companion-link._tcp). The instance
+        // name should be harvested as the device's friendly hostname.
+        let packet_ptr = MdnsPacket {
+            source_mac: parse_mac("00:11:22:33:44:88").unwrap(),
+            source_ip: std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 1, 60)),
+            dest_ip: std::net::IpAddr::V4(Ipv4Addr::new(224, 0, 0, 251)),
+            transaction_id: 4,
+            is_response: true,
+            questions: vec![],
+            answers: vec![MdnsRecord {
+                name: "_companion-link._tcp.local".to_string(),
+                record_type: MdnsRecordType::Ptr,
+                ttl: 120,
+                data: MdnsRecordData::Ptr(
+                    "Richard's iPhone._companion-link._tcp.local".to_string(),
+                ),
+            }],
+            authority: vec![],
+            additional: vec![],
+        };
+        tracker.update_from_mdns(&packet_ptr);
+        {
+            let device = tracker.devices.get("00:11:22:33:44:88").unwrap();
+            assert_eq!(device.hostname.as_deref(), Some("Richard's iPhone"));
+            assert_eq!(device.vendor, Some(Vendor::Apple));
+            assert_eq!(device.device_type, Some(DeviceType::AppleIPhone));
+        }
+
+        // 2. SRV record whose own name is the service instance name; same
+        // extraction path should apply.
+        let packet_srv = MdnsPacket {
+            source_mac: parse_mac("00:11:22:33:44:99").unwrap(),
+            source_ip: std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 1, 61)),
+            dest_ip: std::net::IpAddr::V4(Ipv4Addr::new(224, 0, 0, 251)),
+            transaction_id: 5,
+            is_response: true,
+            questions: vec![],
+            answers: vec![MdnsRecord {
+                name: "Living Room TV._googlecast._tcp.local".to_string(),
+                record_type: MdnsRecordType::Srv,
+                ttl: 120,
+                data: MdnsRecordData::Srv {
+                    priority: 0,
+                    weight: 0,
+                    port: 8009,
+                    target: "chromecast-abc123.local".to_string(),
+                },
+            }],
+            authority: vec![],
+            additional: vec![],
+        };
+        tracker.update_from_mdns(&packet_srv);
+        {
+            let device = tracker.devices.get("00:11:22:33:44:99").unwrap();
+            assert_eq!(device.hostname.as_deref(), Some("Living Room TV"));
+        }
+
+        // 3. A meta-enumeration PTR (record name under _services._dns-sd._udp)
+        // whose target is a bare service type, not a service instance, must NOT
+        // be mistaken for a friendly name.
+        let packet_meta = MdnsPacket {
+            source_mac: parse_mac("00:11:22:33:44:aa").unwrap(),
+            source_ip: std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 1, 62)),
+            dest_ip: std::net::IpAddr::V4(Ipv4Addr::new(224, 0, 0, 251)),
+            transaction_id: 6,
+            is_response: true,
+            questions: vec![],
+            answers: vec![MdnsRecord {
+                name: "_services._dns-sd._udp.local".to_string(),
+                record_type: MdnsRecordType::Ptr,
+                ttl: 120,
+                data: MdnsRecordData::Ptr("_airplay._tcp.local".to_string()),
+            }],
+            authority: vec![],
+            additional: vec![],
+        };
+        tracker.update_from_mdns(&packet_meta);
+        {
+            let device = tracker.devices.get("00:11:22:33:44:aa").unwrap();
+            assert_eq!(device.hostname, None);
+        }
+
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+    }
+
+    #[test]
+    #[cfg(feature = "mdns")]
     fn test_parse_nbns_packet() {
         let mut payload = vec![0u8; 12];
         // Transaction ID

@@ -1118,8 +1118,26 @@ impl DeviceTracker {
             .as_ref()
             .and_then(|registry| registry.lookup(&target_mac));
 
+        // Extracts the human-readable instance name from a DNS-SD record name/target
+        // of the form "<Instance Name>._service._proto.local" (e.g. PTR rdata or an
+        // SRV record's own name), rejecting bare service-type strings that have no
+        // instance component (e.g. "_airplay._tcp.local" from a meta-enumeration PTR).
+        fn extract_service_instance_name(record_name: &str) -> Option<&str> {
+            let service_start = record_name.find("._")?;
+            let instance = &record_name[..service_start];
+            if instance.is_empty() || instance.starts_with('_') {
+                None
+            } else {
+                Some(instance)
+            }
+        }
+
         // Track the first hostname and addresses seen (defer String allocation)
-        let mut first_hostname: Option<&str> = None;
+        let mut first_local_hostname: Option<&str> = None;
+        // Friendly/instance name harvested from PTR/SRV records (e.g. "Richard's
+        // iPhone" advertised via _companion-link._tcp during Continuity/Handoff),
+        // preferred over the plain .local hostname since it's far more identifying.
+        let mut first_friendly_name: Option<&str> = None;
         let mut first_ipv4: Option<std::net::Ipv4Addr> = None;
         let mut first_ipv6: Option<std::net::Ipv6Addr> = None;
         // Collect services advertised by this device
@@ -1132,8 +1150,8 @@ impl DeviceTracker {
                 MdnsRecordDataView::A(addr) => {
                     // Strip .local suffix for hostname and record first IPv4
                     let hostname = record.name.trim_end_matches(".local");
-                    if first_hostname.is_none() {
-                        first_hostname = Some(hostname);
+                    if first_local_hostname.is_none() {
+                        first_local_hostname = Some(hostname);
                     }
                     if first_ipv4.is_none() {
                         first_ipv4 = Some(*addr);
@@ -1141,28 +1159,37 @@ impl DeviceTracker {
                 }
                 MdnsRecordDataView::Aaaa(addr) => {
                     let hostname = record.name.trim_end_matches(".local");
-                    if first_hostname.is_none() {
-                        first_hostname = Some(hostname);
+                    if first_local_hostname.is_none() {
+                        first_local_hostname = Some(hostname);
                     }
                     if first_ipv6.is_none() {
                         first_ipv6 = Some(*addr);
                     }
                 }
-                MdnsRecordDataView::Ptr(_target) => {
-                    // PTR records indicate service advertisements
+                MdnsRecordDataView::Ptr(target) => {
+                    // PTR records indicate service advertisements. The rdata target
+                    // is the specific service instance name, e.g.
+                    // "Richard's iPhone._companion-link._tcp.local".
                     let service_type = record.name.trim_end_matches(".local");
                     if service_type.starts_with('_') && seen_services.insert(service_type) {
                         services.push(service_type);
                     }
+                    if first_friendly_name.is_none() {
+                        first_friendly_name = extract_service_instance_name(target);
+                    }
                 }
                 MdnsRecordDataView::Srv { .. } => {
-                    // SRV records also indicate services
+                    // SRV records also indicate services; the record's own name is
+                    // the service instance name (same shape as a PTR target above).
                     if let Some(service_start) = record.name.find("._") {
                         let service_type =
                             record.name[service_start + 1..].trim_end_matches(".local");
                         if seen_services.insert(service_type) {
                             services.push(service_type);
                         }
+                    }
+                    if first_friendly_name.is_none() {
+                        first_friendly_name = extract_service_instance_name(record.name);
                     }
                 }
                 MdnsRecordDataView::Txt(strings) => {
@@ -1179,6 +1206,10 @@ impl DeviceTracker {
                 _ => {}
             }
         }
+
+        // Prefer the human-readable instance name (e.g. "Richard's iPhone") over the
+        // plain .local hostname (e.g. "Richards-iPhone") when both are present.
+        let first_hostname: Option<&str> = first_friendly_name.or(first_local_hostname);
 
         // Extract IoT-specific metadata (Matter, HAP)
         let iot_meta = crate::parser::iot::extract_iot_metadata(&services, &txt_attrs);

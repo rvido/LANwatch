@@ -132,16 +132,54 @@ impl ApiServer {
                 } else {
                     mac
                 };
-                self.handle_device_by_mac(mac_clean)
+                self.handle_device_by_mac(&Self::percent_decode(mac_clean))
             }
             ("DELETE", "/devices") | ("DELETE", "/device") => self.handle_flush_devices(),
             ("DELETE", p) if p.starts_with("/devices/") || p.starts_with("/device/") => {
                 let prefix_len = if p.starts_with("/devices/") { 9 } else { 8 };
                 let mac = &p[prefix_len..];
-                self.handle_delete_device(mac)
+                self.handle_delete_device(&Self::percent_decode(mac))
             }
             _ => self.handle_not_found(),
         }
+    }
+
+    /// Decodes `%XX` percent-escapes in a URL path segment (e.g. `%3A` -> `:`).
+    ///
+    /// `tiny_http` hands back the raw, undecoded request path, but well-behaved
+    /// HTTP clients (including this crate's own dashboard) percent-encode path
+    /// segments per RFC 3986 -- colons in a MAC address are valid unencoded in a
+    /// path segment, but a client is not required to know that. Malformed `%`
+    /// sequences are passed through unchanged.
+    fn percent_decode(input: &str) -> String {
+        fn hex_val(b: u8) -> Option<u8> {
+            match b {
+                b'0'..=b'9' => Some(b - b'0'),
+                b'a'..=b'f' => Some(b - b'a' + 10),
+                b'A'..=b'F' => Some(b - b'A' + 10),
+                _ => None,
+            }
+        }
+
+        // Operate on raw bytes throughout (never slicing `input` as a `&str`)
+        // so a stray `%` adjacent to a multi-byte UTF-8 character can't panic
+        // on a non-char-boundary index.
+        let bytes = input.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%'
+                && i + 2 < bytes.len()
+                && let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2]))
+            {
+                out.push((hi << 4) | lo);
+                i += 3;
+                continue;
+            }
+            out.push(bytes[i]);
+            i += 1;
+        }
+        String::from_utf8_lossy(&out).into_owned()
     }
 
     /// Helper to extract limit & offset from URL query params
@@ -629,6 +667,41 @@ mod tests {
                 body.contains("\"count\":0"),
                 "device should be removed immediately (cache must be invalidated): {:?}",
                 body
+            );
+        }
+
+        // 10b. Test DELETE /devices/{mac} where the MAC's colons are percent-encoded
+        // (e.g. `encodeURIComponent` in the bundled dashboard's JS), as opposed to
+        // sent literally like test 10 above.
+        {
+            let mut guard = tracker.write().unwrap();
+            let device = DeviceInfo::new(
+                "cc:dd:ee:ff:00:11".to_string(),
+                "192.168.1.102".parse().unwrap(),
+                Some("percent-encoded-device".to_string()),
+            );
+            let mac = device.mac_address.clone();
+            guard.devices.insert(mac.clone(), device);
+            guard.dirty_devices.lock().unwrap().insert(mac);
+            guard.save_to_db().unwrap();
+            drop(guard);
+
+            let mut stream = TcpStream::connect(&bound_addr).unwrap();
+            stream.write_all(b"DELETE /devices/cc%3Add%3Aee%3Aff%3A00%3A11 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            let body = get_http_body(&response);
+            assert!(
+                body.contains("\"success\":true"),
+                "percent-encoded MAC delete should succeed: {:?}",
+                body
+            );
+            assert!(
+                !tracker
+                    .read()
+                    .unwrap()
+                    .devices
+                    .contains_key("cc:dd:ee:ff:00:11")
             );
         }
 
