@@ -8,9 +8,9 @@
 //!
 //! This example shows how to use the lanwatch library to capture
 //! and display DHCP packets on a network interface, while also
-//! tracking devices and saving them to a CSV file.
+//! tracking devices and saving them to a database file.
 //!
-//! Usage: sudo cargo run --example basic_sniffer <interface_name> [csv_file]
+//! Usage: sudo cargo run --example basic_sniffer <interface_name> [db_file]
 //!
 //! Note: Root/sudo privileges are typically required for packet capture.
 
@@ -18,13 +18,13 @@ use lanwatch::{DeviceTracker, DhcpEvent, DhcpSniffer, Dhcpv6Option, list_interfa
 use std::env;
 
 fn main() {
-    // Get interface name and optional CSV path from command line
+    // Get interface name and optional database path from command line
     let args: Vec<String> = env::args().collect();
 
     let interface_name = match args.get(1) {
         Some(name) => name.clone(),
         None => {
-            eprintln!("Usage: sudo cargo run --example basic_sniffer <interface_name> [csv_file]");
+            eprintln!("Usage: sudo cargo run --example basic_sniffer <interface_name> [db_file]");
             eprintln!("\nAvailable interfaces:");
             for iface in list_interfaces() {
                 eprintln!("  - {}", iface);
@@ -33,14 +33,14 @@ fn main() {
         }
     };
 
-    let csv_path = args
+    let db_path = args
         .get(2)
         .map(|s| s.as_str())
-        .unwrap_or("devices_example.csv");
+        .unwrap_or("devices_example.db");
 
     println!("=== DHCP Sniffer Example ===");
     println!("Listening on interface: {}", interface_name);
-    println!("Saving devices to: {}", csv_path);
+    println!("Saving devices to: {}", db_path);
     println!("Press Ctrl+C to stop\n");
 
     // Create the sniffer
@@ -54,7 +54,7 @@ fn main() {
     };
 
     // Create the device tracker
-    let mut tracker = match DeviceTracker::new(csv_path) {
+    let mut tracker = match DeviceTracker::new(db_path) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("Failed to create device tracker: {}", e);
@@ -63,7 +63,7 @@ fn main() {
     };
 
     println!(
-        "Loaded {} existing devices from CSV\n",
+        "Loaded {} existing devices from database\n",
         tracker.device_count()
     );
 

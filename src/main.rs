@@ -1228,7 +1228,7 @@ fn print_usage() {
     println!("Usage: lanwatch <interface_name> [OPTIONS]");
     println!();
     println!("Options:");
-    println!("  -o, --output <FILE>    Output database file path (default: devices.bin)");
+    println!("  -o, --output <FILE>    Output database file path (default: devices.db)");
     println!("  -u, --oui <FILE>       Load IEEE OUI database for vendor identification");
     println!(
         "  --override <MAC=Type>  Pin a device's type (e.g. c0:84:7d:b8:58:5e=\"Security System\"); repeatable"
@@ -1258,10 +1258,6 @@ fn print_usage() {
     println!(
         "                         Default output: {}",
         DEFAULT_OUI_DOWNLOAD_PATH
-    );
-    println!();
-    println!(
-        "CSV Format: first_seen,last_seen,mac_address,ip_address,ipv6_address,hostname,device_type,vendor,services,system_description"
     );
     println!();
     println!("OUI Database:");

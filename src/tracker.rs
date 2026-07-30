@@ -2624,7 +2624,7 @@ impl DeviceTracker {
         Ok(count)
     }
 
-    /// Returns the path to the CSV file used for persistence.
+    /// Returns the path to the database file used for persistence.
     pub fn db_path(&self) -> &str {
         &self.db_path
     }
