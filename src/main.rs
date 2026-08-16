@@ -70,15 +70,23 @@ fn main() {
 
         // Try to load custom OUI file
         if let Some(ref oui_path) = config.oui_file {
-            match oui_registry.load_from_file(oui_path) {
+            match oui_registry.load_auto(oui_path) {
                 Ok(count) => println!("Loaded {} OUI entries from {}", count, oui_path),
                 Err(e) => eprintln!("Warning: Failed to load OUI file: {}", e),
             }
         } else {
-            // Try default location
-            let default_oui = "oui.txt";
-            if std::path::Path::new(default_oui).exists() {
-                match oui_registry.load_from_file(default_oui) {
+            // Try default locations: prefer the IEEE-format file that
+            // --download-oui produces, fall back to a plain oui.txt for
+            // users maintaining their own MAC/vendor override list.
+            let default_oui = if std::path::Path::new(DEFAULT_OUI_DOWNLOAD_PATH).exists() {
+                Some(DEFAULT_OUI_DOWNLOAD_PATH)
+            } else if std::path::Path::new("oui.txt").exists() {
+                Some("oui.txt")
+            } else {
+                None
+            };
+            if let Some(default_oui) = default_oui {
+                match oui_registry.load_auto(default_oui) {
                     Ok(count) => println!("Loaded {} OUI entries from {}", count, default_oui),
                     Err(e) => eprintln!("Warning: Failed to load OUI file: {}", e),
                 }

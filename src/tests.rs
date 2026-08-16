@@ -523,6 +523,55 @@ mod tests {
     }
 
     #[test]
+    fn test_device_tracker_remove_device_does_not_clobber_reassigned_ip() {
+        let temp_path = "/tmp/lanwatch_test_remove_device_reassigned_ip.csv";
+        let _ = std::fs::remove_file(temp_path);
+
+        let mut tracker = DeviceTracker::new(temp_path).unwrap();
+        let shared_ip = Ipv4Addr::new(192, 168, 1, 50);
+
+        let discover_packet = |mac: [u8; 6]| Dhcpv4Packet {
+            source_ip: Ipv4Addr::new(0, 0, 0, 0),
+            dest_ip: Ipv4Addr::new(255, 255, 255, 255),
+            source_port: 68,
+            dest_port: 67,
+            operation: Dhcpv4Operation::BootRequest,
+            client_mac: mac,
+            message_type: Some(Dhcpv4MessageType::Discover),
+            hostname: None,
+            requested_ip: Some(shared_ip),
+            parameter_request_list: None,
+            vendor_class_id: None,
+            vendor_specific_info: None,
+        };
+
+        // Device A gets `shared_ip` first...
+        tracker.update_from_dhcpv4(&discover_packet([0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA]));
+        assert_eq!(
+            tracker.ip_index.get(&IpAddr::V4(shared_ip)),
+            Some(&"aa:aa:aa:aa:aa:aa".to_string())
+        );
+
+        // ...then DHCP reassigns `shared_ip` to device B, moving the index
+        // entry (device A's own stored `ip_address` field is untouched).
+        tracker.update_from_dhcpv4(&discover_packet([0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB]));
+        assert_eq!(
+            tracker.ip_index.get(&IpAddr::V4(shared_ip)),
+            Some(&"bb:bb:bb:bb:bb:bb".to_string())
+        );
+
+        // Removing stale device A must not delete B's current, valid index entry.
+        assert!(tracker.remove_device("aa:aa:aa:aa:aa:aa").unwrap());
+        assert_eq!(
+            tracker.ip_index.get(&IpAddr::V4(shared_ip)),
+            Some(&"bb:bb:bb:bb:bb:bb".to_string()),
+            "removing device A must not clobber device B's reassigned IP index entry"
+        );
+
+        let _ = std::fs::remove_file(temp_path);
+    }
+
+    #[test]
     fn test_device_tracker_clear_all_devices() {
         let temp_path = "/tmp/lanwatch_test_clear_all_devices.csv";
         let _ = std::fs::remove_file(temp_path);
@@ -2401,6 +2450,21 @@ mod tests {
         // A non-private MAC should still be None in an empty registry
         assert_eq!(registry.lookup("00:11:22:33:44:55"), None);
         assert_eq!(registry.lookup("01:23:45:67:89:AB"), None);
+    }
+
+    #[test]
+    fn test_oui_registry_lookup_rejects_duid_identifier() {
+        let mut registry = OuiRegistry::new();
+        // "duid" itself contains hex digits ('d','d'), so a naive hex-scan
+        // would derive a bogus "DD:xx:xx" OUI for DHCPv6 devices identified
+        // by a non-Ethernet DUID instead of recognizing this isn't a MAC.
+        registry.add("DD:00:02", "Bogus Vendor");
+
+        assert_eq!(
+            registry.lookup("duid:00:02:00:01:aa:bb:cc:dd:ee:ff"),
+            None,
+            "a DUID identifier must never resolve to an OUI vendor"
+        );
     }
 
     #[test]

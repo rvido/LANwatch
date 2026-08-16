@@ -180,7 +180,7 @@ To prevent the binary from growing bloated and containing stale database listing
    ```
 
 **Default OUI location:**
-LANwatch automatically looks for a file named `oui.txt` in the current working directory at startup. If found, it will load it automatically.
+At startup, LANwatch automatically looks for `ieee-oui.txt` (the file `--download-oui` produces) in the current working directory, falling back to `oui.txt` if that isn't found. If either is found, it will load it automatically.
 
 You can load any custom OUI file using the `--oui` parameter:
 ```bash
@@ -189,6 +189,8 @@ sudo cargo run -- en0 --oui custom-oui.txt
 ```
 
 **Supported OUI file formats:**
+
+Both the `--oui`/`-u` flag and the default auto-load path auto-detect which format below a file is in, so either can be pointed at an IEEE registry download or a hand-written override list interchangeably.
 
 ```
 # IEEE OUI format (from IEEE registry downloads)

@@ -138,7 +138,12 @@ impl ApiServer {
             ("DELETE", p) if p.starts_with("/devices/") || p.starts_with("/device/") => {
                 let prefix_len = if p.starts_with("/devices/") { 9 } else { 8 };
                 let mac = &p[prefix_len..];
-                self.handle_delete_device(&Self::percent_decode(mac))
+                let mac_clean = if let Some(pos) = mac.find('?') {
+                    &mac[..pos]
+                } else {
+                    mac
+                };
+                self.handle_delete_device(&Self::percent_decode(mac_clean))
             }
             _ => self.handle_not_found(),
         }
@@ -258,7 +263,7 @@ impl ApiServer {
             &[]
         } else {
             let end = if let Some(l) = limit {
-                std::cmp::min(offset + l, total_count)
+                std::cmp::min(offset.saturating_add(l), total_count)
             } else {
                 total_count
             };
@@ -635,6 +640,39 @@ mod tests {
         assert_eq!(limit, Some(10));
         assert_eq!(offset, 5);
 
+        // 8b. A huge `limit` must not overflow `offset + limit` and panic the
+        // request thread (or abort the process under `panic = "abort"`).
+        // Needs offset < total_count so the overflow path is actually
+        // exercised (rather than short-circuited by the offset>=total_count
+        // empty-slice branch), so add a second device first.
+        {
+            let mut guard = tracker.write().unwrap();
+            let device = DeviceInfo::new(
+                "22:33:44:55:66:77".to_string(),
+                "192.168.1.103".parse().unwrap(),
+                Some("overflow-test-device".to_string()),
+            );
+            let mac = device.mac_address.clone();
+            guard.devices.insert(mac.clone(), device);
+            guard.dirty_devices.lock().unwrap().insert(mac);
+            guard.save_to_db().unwrap();
+            drop(guard);
+
+            let mut stream = TcpStream::connect(&bound_addr).unwrap();
+            stream.write_all(b"GET /devices?offset=1&limit=18446744073709551615 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            let body = get_http_body(&response);
+            assert!(
+                body.contains("\"success\":true"),
+                "offset + oversized limit must not overflow/panic: {:?}",
+                body
+            );
+
+            // Clean up so later device-count assertions aren't thrown off.
+            let _ = tracker.write().unwrap().remove_device("22:33:44:55:66:77");
+        }
+
         // 9. Test DELETE /devices/{mac} for an unknown MAC (404)
         {
             let mut stream = TcpStream::connect(&bound_addr).unwrap();
@@ -702,6 +740,41 @@ mod tests {
                     .unwrap()
                     .devices
                     .contains_key("cc:dd:ee:ff:00:11")
+            );
+        }
+
+        // 10c. Test DELETE /devices/{mac}?query=string -- a trailing query
+        // string (e.g. a cache-busting param some fetch wrappers add) must be
+        // stripped from the MAC segment just like the GET route does.
+        {
+            let mut guard = tracker.write().unwrap();
+            let device = DeviceInfo::new(
+                "33:44:55:66:77:88".to_string(),
+                "192.168.1.104".parse().unwrap(),
+                Some("query-string-device".to_string()),
+            );
+            let mac = device.mac_address.clone();
+            guard.devices.insert(mac.clone(), device);
+            guard.dirty_devices.lock().unwrap().insert(mac);
+            guard.save_to_db().unwrap();
+            drop(guard);
+
+            let mut stream = TcpStream::connect(&bound_addr).unwrap();
+            stream.write_all(b"DELETE /devices/33:44:55:66:77:88?_=169823 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            let body = get_http_body(&response);
+            assert!(
+                body.contains("\"success\":true"),
+                "DELETE with a trailing query string should succeed: {:?}",
+                body
+            );
+            assert!(
+                !tracker
+                    .read()
+                    .unwrap()
+                    .devices
+                    .contains_key("33:44:55:66:77:88")
             );
         }
 

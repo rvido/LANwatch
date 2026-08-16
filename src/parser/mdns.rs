@@ -235,6 +235,37 @@ pub struct MdnsPacketView<'a> {
     pub additional: Vec<MdnsRecordView<'a>>,
 }
 
+/// Borrows a single [`MdnsRecord`] as an [`MdnsRecordView`]. Shared by every
+/// record list in [`MdnsPacket::view`] so a new [`MdnsRecordData`] variant
+/// only needs handling in one place.
+fn record_view(record: &MdnsRecord) -> MdnsRecordView<'_> {
+    MdnsRecordView {
+        name: record.name.as_str(),
+        record_type: record.record_type,
+        ttl: record.ttl,
+        data: match &record.data {
+            MdnsRecordData::A(addr) => MdnsRecordDataView::A(*addr),
+            MdnsRecordData::Aaaa(addr) => MdnsRecordDataView::Aaaa(*addr),
+            MdnsRecordData::Ptr(target) => MdnsRecordDataView::Ptr(target.as_str()),
+            MdnsRecordData::Srv {
+                priority,
+                weight,
+                port,
+                target,
+            } => MdnsRecordDataView::Srv {
+                priority: *priority,
+                weight: *weight,
+                port: *port,
+                target: target.as_str(),
+            },
+            MdnsRecordData::Txt(strings) => {
+                MdnsRecordDataView::Txt(strings.iter().map(|s| s.as_str()).collect())
+            }
+            MdnsRecordData::Raw(bytes) => MdnsRecordDataView::Raw(bytes.as_slice()),
+        },
+    }
+}
+
 impl MdnsPacket {
     /// Creates a borrowed view of this packet.
     pub fn view(&self) -> MdnsPacketView<'_> {
@@ -252,93 +283,9 @@ impl MdnsPacket {
                     record_type: question.record_type,
                 })
                 .collect(),
-            answers: self
-                .answers
-                .iter()
-                .map(|record| MdnsRecordView {
-                    name: record.name.as_str(),
-                    record_type: record.record_type,
-                    ttl: record.ttl,
-                    data: match &record.data {
-                        MdnsRecordData::A(addr) => MdnsRecordDataView::A(*addr),
-                        MdnsRecordData::Aaaa(addr) => MdnsRecordDataView::Aaaa(*addr),
-                        MdnsRecordData::Ptr(target) => MdnsRecordDataView::Ptr(target.as_str()),
-                        MdnsRecordData::Srv {
-                            priority,
-                            weight,
-                            port,
-                            target,
-                        } => MdnsRecordDataView::Srv {
-                            priority: *priority,
-                            weight: *weight,
-                            port: *port,
-                            target: target.as_str(),
-                        },
-                        MdnsRecordData::Txt(strings) => {
-                            MdnsRecordDataView::Txt(strings.iter().map(|s| s.as_str()).collect())
-                        }
-                        MdnsRecordData::Raw(bytes) => MdnsRecordDataView::Raw(bytes.as_slice()),
-                    },
-                })
-                .collect(),
-            authority: self
-                .authority
-                .iter()
-                .map(|record| MdnsRecordView {
-                    name: record.name.as_str(),
-                    record_type: record.record_type,
-                    ttl: record.ttl,
-                    data: match &record.data {
-                        MdnsRecordData::A(addr) => MdnsRecordDataView::A(*addr),
-                        MdnsRecordData::Aaaa(addr) => MdnsRecordDataView::Aaaa(*addr),
-                        MdnsRecordData::Ptr(target) => MdnsRecordDataView::Ptr(target.as_str()),
-                        MdnsRecordData::Srv {
-                            priority,
-                            weight,
-                            port,
-                            target,
-                        } => MdnsRecordDataView::Srv {
-                            priority: *priority,
-                            weight: *weight,
-                            port: *port,
-                            target: target.as_str(),
-                        },
-                        MdnsRecordData::Txt(strings) => {
-                            MdnsRecordDataView::Txt(strings.iter().map(|s| s.as_str()).collect())
-                        }
-                        MdnsRecordData::Raw(bytes) => MdnsRecordDataView::Raw(bytes.as_slice()),
-                    },
-                })
-                .collect(),
-            additional: self
-                .additional
-                .iter()
-                .map(|record| MdnsRecordView {
-                    name: record.name.as_str(),
-                    record_type: record.record_type,
-                    ttl: record.ttl,
-                    data: match &record.data {
-                        MdnsRecordData::A(addr) => MdnsRecordDataView::A(*addr),
-                        MdnsRecordData::Aaaa(addr) => MdnsRecordDataView::Aaaa(*addr),
-                        MdnsRecordData::Ptr(target) => MdnsRecordDataView::Ptr(target.as_str()),
-                        MdnsRecordData::Srv {
-                            priority,
-                            weight,
-                            port,
-                            target,
-                        } => MdnsRecordDataView::Srv {
-                            priority: *priority,
-                            weight: *weight,
-                            port: *port,
-                            target: target.as_str(),
-                        },
-                        MdnsRecordData::Txt(strings) => {
-                            MdnsRecordDataView::Txt(strings.iter().map(|s| s.as_str()).collect())
-                        }
-                        MdnsRecordData::Raw(bytes) => MdnsRecordDataView::Raw(bytes.as_slice()),
-                    },
-                })
-                .collect(),
+            answers: self.answers.iter().map(record_view).collect(),
+            authority: self.authority.iter().map(record_view).collect(),
+            additional: self.additional.iter().map(record_view).collect(),
         }
     }
 

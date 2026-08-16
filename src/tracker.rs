@@ -559,9 +559,13 @@ impl DeviceTracker {
 
     /// Persists all current device information to the SQLite database file.
     pub fn save_to_db(&self) -> std::io::Result<()> {
-        let dirty = {
-            let mut guard = self.dirty_devices.lock().unwrap();
-            std::mem::take(&mut *guard)
+        // Snapshot rather than drain: if the write below fails partway, or a
+        // concurrent update marks another device dirty while we're writing,
+        // nothing is lost. Only the macs we actually persist are removed
+        // from `dirty_devices`, and only after a successful commit.
+        let dirty: HashSet<String> = {
+            let guard = self.dirty_devices.lock().unwrap();
+            guard.clone()
         };
 
         if dirty.is_empty() {
@@ -632,6 +636,13 @@ impl DeviceTracker {
 
         tx.commit()
             .map_err(|e| std::io::Error::other(format!("Failed to commit transaction: {}", e)))?;
+
+        {
+            let mut guard = self.dirty_devices.lock().unwrap();
+            for mac in &dirty {
+                guard.remove(mac);
+            }
+        }
 
         Ok(())
     }
@@ -1301,20 +1312,12 @@ impl DeviceTracker {
             if let Some(v) = vendor_to_apply
                 && Self::should_replace_vendor(device.vendor.as_ref(), &v, oui_vendor)
             {
-                // Protect Eero devices from being overwritten by other vendors
-                let is_eero = first_hostname
+                let hint_is_eero = first_hostname
                     .map(|h| h.to_ascii_lowercase().contains("eero"))
-                    .unwrap_or(false)
-                    || device
-                        .hostname
-                        .as_deref()
-                        .map(|h| h.to_ascii_lowercase().contains("eero"))
-                        .unwrap_or(false)
-                    || device.vendor.as_ref().map(Vendor::is_eero).unwrap_or(false)
-                    || oui_vendor
-                        .map(|v| v.eq_ignore_ascii_case("eero inc."))
-                        .unwrap_or(false);
-                if (!is_eero || v.is_eero()) && device.vendor.as_ref() != Some(&v) {
+                    .unwrap_or(false);
+                let protected =
+                    Self::eero_protected(device, oui_vendor, hint_is_eero) && !v.is_eero();
+                if !protected && device.vendor.as_ref() != Some(&v) {
                     device.vendor = Some(v);
                     updated += 1;
                 }
@@ -1339,21 +1342,12 @@ impl DeviceTracker {
             if let Some(t) = dt_to_apply
                 && Self::should_replace_device_type(device, &t)
             {
-                // Protect Eero devices from being overwritten by other device types
-                let is_eero = first_hostname
+                let hint_is_eero = first_hostname
                     .map(|h| h.to_ascii_lowercase().contains("eero"))
-                    .unwrap_or(false)
-                    || device
-                        .hostname
-                        .as_deref()
-                        .map(|h| h.to_ascii_lowercase().contains("eero"))
-                        .unwrap_or(false)
-                    || device.vendor.as_ref().map(Vendor::is_eero).unwrap_or(false)
-                    || oui_vendor
-                        .map(|v| v.eq_ignore_ascii_case("eero inc."))
-                        .unwrap_or(false);
-                if (!is_eero || t == DeviceType::Router) && device.device_type.as_ref() != Some(&t)
-                {
+                    .unwrap_or(false);
+                let protected = Self::eero_protected(device, oui_vendor, hint_is_eero)
+                    && t != DeviceType::Router;
+                if !protected && device.device_type.as_ref() != Some(&t) {
                     device.device_type = Some(t);
                     updated += 1;
                 }
@@ -1361,22 +1355,12 @@ impl DeviceTracker {
 
             // Set system description if IoT model is present
             if let Some(desc) = txt_model {
-                // Protect Eero devices from being overwritten by other system descriptions
-                let is_eero = first_hostname
+                let hint_is_eero = first_hostname
                     .map(|h| h.to_ascii_lowercase().contains("eero"))
-                    .unwrap_or(false)
-                    || device
-                        .hostname
-                        .as_deref()
-                        .map(|h| h.to_ascii_lowercase().contains("eero"))
-                        .unwrap_or(false)
-                    || device.vendor.as_ref().map(Vendor::is_eero).unwrap_or(false)
-                    || oui_vendor
-                        .map(|v| v.eq_ignore_ascii_case("eero inc."))
-                        .unwrap_or(false);
-                if (!is_eero || desc.to_ascii_lowercase().contains("eero"))
-                    && device.system_description.as_deref() != Some(desc.as_ref())
-                {
+                    .unwrap_or(false);
+                let protected = Self::eero_protected(device, oui_vendor, hint_is_eero)
+                    && !desc.to_ascii_lowercase().contains("eero");
+                if !protected && device.system_description.as_deref() != Some(desc.as_ref()) {
                     device.system_description = Some(desc.clone().into_owned());
                     updated += 1;
                 }
@@ -1660,6 +1644,28 @@ impl DeviceTracker {
         None
     }
 
+    /// True when `device` is already known/suspected to be an Eero router and
+    /// the incoming vendor/type/description update -- from *any* discovery
+    /// protocol -- isn't itself Eero-flavored. Centralized so mDNS, SSDP, and
+    /// WSD all enforce the same anti-flapping rule instead of only mDNS.
+    #[cfg(any(feature = "mdns", feature = "ssdp"))]
+    fn eero_protected(
+        device: &DeviceInfo,
+        oui_vendor: Option<&str>,
+        extra_hint_is_eero: bool,
+    ) -> bool {
+        extra_hint_is_eero
+            || device
+                .hostname
+                .as_deref()
+                .map(|h| h.to_ascii_lowercase().contains("eero"))
+                .unwrap_or(false)
+            || device.vendor.as_ref().map(Vendor::is_eero).unwrap_or(false)
+            || oui_vendor
+                .map(|v| v.eq_ignore_ascii_case("eero inc."))
+                .unwrap_or(false)
+    }
+
     fn should_replace_vendor(
         current: Option<&Vendor>,
         incoming: &Vendor,
@@ -1889,6 +1895,7 @@ impl DeviceTracker {
         let vendor_to_apply = vendor.or_else(|| oui_vendor.map(Vendor::from));
         if let Some(v) = vendor_to_apply
             && Self::should_replace_vendor(device.vendor.as_ref(), &v, oui_vendor)
+            && !(Self::eero_protected(device, oui_vendor, false) && !v.is_eero())
             && device.vendor.as_ref() != Some(&v)
         {
             device.vendor = Some(v);
@@ -1897,6 +1904,7 @@ impl DeviceTracker {
 
         if let Some(t) = device_type
             && Self::should_replace_device_type(device, &t)
+            && !(Self::eero_protected(device, oui_vendor, false) && t != DeviceType::Router)
             && device.device_type.as_ref() != Some(&t)
         {
             device.device_type = Some(t);
@@ -1938,7 +1946,9 @@ impl DeviceTracker {
         // Update vendor
         if let Some(ref v) = packet.vendor {
             let oui_vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(&mac));
-            if Self::should_replace_vendor(device.vendor.as_ref(), v, oui_vendor) {
+            if Self::should_replace_vendor(device.vendor.as_ref(), v, oui_vendor)
+                && !(Self::eero_protected(device, oui_vendor, false) && !v.is_eero())
+            {
                 device.vendor = Some(v.clone());
                 updated += 1;
             }
@@ -1948,8 +1958,11 @@ impl DeviceTracker {
         if let Some(ref t) = packet.device_type
             && Self::should_replace_device_type(device, t)
         {
-            device.device_type = Some(t.clone());
-            updated += 1;
+            let oui_vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(&mac));
+            if !(Self::eero_protected(device, oui_vendor, false) && *t != DeviceType::Router) {
+                device.device_type = Some(t.clone());
+                updated += 1;
+            }
         }
 
         device.last_seen = SystemTime::now();
@@ -2586,12 +2599,20 @@ impl DeviceTracker {
             return Ok(false);
         };
 
-        self.ip_index.remove(&device.ip_address);
+        // Only drop an ip_index entry if it still points at the device being
+        // removed: the IP may have since been reassigned (e.g. by DHCP) to a
+        // different, still-active device, and that entry must not be lost.
+        let mut remove_if_owned = |ip: &IpAddr| {
+            if self.ip_index.get(ip) == Some(&key) {
+                self.ip_index.remove(ip);
+            }
+        };
+        remove_if_owned(&device.ip_address);
         if let Some(v6) = device.ipv6_address {
-            self.ip_index.remove(&v6);
+            remove_if_owned(&v6);
         }
         for v6 in &device.ipv6_addresses {
-            self.ip_index.remove(&IpAddr::V6(*v6));
+            remove_if_owned(&IpAddr::V6(*v6));
         }
 
         self.dirty_devices.lock().unwrap().remove(&key);

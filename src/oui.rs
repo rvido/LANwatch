@@ -35,51 +35,18 @@ impl OuiRegistry {
     /// The MAC address can be in various formats:
     /// - Full: "AA:BB:CC:DD:EE:FF" or "AA-BB-CC-DD-EE-FF"
     /// - OUI only: "AA:BB:CC" or "AABBCC"
+    ///
+    /// Devices identified by a non-Ethernet DHCPv6 DUID (stored as
+    /// `"duid:..."`, see `format_duid_identifier`) have no OUI to resolve;
+    /// this is rejected up front rather than hex-scanned like a MAC, since
+    /// "duid" itself contains hex digits that would otherwise decode into a
+    /// bogus `DD:xx:xx` OUI.
     pub fn lookup(&self, mac_address: &str) -> Option<&str> {
-        let mut buf = [0u8; 8];
-        let len = {
-            let mut l = 0;
-            for c in mac_address.chars() {
-                if l >= 6 {
-                    break;
-                }
-                if c.is_ascii_hexdigit() {
-                    let u = c.to_ascii_uppercase() as u8;
-                    if l == 0 {
-                        buf[0] = u;
-                    } else if l == 1 {
-                        buf[1] = u;
-                    } else if l == 2 {
-                        buf[3] = u;
-                    } else if l == 3 {
-                        buf[4] = u;
-                    } else if l == 4 {
-                        buf[6] = u;
-                    } else if l == 5 {
-                        buf[7] = u;
-                    }
-                    l += 1;
-                }
-            }
-            if l >= 6 {
-                buf[2] = b':';
-                buf[5] = b':';
-                8
-            } else {
-                let mut idx = 0;
-                for c in mac_address.chars() {
-                    if idx >= l {
-                        break;
-                    }
-                    if c.is_ascii_hexdigit() {
-                        buf[idx] = c.to_ascii_uppercase() as u8;
-                        idx += 1;
-                    }
-                }
-                l
-            }
-        };
+        if mac_address.starts_with("duid:") {
+            return None;
+        }
 
+        let (buf, len) = Self::normalize_mac_buf(mac_address);
         let normalized = std::str::from_utf8(&buf[..len]).ok()?;
 
         // Check custom overrides first (highest priority)
@@ -155,36 +122,57 @@ impl OuiRegistry {
 
     /// Normalize a MAC address to OUI format (first 3 octets, uppercase, colon-separated)
     fn normalize_mac(mac: &str) -> String {
-        let mut buf = [0u8; 6];
-        let mut len = 0;
+        let (buf, len) = Self::normalize_mac_buf(mac);
+        // `buf[..len]` is built exclusively from ASCII hex digits and ':' in
+        // `normalize_mac_buf`, so this is always valid UTF-8.
+        String::from_utf8_lossy(&buf[..len]).into_owned()
+    }
 
+    /// Core normalization shared by [`Self::lookup`] (stack-only, no
+    /// allocation on the hot lookup path) and [`Self::normalize_mac`]
+    /// (needs an owned `String` as a `HashMap` key). Extracts up to the
+    /// first 6 hex digits of `mac` and returns them uppercased in a fixed
+    /// 8-byte buffer as `AA:BB:CC` (or the bare digits, un-colon-separated,
+    /// if fewer than 6 were found), along with how many buffer bytes are
+    /// valid.
+    fn normalize_mac_buf(mac: &str) -> ([u8; 8], usize) {
+        let mut buf = [0u8; 8];
+        let mut l = 0;
         for c in mac.chars() {
-            if len >= 6 {
+            if l >= 6 {
                 break;
             }
             if c.is_ascii_hexdigit() {
-                buf[len] = c.to_ascii_uppercase() as u8;
-                len += 1;
+                let u = c.to_ascii_uppercase() as u8;
+                match l {
+                    0 => buf[0] = u,
+                    1 => buf[1] = u,
+                    2 => buf[3] = u,
+                    3 => buf[4] = u,
+                    4 => buf[6] = u,
+                    _ => buf[7] = u,
+                }
+                l += 1;
             }
         }
 
-        if len >= 6 {
-            let mut s = String::with_capacity(8);
-            s.push(buf[0] as char);
-            s.push(buf[1] as char);
-            s.push(':');
-            s.push(buf[2] as char);
-            s.push(buf[3] as char);
-            s.push(':');
-            s.push(buf[4] as char);
-            s.push(buf[5] as char);
-            s
+        if l >= 6 {
+            buf[2] = b':';
+            buf[5] = b':';
+            (buf, 8)
         } else {
-            let mut s = String::with_capacity(len);
-            for &b in &buf[..len] {
-                s.push(b as char);
+            let mut compact = [0u8; 8];
+            let mut idx = 0;
+            for c in mac.chars() {
+                if idx >= l {
+                    break;
+                }
+                if c.is_ascii_hexdigit() {
+                    compact[idx] = c.to_ascii_uppercase() as u8;
+                    idx += 1;
+                }
             }
-            s
+            (compact, l)
         }
     }
 
@@ -256,6 +244,30 @@ impl OuiRegistry {
         }
 
         Ok(count)
+    }
+
+    /// Load OUI entries from a file, auto-detecting whether it's the plain
+    /// `MAC_PREFIX<whitespace>VENDOR_NAME` format or the official IEEE OUI
+    /// download format (lines containing `(hex)`). Callers that just point
+    /// at "whatever file `--download-oui` produced, or a hand-written
+    /// override list" should use this instead of picking a parser manually.
+    pub fn load_auto<P: AsRef<Path>>(&mut self, path: P) -> std::io::Result<usize> {
+        let path = path.as_ref();
+        const PROBE_LINES: usize = 50;
+        let is_ieee_format = {
+            let file = File::open(path)?;
+            BufReader::new(file)
+                .lines()
+                .take(PROBE_LINES)
+                .filter_map(|l| l.ok())
+                .any(|l| l.contains("(hex)"))
+        };
+
+        if is_ieee_format {
+            self.load_from_ieee_file(path)
+        } else {
+            self.load_from_file(path)
+        }
     }
 }
 
