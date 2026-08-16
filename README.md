@@ -44,10 +44,10 @@ Add to your `Cargo.toml`. The `http-api` feature is opt-in to keep binary size s
 ```toml
 [dependencies]
 # Smallest binary footprint, core DHCP & MAC tracking only
-lanwatch = "0.8"
+lanwatch = "0.12"
 
 # With HTTP API server and active discovery protocols
-lanwatch = { version = "0.8", features = ["http-api", "mdns", "ssdp"] }
+lanwatch = { version = "0.12", features = ["http-api", "mdns", "ssdp"] }
 ```
 
 Or clone and build from source. Release builds are automatically optimized for size (`opt-level = "z"`, `strip = true`, `panic = "abort"`):
@@ -473,14 +473,17 @@ cargo run --example parse_payload
 ## Feature Flags
 
 | Feature | Default | Description |
-|---------|---------|-------------|
-| `http-api` | ✓ | Enables the HTTP REST API server, JSON export, and serde serialization |
+|---|---|---|
+| `http-api` | ✗ | Enables the HTTP REST API server, JSON export, and Web Dashboard |
 | `mdns` | ✗ | Enables mDNS (Multicast DNS) sniffing for enhanced device discovery |
 | `ssdp` | ✗ | Enables SSDP/UPnP sniffing and active M-SEARCH discovery |
 
 ```bash
-# Build with default features (http-api)
+# Build with minimal default features
 cargo build --release
+
+# Build with HTTP API server & web dashboard
+cargo build --release --features http-api
 
 # Build with mDNS support
 cargo build --release --features mdns
@@ -490,9 +493,6 @@ cargo build --release --features ssdp
 
 # Build with all features
 cargo build --release --all-features
-
-# Build without any optional features (smallest binary)
-cargo build --release --no-default-features
 ```
 
 ## Network Discovery Flow (Passive vs Active)
@@ -673,10 +673,11 @@ LANwatch includes several configurations and design patterns to maximize executi
 
 ## Dependencies
 
-- [pnet](https://crates.io/crates/pnet) - Low-level networking library for packet capture and parsing
-- [serde](https://crates.io/crates/serde) - Serialization framework for JSON support (optional, `http-api` feature)
-- [serde_json](https://crates.io/crates/serde_json) - JSON serialization/deserialization (optional, `http-api` feature)
-- [tiny_http](https://crates.io/crates/tiny_http) - Lightweight HTTP server for the REST API (optional, `http-api` feature)
+- [pnet_datalink](https://crates.io/crates/pnet_datalink) / [pnet_packet](https://crates.io/crates/pnet_packet) - Low-level networking libraries for packet capture and frame parsing
+- [rusqlite](https://crates.io/crates/rusqlite) - Embedded SQLite database engine with bundled C library for device persistence
+- [serde](https://crates.io/crates/serde) - Serialization framework for device data structures
+- [serde_json](https://crates.io/crates/serde_json) - JSON serialization for HTTP API export (optional, `http-api` feature)
+- [tiny_http](https://crates.io/crates/tiny_http) - Lightweight HTTP server for the REST API and Web Dashboard (optional, `http-api` feature)
 
 ## License
 
