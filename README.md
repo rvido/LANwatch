@@ -44,10 +44,10 @@ Add to your `Cargo.toml`. The `http-api` feature is opt-in to keep binary size s
 ```toml
 [dependencies]
 # Smallest binary footprint, core DHCP & MAC tracking only
-lanwatch = "0.14"
+lanwatch = "0.15"
 
 # With HTTP API server and active discovery protocols
-lanwatch = { version = "0.14", features = ["http-api", "mdns", "ssdp"] }
+lanwatch = { version = "0.15", features = ["http-api", "mdns", "ssdp"] }
 ```
 
 Or clone and build from source. Release builds are automatically optimized for size (`opt-level = "z"`, `strip = true`, `panic = "abort"`):
@@ -62,6 +62,57 @@ cargo build --release
 # Enable everything
 cargo build --release --all-features
 ```
+
+## Upgrading
+
+LANwatch is pre-1.0, so minor versions may break API compatibility. Only
+library consumers are affected; the CLI and its flags are unchanged.
+
+### 0.14 → 0.15
+
+The parallel borrowed "view" types have been removed. They mirrored the owned
+packet structs but were built *from* an already-parsed packet, so they
+allocated to hold borrows of data the owned types already exposed by
+reference. Call the owned packet directly instead.
+
+```rust
+// Before
+let view = packet.view();
+for record in view.all_records() {
+    if let MdnsRecordDataView::A(addr) = &record.data { /* ... */ }
+}
+let vendor = ssdp.view().detect_vendor_from_view();
+
+// After
+for record in packet.all_records() {
+    if let MdnsRecordData::A(addr) = &record.data { /* ... */ }
+}
+let vendor = ssdp.detect_vendor();
+```
+
+| Removed | Replacement |
+|---|---|
+| `MdnsPacketView`, `MdnsRecordView`, `MdnsQuestionView`, `MdnsRecordDataView` | `MdnsPacket`, `MdnsRecord`, `MdnsQuestion`, `MdnsRecordData` |
+| `SsdpPacketView`, `SsdpMessageTypeView` | `SsdpPacket`, `SsdpMessageType` |
+| `MdnsPacket::view()`, `SsdpPacket::view()` | no longer needed |
+| `SsdpPacket::fingerprint_text()` | `detect_vendor()` / `detect_device_type()` |
+| `detect_vendor_from_view()` | `SsdpPacket::detect_vendor()` |
+| `detect_device_type_from_view()` | `SsdpPacket::detect_device_type()` |
+
+Three accessors now borrow instead of cloning, so callers that stored the
+result need `.to_string()` (or to hold the packet alive):
+
+- `SsdpPacket::service_terms() -> Vec<&str>` (was `Vec<String>`)
+- `MdnsPacket::get_ipv4_addresses() -> Vec<(&str, Ipv4Addr)>` (was `Vec<(String, _)>`)
+- `MdnsPacket::get_ipv6_addresses() -> Vec<(&str, Ipv6Addr)>` (was `Vec<(String, _)>`)
+
+### 0.13 → 0.14
+
+`CctvPacket` gained a public `claimed_mac: Option<[u8; 6]>` field, so literal
+construction of it needs updating. `source_mac` is now always the MAC observed
+in the Ethernet header; a MAC asserted by the packet body appears in
+`claimed_mac` and is never treated as an identity. See
+[Handling Untrusted Traffic](#handling-untrusted-traffic).
 
 ## Usage
 
@@ -754,6 +805,7 @@ LANwatch includes several configurations and design patterns to maximize executi
 *   **O(1) Transactional Database Updates**: Migrated the storage backend from full-file serializations to SQLite with Write-Ahead Logging (WAL), reducing write amplification from O(N) full file rewrites to O(1) single-row updates.
 *   **O(log N) Indexed Sorting**: Refactored the REST API query engine to run paginated, pre-sorted index scans inside SQLite directly rather than cloning and sorting the entire registry in-memory, cutting memory overhead to O(page_size) and sorting to O(log N).
 *   **Zero-Allocation Hostname Classification**: Device classification in the parser loops avoids heap allocations for case conversion. Service de-duplication compares against the normalized form without building it, so the common "already advertised" case allocates nothing.
+*   **Allocation-Free Packet Inspection**: Classification reads directly from the parsed packet rather than through an intermediate borrowed copy. Walking an mDNS response's records allocates nothing (previously two allocations and 320 bytes to build the intermediate), and SSDP vendor and device-type detection match the rule tables against the packet's fields in place.
 *   **Integer-Keyed OUI Registry**: An OUI is three bytes, so the vendor table is keyed on the prefix packed into a `u32` rather than an `"AA:BB:CC"` string — removing roughly 35,000 key allocations when the full IEEE registry is loaded, along with a string hash and comparison on every lookup.
 *   **Dynamic Allocator Swap**: For concurrent HTTP API and high-traffic packet capture, you can preload lock-free allocators (`mimalloc` or `jemalloc`) dynamically without altering code:
     ```bash

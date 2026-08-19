@@ -2204,8 +2204,8 @@ mod tests {
 
         let addresses = packet.get_ipv4_addresses();
         assert_eq!(addresses.len(), 2);
-        assert!(addresses.contains(&("device1.local".to_string(), Ipv4Addr::new(192, 168, 1, 10))));
-        assert!(addresses.contains(&("device2.local".to_string(), Ipv4Addr::new(192, 168, 1, 20))));
+        assert!(addresses.contains(&("device1.local", Ipv4Addr::new(192, 168, 1, 10))));
+        assert!(addresses.contains(&("device2.local", Ipv4Addr::new(192, 168, 1, 20))));
     }
 
     #[test]
@@ -4478,5 +4478,126 @@ mod tests {
         let mut partial = OuiRegistry::new();
         partial.add("00:1B", "Nope");
         assert_eq!(partial.len(), 0);
+    }
+
+    /// Characterization test for the SSDP vendor and device-type rule tables.
+    ///
+    /// Every expectation below was captured from the implementation as it
+    /// behaved before the rules moved off `SsdpPacketView`, so this pins
+    /// current behavior rather than intended behavior. Several entries record
+    /// quirks rather than correctness -- see the notes after the table -- and
+    /// they are here so a refactor cannot change them silently. Fixing a quirk
+    /// is fine; doing it by accident is not.
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_ssdp_classification_rules_characterization() {
+        let cases: &[(&str, Option<Vendor>, Option<DeviceType>)] = &[
+        // --- one case per vendor pattern ---
+            ("NOTIFY * HTTP/1.1\r\nST: apple\r\n\r\n", Some(Vendor::Apple), None), // vendor pattern "apple"
+            ("NOTIFY * HTTP/1.1\r\nST: airport\r\n\r\n", Some(Vendor::Apple), None), // vendor pattern "airport"
+            ("NOTIFY * HTTP/1.1\r\nST: airplay\r\n\r\n", Some(Vendor::Apple), None), // vendor pattern "airplay"
+            ("NOTIFY * HTTP/1.1\r\nST: lenovo\r\n\r\n", Some(Vendor::Lenovo), Some(DeviceType::Laptop)), // vendor pattern "lenovo"
+            ("NOTIFY * HTTP/1.1\r\nST: legion\r\n\r\n", Some(Vendor::Lenovo), Some(DeviceType::Laptop)), // vendor pattern "legion"
+            ("NOTIFY * HTTP/1.1\r\nST: thinkpad\r\n\r\n", Some(Vendor::Lenovo), Some(DeviceType::Laptop)), // vendor pattern "thinkpad"
+            ("NOTIFY * HTTP/1.1\r\nST: ideapad\r\n\r\n", Some(Vendor::Lenovo), Some(DeviceType::Laptop)), // vendor pattern "ideapad"
+            ("NOTIFY * HTTP/1.1\r\nST: yoga\r\n\r\n", Some(Vendor::Lenovo), Some(DeviceType::Laptop)), // vendor pattern "yoga"
+            ("NOTIFY * HTTP/1.1\r\nST: google\r\n\r\n", Some(Vendor::Google), None), // vendor pattern "google"
+            ("NOTIFY * HTTP/1.1\r\nST: chromecast\r\n\r\n", Some(Vendor::Google), None), // vendor pattern "chromecast"
+            ("NOTIFY * HTTP/1.1\r\nST: android tv\r\n\r\n", Some(Vendor::Google), None), // vendor pattern "android tv"
+            ("NOTIFY * HTTP/1.1\r\nST: amazon\r\n\r\n", Some(Vendor::Amazon), None), // vendor pattern "amazon"
+            ("NOTIFY * HTTP/1.1\r\nST: alexa\r\n\r\n", Some(Vendor::Amazon), None), // vendor pattern "alexa"
+            ("NOTIFY * HTTP/1.1\r\nST: fire tv\r\n\r\n", Some(Vendor::Amazon), None), // vendor pattern "fire tv"
+            ("NOTIFY * HTTP/1.1\r\nST: samsung\r\n\r\n", Some(Vendor::Samsung), None), // vendor pattern "samsung"
+            ("NOTIFY * HTTP/1.1\r\nST: lg \r\n\r\n", None, None), // vendor pattern "lg "
+            ("NOTIFY * HTTP/1.1\r\nST: lge\r\n\r\n", Some(Vendor::Lg), None), // vendor pattern "lge"
+            ("NOTIFY * HTTP/1.1\r\nST: sony\r\n\r\n", Some(Vendor::Sony), None), // vendor pattern "sony"
+            ("NOTIFY * HTTP/1.1\r\nST: roku\r\n\r\n", Some(Vendor::Roku), None), // vendor pattern "roku"
+            ("NOTIFY * HTTP/1.1\r\nST: sonos\r\n\r\n", Some(Vendor::Sonos), None), // vendor pattern "sonos"
+            ("NOTIFY * HTTP/1.1\r\nST: microsoft\r\n\r\n", Some(Vendor::Microsoft), None), // vendor pattern "microsoft"
+            ("NOTIFY * HTTP/1.1\r\nST: windows\r\n\r\n", Some(Vendor::Microsoft), None), // vendor pattern "windows"
+            ("NOTIFY * HTTP/1.1\r\nST: philips\r\n\r\n", Some(Vendor::Philips), None), // vendor pattern "philips"
+            ("NOTIFY * HTTP/1.1\r\nST: hue\r\n\r\n", Some(Vendor::Philips), None), // vendor pattern "hue"
+            ("NOTIFY * HTTP/1.1\r\nST: netgear\r\n\r\n", Some(Vendor::Netgear), None), // vendor pattern "netgear"
+            ("NOTIFY * HTTP/1.1\r\nST: tp-link\r\n\r\n", Some(Vendor::TpLink), None), // vendor pattern "tp-link"
+            ("NOTIFY * HTTP/1.1\r\nST: tplink\r\n\r\n", Some(Vendor::TpLink), None), // vendor pattern "tplink"
+            ("NOTIFY * HTTP/1.1\r\nST: ubiquiti\r\n\r\n", Some(Vendor::Ubiquiti), None), // vendor pattern "ubiquiti"
+            ("NOTIFY * HTTP/1.1\r\nST: unifi\r\n\r\n", Some(Vendor::Ubiquiti), None), // vendor pattern "unifi"
+            ("NOTIFY * HTTP/1.1\r\nST: d-link\r\n\r\n", Some(Vendor::DLink), None), // vendor pattern "d-link"
+            ("NOTIFY * HTTP/1.1\r\nST: bose\r\n\r\n", Some(Vendor::Bose), None), // vendor pattern "bose"
+            ("NOTIFY * HTTP/1.1\r\nST: denon\r\n\r\n", Some(Vendor::Denon), None), // vendor pattern "denon"
+            ("NOTIFY * HTTP/1.1\r\nST: yamaha\r\n\r\n", Some(Vendor::Yamaha), None), // vendor pattern "yamaha"
+            ("NOTIFY * HTTP/1.1\r\nST: synology\r\n\r\n", Some(Vendor::Synology), None), // vendor pattern "synology"
+            ("NOTIFY * HTTP/1.1\r\nST: qnap\r\n\r\n", Some(Vendor::Qnap), None), // vendor pattern "qnap"
+        // --- one case per device-type pattern ---
+            ("NOTIFY * HTTP/1.1\r\nST: mediarenderer\r\n\r\n", None, Some(DeviceType::MediaRenderer)), // device pattern "mediarenderer"
+            ("NOTIFY * HTTP/1.1\r\nST: renderer\r\n\r\n", None, Some(DeviceType::MediaRenderer)), // device pattern "renderer"
+            ("NOTIFY * HTTP/1.1\r\nST: mediaserver\r\n\r\n", None, Some(DeviceType::MediaServer)), // device pattern "mediaserver"
+            ("NOTIFY * HTTP/1.1\r\nST: internetgatewaydevice\r\n\r\n", None, Some(DeviceType::Router)), // device pattern "internetgatewaydevice"
+            ("NOTIFY * HTTP/1.1\r\nST: wanconnectiondevice\r\n\r\n", None, Some(DeviceType::Router)), // device pattern "wanconnectiondevice"
+            ("NOTIFY * HTTP/1.1\r\nST: router\r\n\r\n", None, Some(DeviceType::Router)), // device pattern "router"
+            ("NOTIFY * HTTP/1.1\r\nST: printer\r\n\r\n", None, Some(DeviceType::Printer)), // device pattern "printer"
+            ("NOTIFY * HTTP/1.1\r\nST: print\r\n\r\n", None, Some(DeviceType::Printer)), // device pattern "print"
+            ("NOTIFY * HTTP/1.1\r\nST: scanner\r\n\r\n", None, Some(DeviceType::Scanner)), // device pattern "scanner"
+            ("NOTIFY * HTTP/1.1\r\nST: television\r\n\r\n", None, Some(DeviceType::Tv)), // device pattern "television"
+            ("NOTIFY * HTTP/1.1\r\nST: tvdevice\r\n\r\n", None, Some(DeviceType::Tv)), // device pattern "tvdevice"
+            ("NOTIFY * HTTP/1.1\r\nST: smarttv\r\n\r\n", None, Some(DeviceType::Tv)), // device pattern "smarttv"
+            ("NOTIFY * HTTP/1.1\r\nST: camera\r\n\r\n", None, Some(DeviceType::IpCamera)), // device pattern "camera"
+            ("NOTIFY * HTTP/1.1\r\nST: ipcamera\r\n\r\n", None, Some(DeviceType::IpCamera)), // device pattern "ipcamera"
+            ("NOTIFY * HTTP/1.1\r\nST: speaker\r\n\r\n", None, Some(DeviceType::Speaker)), // device pattern "speaker"
+            ("NOTIFY * HTTP/1.1\r\nST: soundbar\r\n\r\n", None, Some(DeviceType::Speaker)), // device pattern "soundbar"
+            ("NOTIFY * HTTP/1.1\r\nST: gameconsole\r\n\r\n", None, Some(DeviceType::GamingConsole)), // device pattern "gameconsole"
+            ("NOTIFY * HTTP/1.1\r\nST: xbox\r\n\r\n", None, Some(DeviceType::GamingConsole)), // device pattern "xbox"
+            ("NOTIFY * HTTP/1.1\r\nST: playstation\r\n\r\n", None, Some(DeviceType::GamingConsole)), // device pattern "playstation"
+            ("NOTIFY * HTTP/1.1\r\nST: set-top\r\n\r\n", None, Some(DeviceType::SetTopBox)), // device pattern "set-top"
+            ("NOTIFY * HTTP/1.1\r\nST: settop\r\n\r\n", None, Some(DeviceType::SetTopBox)), // device pattern "settop"
+            ("NOTIFY * HTTP/1.1\r\nST: nas\r\n\r\n", None, Some(DeviceType::Nas)), // device pattern "nas"
+            ("NOTIFY * HTTP/1.1\r\nST: storage\r\n\r\n", None, Some(DeviceType::Nas)), // device pattern "storage"
+            ("NOTIFY * HTTP/1.1\r\nST: bridge\r\n\r\n", None, Some(DeviceType::SmartHomeDevice)), // device pattern "bridge"
+            ("NOTIFY * HTTP/1.1\r\nST: light\r\n\r\n", None, Some(DeviceType::SmartHomeDevice)), // device pattern "light"
+            ("NOTIFY * HTTP/1.1\r\nST: bulb\r\n\r\n", None, Some(DeviceType::SmartHomeDevice)), // device pattern "bulb"
+            ("NOTIFY * HTTP/1.1\r\nST: homekit\r\n\r\n", None, Some(DeviceType::SmartHomeDevice)), // device pattern "homekit"
+            ("NOTIFY * HTTP/1.1\r\nST: googlecast\r\n\r\n", Some(Vendor::Google), None), // device pattern "googlecast"
+            ("NOTIFY * HTTP/1.1\r\nST: dial-multiscreen-org\r\n\r\n", None, None), // device pattern "dial-multiscreen-org"
+        // --- structural behavior ---
+            ("NOTIFY sonos * HTTP/1.1\r\nHost: x\r\n\r\n", Some(Vendor::Sonos), None), // match in the start line
+            ("NOTIFY * HTTP/1.1\r\nX-Roku-Thing: 1\r\n\r\n", Some(Vendor::Roku), None), // match in a header NAME
+            ("NOTIFY * HTTP/1.1\r\nST: SAMSUNG SmartTV\r\n\r\n", Some(Vendor::Samsung), Some(DeviceType::Tv)), // uppercase input still matches
+            ("NOTIFY * HTTP/1.1\r\nST: apple\r\nSERVER: sonos\r\n\r\n", Some(Vendor::Apple), None), // first matching rule wins
+            ("NOTIFY * HTTP/1.1\r\nST: urn:InternetGatewayDevice:1\r\n\r\n", None, Some(DeviceType::Router)), // gateway alone is a Router
+            ("NOTIFY * HTTP/1.1\r\nST: urn:InternetGatewayDevice:1\r\nSERVER: Windows/10\r\n\r\n", Some(Vendor::Microsoft), Some(DeviceType::Laptop)), // gateway plus a PC hint is a Laptop
+            ("HTTP/1.1 200 OK\r\nST: urn:dial-multiscreen-org:service:dial:1\r\nSERVER: Linux/3.8 UPnP/1.0 Chromecast/1.36\r\n\r\n", Some(Vendor::Google), None), // realistic Chromecast
+            ("NOTIFY * HTTP/1.1\r\nNT: urn:schemas-upnp-org:device:ZonePlayer:1\r\nSERVER: Linux UPnP/1.0 Sonos/57.6\r\n\r\n", Some(Vendor::Sonos), None), // realistic Sonos
+            ("NOTIFY * HTTP/1.1\r\nNT: urn:schemas-upnp-org:device:WANConnectionDevice:1\r\nSERVER: Netgear/1.0\r\n\r\n", Some(Vendor::Netgear), Some(DeviceType::Router)), // realistic router
+            ("NOTIFY * HTTP/1.1\r\nST: urn:example:unremarkable:1\r\n\r\n", None, None), // nothing recognizable
+            ("NOTIFY * HTTP/1.1\r\n\r\n", None, None), // no headers at all
+            // --- the qualified gateway rule, one case per reachable extra pattern ---
+            ("NOTIFY * HTTP/1.1\r\nST: urn:InternetGatewayDevice:1\r\nSERVER: HomePC/1.0\r\n\r\n", None, Some(DeviceType::Laptop)), // gateway + "pc" hint
+            ("NOTIFY * HTTP/1.1\r\nST: urn:InternetGatewayDevice:1\r\nSERVER: rvd_host\r\n\r\n", None, Some(DeviceType::Laptop)), // gateway + "rvd_" hint
+            ("NOTIFY * HTTP/1.1\r\nST: googlecast\r\nSERVER: HomePC/1.0\r\n\r\n", Some(Vendor::Google), Some(DeviceType::Laptop)), // googlecast + "pc" hint
+            ("NOTIFY * HTTP/1.1\r\nST: urn:InternetGatewayDevice:1\r\nSERVER: Lenovo\r\n\r\n", Some(Vendor::Lenovo), Some(DeviceType::Laptop)), // "lenovo" reaches the earlier bare Laptop rule first
+        ];
+
+        for (raw, want_vendor, want_device_type) in cases {
+            let packet = crate::parser::ssdp::parse_ssdp_payload(
+                raw.as_bytes(),
+                [0; 6],
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                IpAddr::V4(Ipv4Addr::new(239, 255, 255, 250)),
+            )
+            .unwrap_or_else(|| panic!("fixture failed to parse: {:?}", raw));
+
+            assert_eq!(
+                packet.detect_vendor(),
+                *want_vendor,
+                "vendor mismatch for {:?}",
+                raw
+            );
+            assert_eq!(
+                packet.detect_device_type(),
+                *want_device_type,
+                "device type mismatch for {:?}",
+                raw
+            );
+        }
     }
 }

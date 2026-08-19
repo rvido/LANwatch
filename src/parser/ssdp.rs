@@ -7,7 +7,7 @@
 
 use crate::device::sanitize_display_string;
 use crate::types::{CdpPacket, DeviceType, LldpPacket, Vendor};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// SSDP port used for discovery and responses
@@ -30,19 +30,6 @@ pub enum SsdpMessageType {
     Response,
     /// Unknown start line
     Unknown(String),
-}
-
-/// Borrowed SSDP message types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SsdpMessageTypeView<'a> {
-    /// NOTIFY advertisement
-    Notify,
-    /// M-SEARCH discovery request
-    Search,
-    /// HTTP/1.1 200 OK response
-    Response,
-    /// Unknown start line
-    Unknown(&'a str),
 }
 
 impl std::fmt::Display for SsdpMessageType {
@@ -73,45 +60,7 @@ pub struct SsdpPacket {
     pub headers: HashMap<String, String>,
 }
 
-/// Borrowed view of a parsed SSDP / UPnP packet.
-#[derive(Debug, Clone)]
-pub struct SsdpPacketView<'a> {
-    /// Source MAC address
-    pub source_mac: [u8; 6],
-    /// Source IP address
-    pub source_ip: std::net::IpAddr,
-    /// Destination IP address
-    pub dest_ip: std::net::IpAddr,
-    /// Message type inferred from the HTTP-style start line
-    pub message_type: SsdpMessageTypeView<'a>,
-    /// First line of the SSDP message
-    pub start_line: &'a str,
-    /// Parsed headers keyed by lowercase header name
-    pub headers: Vec<(&'a str, &'a str)>,
-}
-
 impl SsdpPacket {
-    /// Creates a borrowed view of this packet.
-    pub fn view(&self) -> SsdpPacketView<'_> {
-        SsdpPacketView {
-            source_mac: self.source_mac,
-            source_ip: self.source_ip,
-            dest_ip: self.dest_ip,
-            message_type: match &self.message_type {
-                SsdpMessageType::Notify => SsdpMessageTypeView::Notify,
-                SsdpMessageType::Search => SsdpMessageTypeView::Search,
-                SsdpMessageType::Response => SsdpMessageTypeView::Response,
-                SsdpMessageType::Unknown(value) => SsdpMessageTypeView::Unknown(value.as_str()),
-            },
-            start_line: self.start_line.as_str(),
-            headers: self
-                .headers
-                .iter()
-                .map(|(name, value)| (name.as_str(), value.as_str()))
-                .collect(),
-        }
-    }
-
     /// Returns the value of a specific header, if present.
     ///
     /// Keys are lowercased when the packet is parsed, so this is a hash lookup
@@ -129,44 +78,11 @@ impl SsdpPacket {
         &self.headers
     }
 
-    /// Collect the discovery-oriented identifiers advertised by this packet
-    pub fn service_terms(&self) -> Vec<String> {
-        let mut terms = Vec::new();
-        let mut seen = HashSet::new();
-        for header in ["nt", "st", "usn"] {
-            if let Some(value) = self.header(header) {
-                let normalized = value.trim().to_string();
-                if !normalized.is_empty() && seen.insert(normalized.clone()) {
-                    terms.push(normalized);
-                }
-            }
-        }
-        terms
-    }
-
-    /// Combine the useful fingerprint headers into a single string for heuristic matching
-    pub fn fingerprint_text(&self) -> String {
-        let mut parts = vec![self.start_line.clone()];
-        for header in ["nt", "st", "usn", "server", "location"] {
-            if let Some(value) = self.header(header) {
-                parts.push(value.to_string());
-            }
-        }
-        parts.join(" ")
-    }
-}
-
-impl<'a> SsdpPacketView<'a> {
-    /// Returns the value of a specific header, if present.
-    pub fn header(&self, name: &str) -> Option<&'a str> {
-        self.headers
-            .iter()
-            .find(|(header, _)| header.eq_ignore_ascii_case(name))
-            .map(|(_, value)| *value)
-    }
-
     /// Collect the discovery-oriented identifiers advertised by this packet.
-    pub fn service_terms(&self) -> Vec<&'a str> {
+    ///
+    /// Borrows from the packet rather than cloning: the caller only needs the
+    /// terms for matching, which never outlives the packet.
+    pub fn service_terms(&self) -> Vec<&str> {
         let mut terms = Vec::new();
         for header in ["nt", "st", "usn"] {
             if let Some(value) = self.header(header) {
@@ -179,33 +95,34 @@ impl<'a> SsdpPacketView<'a> {
         terms
     }
 
-    /// Combine the useful fingerprint headers into a single string for heuristic matching.
-    pub fn fingerprint_text(&self) -> String {
-        let mut parts: Vec<&str> = vec![self.start_line];
-        for header in ["nt", "st", "usn", "server", "location"] {
-            if let Some(value) = self.header(header) {
-                parts.push(value.trim());
-            }
-        }
-        parts.join(" ")
-    }
-
-    /// Detect vendor from SSDP fingerprints without allocating a combined string.
-    pub fn detect_vendor_from_view(&self) -> Option<Vendor> {
+    /// Detect vendor from the packet's SSDP fingerprints.
+    ///
+    /// Scans the start line and every header in place. An earlier version
+    /// joined the interesting headers into one `String` first; matching
+    /// against the fields directly avoids that allocation entirely.
+    ///
+    /// Rules are evaluated in table order and the first match wins, so the
+    /// order of `SSDP_VENDOR_RULES` is behavior, not just presentation.
+    pub fn detect_vendor(&self) -> Option<Vendor> {
         for rule in SSDP_VENDOR_RULES {
-            if self.view_contains_any(rule.patterns) {
+            if self.contains_any(rule.patterns) {
                 return Some(rule.vendor.clone());
             }
         }
         None
     }
 
-    /// Detect device type from SSDP fingerprints without allocating a combined string.
-    pub fn detect_device_type_from_view(&self) -> Option<DeviceType> {
+    /// Detect device type from the packet's SSDP fingerprints.
+    ///
+    /// A rule matches when any of `any_patterns` is present and, where the
+    /// rule specifies `extra_patterns`, at least one of those is present too.
+    /// As with vendors, table order decides ties -- notably the gateway rule
+    /// qualified by a PC hint is checked before the plain router rule.
+    pub fn detect_device_type(&self) -> Option<DeviceType> {
         for rule in SSDP_DEVICE_TYPE_RULES {
-            let matches_any = self.view_contains_any(rule.any_patterns);
+            let matches_any = self.contains_any(rule.any_patterns);
             let matches_extra =
-                rule.extra_patterns.is_empty() || self.view_contains_any(rule.extra_patterns);
+                rule.extra_patterns.is_empty() || self.contains_any(rule.extra_patterns);
             if matches_any && matches_extra {
                 return Some(rule.device_type.clone());
             }
@@ -213,18 +130,13 @@ impl<'a> SsdpPacketView<'a> {
         None
     }
 
-    fn view_contains_any(&self, needles: &[&str]) -> bool {
-        self.view_contains_any_in(self.start_line, needles)
+    /// True if any needle appears in the start line or in any header name or
+    /// value, compared without regard to ASCII case.
+    fn contains_any(&self, needles: &[&str]) -> bool {
+        contains_any_in(&self.start_line, needles)
             || self.headers.iter().any(|(name, value)| {
-                self.view_contains_any_in(name, needles)
-                    || self.view_contains_any_in(value, needles)
+                contains_any_in(name, needles) || contains_any_in(value, needles)
             })
-    }
-
-    fn view_contains_any_in(&self, haystack: &str, needles: &[&str]) -> bool {
-        needles
-            .iter()
-            .any(|needle| contains_ascii_case_insensitive(haystack, needle))
     }
 }
 
@@ -398,6 +310,13 @@ const SSDP_DEVICE_TYPE_RULES: &[SsdpDeviceTypeRule] = &[
         device_type: DeviceType::SmartHomeDevice,
     },
 ];
+
+/// True if any of `needles` appears in `haystack`, ignoring ASCII case.
+fn contains_any_in(haystack: &str, needles: &[&str]) -> bool {
+    needles
+        .iter()
+        .any(|needle| contains_ascii_case_insensitive(haystack, needle))
+}
 
 fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
     let haystack = haystack.as_bytes();

@@ -164,131 +164,7 @@ pub struct MdnsQuestion {
     pub record_type: MdnsRecordType,
 }
 
-/// Borrowed mDNS question.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MdnsQuestionView<'a> {
-    /// The name being queried
-    pub name: &'a str,
-    /// The record type being requested
-    pub record_type: MdnsRecordType,
-}
-
-/// Borrowed mDNS record data.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MdnsRecordDataView<'a> {
-    /// IPv4 address (A record)
-    A(Ipv4Addr),
-    /// IPv6 address (AAAA record)
-    Aaaa(Ipv6Addr),
-    /// Domain name (PTR record)
-    Ptr(&'a str),
-    /// Service record: priority, weight, port, target
-    Srv {
-        /// Priority of the target host
-        priority: u16,
-        /// Weight for entries with the same priority
-        weight: u16,
-        /// Port on the target host for this service
-        port: u16,
-        /// Target host domain name
-        target: &'a str,
-    },
-    /// Text record (key=value pairs or raw strings)
-    Txt(Vec<&'a str>),
-    /// Raw data for unknown record types
-    Raw(&'a [u8]),
-}
-
-/// Borrowed mDNS record.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MdnsRecordView<'a> {
-    /// The domain name this record is for
-    pub name: &'a str,
-    /// Record type (A, AAAA, PTR, SRV, TXT)
-    pub record_type: MdnsRecordType,
-    /// Time-to-live in seconds
-    pub ttl: u32,
-    /// Record data (interpretation depends on record_type)
-    pub data: MdnsRecordDataView<'a>,
-}
-
-/// Borrowed view of a parsed mDNS packet.
-#[derive(Debug, Clone)]
-pub struct MdnsPacketView<'a> {
-    /// Source MAC address
-    pub source_mac: [u8; 6],
-    /// Source IP address
-    pub source_ip: std::net::IpAddr,
-    /// Destination IP address
-    pub dest_ip: std::net::IpAddr,
-    /// Transaction ID
-    pub transaction_id: u16,
-    /// Is this a response? (false = query)
-    pub is_response: bool,
-    /// Questions (queries)
-    pub questions: Vec<MdnsQuestionView<'a>>,
-    /// Answer records
-    pub answers: Vec<MdnsRecordView<'a>>,
-    /// Authority records
-    pub authority: Vec<MdnsRecordView<'a>>,
-    /// Additional records
-    pub additional: Vec<MdnsRecordView<'a>>,
-}
-
-/// Borrows a single [`MdnsRecord`] as an [`MdnsRecordView`]. Shared by every
-/// record list in [`MdnsPacket::view`] so a new [`MdnsRecordData`] variant
-/// only needs handling in one place.
-fn record_view(record: &MdnsRecord) -> MdnsRecordView<'_> {
-    MdnsRecordView {
-        name: record.name.as_str(),
-        record_type: record.record_type,
-        ttl: record.ttl,
-        data: match &record.data {
-            MdnsRecordData::A(addr) => MdnsRecordDataView::A(*addr),
-            MdnsRecordData::Aaaa(addr) => MdnsRecordDataView::Aaaa(*addr),
-            MdnsRecordData::Ptr(target) => MdnsRecordDataView::Ptr(target.as_str()),
-            MdnsRecordData::Srv {
-                priority,
-                weight,
-                port,
-                target,
-            } => MdnsRecordDataView::Srv {
-                priority: *priority,
-                weight: *weight,
-                port: *port,
-                target: target.as_str(),
-            },
-            MdnsRecordData::Txt(strings) => {
-                MdnsRecordDataView::Txt(strings.iter().map(|s| s.as_str()).collect())
-            }
-            MdnsRecordData::Raw(bytes) => MdnsRecordDataView::Raw(bytes.as_slice()),
-        },
-    }
-}
-
 impl MdnsPacket {
-    /// Creates a borrowed view of this packet.
-    pub fn view(&self) -> MdnsPacketView<'_> {
-        MdnsPacketView {
-            source_mac: self.source_mac,
-            source_ip: self.source_ip,
-            dest_ip: self.dest_ip,
-            transaction_id: self.transaction_id,
-            is_response: self.is_response,
-            questions: self
-                .questions
-                .iter()
-                .map(|question| MdnsQuestionView {
-                    name: question.name.as_str(),
-                    record_type: question.record_type,
-                })
-                .collect(),
-            answers: self.answers.iter().map(record_view).collect(),
-            authority: self.authority.iter().map(record_view).collect(),
-            additional: self.additional.iter().map(record_view).collect(),
-        }
-    }
-
     /// Returns an iterator over every record in the packet (Answers, Authority, and Additional).
     pub fn all_records(&self) -> impl Iterator<Item = &MdnsRecord> {
         self.answers
@@ -319,12 +195,14 @@ impl MdnsPacket {
     /// Extracts all IPv4 addresses from A records found in the packet.
     ///
     /// # Returns
-    /// A vector of tuples containing (host_name, ipv4_address).
-    pub fn get_ipv4_addresses(&self) -> Vec<(String, Ipv4Addr)> {
+    /// A vector of tuples containing (host_name, ipv4_address). The name
+    /// borrows from the packet rather than being cloned, matching
+    /// [`MdnsPacket::get_service_instances`].
+    pub fn get_ipv4_addresses(&self) -> Vec<(&str, Ipv4Addr)> {
         self.all_records()
             .filter_map(|r| {
                 if let MdnsRecordData::A(addr) = &r.data {
-                    Some((r.name.clone(), *addr))
+                    Some((r.name.as_str(), *addr))
                 } else {
                     None
                 }
@@ -335,63 +213,14 @@ impl MdnsPacket {
     /// Extracts all IPv6 addresses from AAAA records found in the packet.
     ///
     /// # Returns
-    /// A vector of tuples containing (host_name, ipv6_address).
-    pub fn get_ipv6_addresses(&self) -> Vec<(String, Ipv6Addr)> {
+    /// A vector of tuples containing (host_name, ipv6_address). The name
+    /// borrows from the packet rather than being cloned, matching
+    /// [`MdnsPacket::get_service_instances`].
+    pub fn get_ipv6_addresses(&self) -> Vec<(&str, Ipv6Addr)> {
         self.all_records()
             .filter_map(|r| {
                 if let MdnsRecordData::Aaaa(addr) = &r.data {
-                    Some((r.name.clone(), *addr))
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
-}
-
-impl<'a> MdnsPacketView<'a> {
-    /// Returns an iterator over every record in the packet (Answers, Authority, and Additional).
-    pub fn all_records(&self) -> impl Iterator<Item = &MdnsRecordView<'a>> {
-        self.answers
-            .iter()
-            .chain(self.authority.iter())
-            .chain(self.additional.iter())
-    }
-
-    /// Extracts service instance names from PTR records.
-    pub fn get_service_instances(&self) -> Vec<(&'a str, &'a str)> {
-        self.answers
-            .iter()
-            .chain(self.additional.iter())
-            .filter_map(|r| {
-                if let MdnsRecordDataView::Ptr(target) = &r.data {
-                    Some((*target, r.name))
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
-
-    /// Extracts all IPv4 addresses from A records found in the packet.
-    pub fn get_ipv4_addresses(&self) -> Vec<(&'a str, Ipv4Addr)> {
-        self.all_records()
-            .filter_map(|r| {
-                if let MdnsRecordDataView::A(addr) = &r.data {
-                    Some((r.name, *addr))
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
-
-    /// Extracts all IPv6 addresses from AAAA records found in the packet.
-    pub fn get_ipv6_addresses(&self) -> Vec<(&'a str, Ipv6Addr)> {
-        self.all_records()
-            .filter_map(|r| {
-                if let MdnsRecordDataView::Aaaa(addr) = &r.data {
-                    Some((r.name, *addr))
+                    Some((r.name.as_str(), *addr))
                 } else {
                     None
                 }

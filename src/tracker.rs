@@ -23,7 +23,7 @@ use crate::types::format_mac;
 #[cfg(feature = "mdns")]
 use crate::mdns_registry::MdnsServiceRegistry;
 #[cfg(feature = "mdns")]
-use crate::parser::mdns::{MdnsPacket, MdnsRecordDataView, NbnsPacket};
+use crate::parser::mdns::{MdnsPacket, MdnsRecordData, NbnsPacket};
 
 #[cfg(feature = "ssdp")]
 use crate::parser::ssdp::{SsdpPacket, WsdPacket};
@@ -1086,16 +1086,14 @@ impl DeviceTracker {
     /// The count of unique updates applied across all detected devices.
     #[cfg(feature = "mdns")]
     pub fn update_from_mdns(&mut self, packet: &MdnsPacket) -> usize {
-        let packet = packet.view();
-
         // 1. Target MAC resolution logic to handle proxying/relaying (e.g. from Eero routers)
         let mut advertised_ips = Vec::new();
         for record in packet.all_records() {
             match &record.data {
-                MdnsRecordDataView::A(addr) => {
+                MdnsRecordData::A(addr) => {
                     advertised_ips.push(IpAddr::V4(*addr));
                 }
-                MdnsRecordDataView::Aaaa(addr) => {
+                MdnsRecordData::Aaaa(addr) => {
                     advertised_ips.push(IpAddr::V6(*addr));
                 }
                 _ => {}
@@ -1158,7 +1156,7 @@ impl DeviceTracker {
 
         for record in packet.all_records() {
             match &record.data {
-                MdnsRecordDataView::A(addr) => {
+                MdnsRecordData::A(addr) => {
                     // Strip .local suffix for hostname and record first IPv4
                     let hostname = record.name.trim_end_matches(".local");
                     if first_local_hostname.is_none() {
@@ -1168,7 +1166,7 @@ impl DeviceTracker {
                         first_ipv4 = Some(*addr);
                     }
                 }
-                MdnsRecordDataView::Aaaa(addr) => {
+                MdnsRecordData::Aaaa(addr) => {
                     let hostname = record.name.trim_end_matches(".local");
                     if first_local_hostname.is_none() {
                         first_local_hostname = Some(hostname);
@@ -1177,7 +1175,7 @@ impl DeviceTracker {
                         first_ipv6 = Some(*addr);
                     }
                 }
-                MdnsRecordDataView::Ptr(target) => {
+                MdnsRecordData::Ptr(target) => {
                     // PTR records indicate service advertisements. The rdata target
                     // is the specific service instance name, e.g.
                     // "Richard's iPhone._companion-link._tcp.local".
@@ -1189,7 +1187,7 @@ impl DeviceTracker {
                         first_friendly_name = extract_service_instance_name(target);
                     }
                 }
-                MdnsRecordDataView::Srv { .. } => {
+                MdnsRecordData::Srv { .. } => {
                     // SRV records also indicate services; the record's own name is
                     // the service instance name (same shape as a PTR target above).
                     if let Some(service_start) = record.name.find("._") {
@@ -1200,10 +1198,10 @@ impl DeviceTracker {
                         }
                     }
                     if first_friendly_name.is_none() {
-                        first_friendly_name = extract_service_instance_name(record.name);
+                        first_friendly_name = extract_service_instance_name(&record.name);
                     }
                 }
-                MdnsRecordDataView::Txt(strings) => {
+                MdnsRecordData::Txt(strings) => {
                     for s in strings {
                         if let Some(eq_idx) = s.find('=') {
                             let key = s[..eq_idx].trim().to_ascii_lowercase();
@@ -1839,8 +1837,6 @@ impl DeviceTracker {
     /// The count of unique updates applied to the device entry.
     #[cfg(feature = "ssdp")]
     pub fn update_from_ssdp(&mut self, packet: &SsdpPacket) -> usize {
-        let packet = packet.view();
-
         let mut updated = 0;
         let mac = format_mac(packet.source_mac);
         let services = packet.service_terms();
@@ -1849,8 +1845,8 @@ impl DeviceTracker {
             .as_ref()
             .and_then(|registry| registry.lookup(&mac));
 
-        let vendor = packet.detect_vendor_from_view();
-        let device_type = packet.detect_device_type_from_view();
+        let vendor = packet.detect_vendor();
+        let device_type = packet.detect_device_type();
 
         let source_ipv4 = match packet.source_ip {
             std::net::IpAddr::V4(ip) => Some(ip),
