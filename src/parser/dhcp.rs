@@ -11,6 +11,14 @@ use crate::types::{
 };
 use std::net::{Ipv4Addr, Ipv6Addr};
 
+/// The DHCP magic cookie that precedes the options area (RFC 2131 s3),
+/// occupying bytes 236..240 of the fixed BOOTP header.
+const DHCPV4_MAGIC_COOKIE: [u8; 4] = [99, 130, 83, 99];
+
+/// `htype` value for 10 Mb Ethernet -- the only hardware type whose `chaddr`
+/// field this parser interprets as a MAC address.
+const DHCPV4_HTYPE_ETHERNET: u8 = 1;
+
 /// Parses a raw DHCPv4 UDP payload into a structured `Dhcpv4Packet`.
 pub fn parse_dhcpv4_payload(
     payload: &[u8],
@@ -20,6 +28,20 @@ pub fn parse_dhcpv4_payload(
     dest_port: u16,
 ) -> Option<Dhcpv4Packet> {
     if payload.len() < 240 {
+        return None;
+    }
+
+    // RFC 2131 s3: the options area is introduced by the magic cookie
+    // 99.130.83.99. Without this check any UDP datagram that happens to use
+    // port 67/68 is decoded as DHCP, and six arbitrary bytes of it become a
+    // device's MAC address.
+    if payload[236..240] != DHCPV4_MAGIC_COOKIE {
+        return None;
+    }
+
+    // htype 1 / hlen 6 is Ethernet. Other hardware types put something that
+    // isn't a 6-byte MAC in `chaddr`, so reading one out would be fiction.
+    if payload[1] != DHCPV4_HTYPE_ETHERNET || payload[2] != 6 {
         return None;
     }
 

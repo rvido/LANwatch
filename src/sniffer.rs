@@ -37,6 +37,13 @@ use crate::parser::ssdp::{
     parse_wsd_payload,
 };
 
+/// How many back-to-back capture failures a `run` loop tolerates before giving
+/// up. A transient read error is worth logging and retrying; a permanent one
+/// (the interface was removed, the channel was torn down) repeats forever, and
+/// without a ceiling the loop becomes a hot spin writing to stderr with no way
+/// out.
+const MAX_CONSECUTIVE_CAPTURE_ERRORS: usize = 100;
+
 /// A `Vec<String>` containing the names (e.g., "eth0", "en0", "wlan0").
 ///
 /// This list is useful for providing users with options for which interface to sniff.
@@ -282,9 +289,16 @@ fn dispatch_tcp_extended(
     src: u16,
     dest: u16,
 ) -> Option<NetworkEvent> {
-    if src == crate::parser::cctv::RTSP_PORT || dest == crate::parser::cctv::RTSP_PORT {
+    // Only the *responder* side identifies a camera. Matching `dest` too would
+    // attribute the event to the Ethernet source of a client-to-camera packet,
+    // i.e. tag the laptop dialling the camera as an IP camera itself.
+    //
+    // Port 554 alone is still a weak signal, so require the payload to look
+    // like RTSP as well; a bare SYN/ACK carries nothing and is ignored.
+    if src == crate::parser::cctv::RTSP_PORT && crate::parser::cctv::is_rtsp_response(payload) {
         return Some(NetworkEvent::Cctv(crate::parser::cctv::CctvPacket {
             source_mac,
+            claimed_mac: None,
             source_ip,
             vendor: crate::types::Vendor::GenericRtsp,
             model: None,
@@ -482,15 +496,28 @@ impl DhcpSniffer {
     where
         F: FnMut(DhcpEvent) -> bool,
     {
+        let mut consecutive_errors = 0usize;
         loop {
             match self.next_packet() {
                 Ok(Some(event)) => {
+                    consecutive_errors = 0;
                     if !callback(event) {
                         break;
                     }
                 }
-                Ok(None) => continue,
+                Ok(None) => {
+                    consecutive_errors = 0;
+                    continue;
+                }
                 Err(e) => {
+                    consecutive_errors += 1;
+                    if consecutive_errors >= MAX_CONSECUTIVE_CAPTURE_ERRORS {
+                        eprintln!(
+                            "Capture on {} failed {} times in a row, giving up: {}",
+                            self.interface_name, consecutive_errors, e
+                        );
+                        break;
+                    }
                     eprintln!("Error reading packet: {}", e);
                 }
             }
@@ -550,15 +577,28 @@ impl NetworkSniffer {
     where
         F: FnMut(NetworkEvent) -> bool,
     {
+        let mut consecutive_errors = 0usize;
         loop {
             match self.next_packet() {
                 Ok(Some(event)) => {
+                    consecutive_errors = 0;
                     if !callback(event) {
                         break;
                     }
                 }
-                Ok(None) => continue,
+                Ok(None) => {
+                    consecutive_errors = 0;
+                    continue;
+                }
                 Err(e) => {
+                    consecutive_errors += 1;
+                    if consecutive_errors >= MAX_CONSECUTIVE_CAPTURE_ERRORS {
+                        eprintln!(
+                            "Capture on {} failed {} times in a row, giving up: {}",
+                            self.interface_name, consecutive_errors, e
+                        );
+                        break;
+                    }
                     eprintln!("Error reading packet: {}", e);
                 }
             }

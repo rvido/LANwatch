@@ -105,6 +105,24 @@ impl ApiServer {
         }
     }
 
+    /// Builds a JSON response with the given status code.
+    ///
+    /// Every endpoint returns JSON with the same content type, so the header
+    /// construction lives here once rather than being repeated (and
+    /// `unwrap`ped) at each call site.
+    fn json(status: u16, body: String) -> Response<std::io::Cursor<Vec<u8>>> {
+        let header = tiny_http::Header::from_bytes("Content-Type", "application/json")
+            .expect("static header is always valid");
+        Response::from_string(body)
+            .with_status_code(status)
+            .with_header(header)
+    }
+
+    /// Serializes `value` as a JSON body with a 200 status.
+    fn json_ok<T: Serialize>(value: &T) -> Response<std::io::Cursor<Vec<u8>>> {
+        Self::json(200, serde_json::to_string(value).unwrap_or_default())
+    }
+
     /// Handle incoming HTTP requests
     fn handle_request(&self, request: &tiny_http::Request) -> Response<std::io::Cursor<Vec<u8>>> {
         let path = request.url();
@@ -185,6 +203,17 @@ impl ApiServer {
             i += 1;
         }
         String::from_utf8_lossy(&out).into_owned()
+    }
+
+    /// Drops the cached device list so the next read rebuilds it.
+    ///
+    /// Uses `if let Ok` like every other lock in this file: with
+    /// `panic = "abort"` set for release builds, unwrapping a poisoned lock
+    /// here would take the whole daemon down rather than degrade one request.
+    fn invalidate_cache(&self) {
+        if let Ok(mut guard) = self.cache.lock() {
+            *guard = None;
+        }
     }
 
     /// Helper to extract limit & offset from URL query params
@@ -276,9 +305,7 @@ impl ApiServer {
             data: slice,
         };
 
-        let json = serde_json::to_string(&response).unwrap_or_default();
-        Response::from_string(json)
-            .with_header(tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap())
+        Self::json_ok(&response)
     }
 
     fn handle_device_by_mac(&self, mac: &str) -> Response<std::io::Cursor<Vec<u8>>> {
@@ -316,10 +343,7 @@ impl ApiServer {
                 data: dev,
             };
 
-            let json = serde_json::to_string(&response).unwrap_or_default();
-            Response::from_string(json).with_header(
-                tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap(),
-            )
+            Self::json_ok(&response)
         } else {
             self.handle_not_found()
         }
@@ -337,11 +361,8 @@ impl ApiServer {
 
         match removed {
             Ok(true) => {
-                *self.cache.lock().unwrap() = None;
-                let json = serde_json::json!({ "success": true, "removed": mac });
-                Response::from_string(json.to_string()).with_header(
-                    tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap(),
-                )
+                self.invalidate_cache();
+                Self::json_ok(&serde_json::json!({ "success": true, "removed": mac }))
             }
             Ok(false) => self.handle_not_found(),
             Err(_) => self.handle_error("Failed to remove device"),
@@ -360,11 +381,8 @@ impl ApiServer {
 
         match cleared {
             Ok(count) => {
-                *self.cache.lock().unwrap() = None;
-                let json = serde_json::json!({ "success": true, "removed": count });
-                Response::from_string(json.to_string()).with_header(
-                    tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap(),
-                )
+                self.invalidate_cache();
+                Self::json_ok(&serde_json::json!({ "success": true, "removed": count }))
             }
             Err(_) => self.handle_error("Failed to flush devices"),
         }
@@ -391,21 +409,17 @@ impl ApiServer {
             },
         };
 
-        let json = serde_json::json!({
+        Self::json_ok(&serde_json::json!({
             "success": true,
             "count": final_count
-        });
-        Response::from_string(json.to_string())
-            .with_header(tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap())
+        }))
     }
 
     fn handle_health(&self) -> Response<std::io::Cursor<Vec<u8>>> {
-        let json = serde_json::json!({
+        Self::json_ok(&serde_json::json!({
             "status": "ok",
             "service": "lanwatch"
-        });
-        Response::from_string(json.to_string())
-            .with_header(tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap())
+        }))
     }
 
     /// Serves the LANwatch logo, compiled into the binary so the dashboard is
@@ -431,9 +445,7 @@ impl ApiServer {
             success: false,
             error: "Not found".to_string(),
         };
-        Response::from_string(serde_json::to_string(&error).unwrap_or_default())
-            .with_status_code(404)
-            .with_header(tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap())
+        Self::json(404, serde_json::to_string(&error).unwrap_or_default())
     }
 
     fn handle_error(&self, message: &str) -> Response<std::io::Cursor<Vec<u8>>> {
@@ -441,9 +453,7 @@ impl ApiServer {
             success: false,
             error: message.to_string(),
         };
-        Response::from_string(serde_json::to_string(&error).unwrap_or_default())
-            .with_status_code(500)
-            .with_header(tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap())
+        Self::json(500, serde_json::to_string(&error).unwrap_or_default())
     }
 }
 

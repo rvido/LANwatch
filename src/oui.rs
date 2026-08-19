@@ -12,8 +12,14 @@ use std::path::Path;
 /// OUI entries can be loaded from an external file to perform MAC-to-vendor resolution.
 #[derive(Debug, Clone, Default)]
 pub struct OuiRegistry {
-    /// Custom vendor overrides
-    custom_overrides: HashMap<String, String>,
+    /// Custom vendor overrides, keyed on the OUI packed into the low 24 bits
+    /// of a `u32`.
+    ///
+    /// An OUI is three bytes, so it fits in an integer key exactly. Keying on
+    /// the `"AA:BB:CC"` string instead cost a separate heap allocation per
+    /// entry -- roughly 35k of them, for nothing, once the full IEEE database
+    /// is loaded -- plus a string hash and comparison on every lookup.
+    custom_overrides: HashMap<u32, Box<str>>,
 }
 
 impl OuiRegistry {
@@ -46,12 +52,11 @@ impl OuiRegistry {
             return None;
         }
 
-        let (buf, len) = Self::normalize_mac_buf(mac_address);
-        let normalized = std::str::from_utf8(&buf[..len]).ok()?;
-
         // Check custom overrides first (highest priority)
-        if let Some(vendor) = self.custom_overrides.get(normalized) {
-            return Some(vendor.as_str());
+        if let Some(key) = Self::oui_key(mac_address)
+            && let Some(vendor) = self.custom_overrides.get(&key)
+        {
+            return Some(vendor);
         }
 
         // Check if it is a private/randomized MAC address
@@ -84,9 +89,10 @@ impl OuiRegistry {
             }
 
             // Parse line: MAC_PREFIX<whitespace>VENDOR_NAME
-            if let Some((mac, vendor)) = Self::parse_oui_line(line) {
-                let normalized = Self::normalize_mac(&mac);
-                self.custom_overrides.insert(normalized, vendor);
+            if let Some((mac, vendor)) = Self::parse_oui_line(line)
+                && let Some(key) = Self::oui_key(mac)
+            {
+                self.custom_overrides.insert(key, vendor.into());
                 count += 1;
             }
         }
@@ -95,9 +101,14 @@ impl OuiRegistry {
     }
 
     /// Adds a manual OUI-to-vendor mapping to the registry.
+    ///
+    /// `mac_prefix` must contain at least six hex digits (an OUI); anything
+    /// shorter is ignored, since a partial prefix could never match a lookup,
+    /// which always normalizes a full MAC down to its first six digits.
     pub fn add(&mut self, mac_prefix: &str, vendor: &str) {
-        let normalized = Self::normalize_mac(mac_prefix);
-        self.custom_overrides.insert(normalized, vendor.to_string());
+        if let Some(key) = Self::oui_key(mac_prefix) {
+            self.custom_overrides.insert(key, vendor.into());
+        }
     }
 
     /// Returns the total count of OUI entries available.
@@ -120,70 +131,36 @@ impl OuiRegistry {
         0
     }
 
-    /// Normalize a MAC address to OUI format (first 3 octets, uppercase, colon-separated)
-    fn normalize_mac(mac: &str) -> String {
-        let (buf, len) = Self::normalize_mac_buf(mac);
-        // `buf[..len]` is built exclusively from ASCII hex digits and ':' in
-        // `normalize_mac_buf`, so this is always valid UTF-8.
-        String::from_utf8_lossy(&buf[..len]).into_owned()
-    }
-
-    /// Core normalization shared by [`Self::lookup`] (stack-only, no
-    /// allocation on the hot lookup path) and [`Self::normalize_mac`]
-    /// (needs an owned `String` as a `HashMap` key). Extracts up to the
-    /// first 6 hex digits of `mac` and returns them uppercased in a fixed
-    /// 8-byte buffer as `AA:BB:CC` (or the bare digits, un-colon-separated,
-    /// if fewer than 6 were found), along with how many buffer bytes are
-    /// valid.
-    fn normalize_mac_buf(mac: &str) -> ([u8; 8], usize) {
-        let mut buf = [0u8; 8];
-        let mut l = 0;
+    /// Packs the first three octets of `mac` into the low 24 bits of a `u32`,
+    /// which is the registry's lookup key.
+    ///
+    /// Accepts any of the usual spellings -- `AA:BB:CC`, `AA-BB-CC`, `AABBCC`,
+    /// or a full MAC -- by simply taking the first six hex digits and ignoring
+    /// whatever separators sit between them. Returns `None` if there aren't
+    /// six, since a shorter prefix isn't an OUI.
+    fn oui_key(mac: &str) -> Option<u32> {
+        let mut key = 0u32;
+        let mut digits = 0;
         for c in mac.chars() {
-            if l >= 6 {
-                break;
-            }
-            if c.is_ascii_hexdigit() {
-                let u = c.to_ascii_uppercase() as u8;
-                match l {
-                    0 => buf[0] = u,
-                    1 => buf[1] = u,
-                    2 => buf[3] = u,
-                    3 => buf[4] = u,
-                    4 => buf[6] = u,
-                    _ => buf[7] = u,
+            if let Some(value) = c.to_digit(16) {
+                key = (key << 4) | value;
+                digits += 1;
+                if digits == 6 {
+                    return Some(key);
                 }
-                l += 1;
             }
         }
-
-        if l >= 6 {
-            buf[2] = b':';
-            buf[5] = b':';
-            (buf, 8)
-        } else {
-            let mut compact = [0u8; 8];
-            let mut idx = 0;
-            for c in mac.chars() {
-                if idx >= l {
-                    break;
-                }
-                if c.is_ascii_hexdigit() {
-                    compact[idx] = c.to_ascii_uppercase() as u8;
-                    idx += 1;
-                }
-            }
-            (compact, l)
-        }
+        None
     }
 
     /// Parse a line from an OUI file
-    fn parse_oui_line(line: &str) -> Option<(String, String)> {
+    fn parse_oui_line(line: &str) -> Option<(&str, &str)> {
         // Try tab separator first
         if let Some((mac, vendor)) = line.split_once('\t') {
             let mac = mac.trim();
             let vendor = vendor.trim();
             if !mac.is_empty() && !vendor.is_empty() {
-                return Some((mac.to_string(), vendor.to_string()));
+                return Some((mac, vendor));
             }
         }
 
@@ -193,7 +170,7 @@ impl OuiRegistry {
             let mac = parts[0].trim();
             let vendor = parts[1].trim();
             if !mac.is_empty() && !vendor.is_empty() {
-                return Some((mac.to_string(), vendor.to_string()));
+                return Some((mac, vendor));
             }
         }
 
@@ -202,7 +179,7 @@ impl OuiRegistry {
 
     /// Parse IEEE OUI format line (from official IEEE downloads)
     /// Format: "XX-XX-XX   (hex)\t\tVendor Name"
-    pub(crate) fn parse_ieee_oui_line(line: &str) -> Option<(String, String)> {
+    pub(crate) fn parse_ieee_oui_line(line: &str) -> Option<(&str, &str)> {
         // IEEE format: "XX-XX-XX   (hex)		Vendor Name"
         // We look for lines containing "(hex)"
         if !line.contains("(hex)") {
@@ -222,7 +199,7 @@ impl OuiRegistry {
             return None;
         }
 
-        Some((mac.to_string(), vendor.to_string()))
+        Some((mac, vendor))
     }
 
     /// Load OUI entries from IEEE format file (official IEEE OUI download)
@@ -236,9 +213,10 @@ impl OuiRegistry {
             let line = line?;
 
             // Parse IEEE format line
-            if let Some((mac, vendor)) = Self::parse_ieee_oui_line(&line) {
-                let normalized = Self::normalize_mac(&mac);
-                self.custom_overrides.insert(normalized, vendor);
+            if let Some((mac, vendor)) = Self::parse_ieee_oui_line(&line)
+                && let Some(key) = Self::oui_key(mac)
+            {
+                self.custom_overrides.insert(key, vendor.into());
                 count += 1;
             }
         }
@@ -288,16 +266,35 @@ pub fn download_ieee_oui<P: AsRef<Path>>(output_path: P, url: Option<&str>) -> R
     let url = url.unwrap_or(IEEE_OUI_URL);
     let output_path = output_path.as_ref();
 
-    // Use curl to download the file
+    // Only fetch over TLS. This also rejects anything starting with '-', which
+    // curl would otherwise read as an option rather than a URL -- `-K<file>`,
+    // for instance, makes it load a caller-chosen config file.
+    if !url.starts_with("https://") {
+        return Err(format!(
+            "Refusing to download from {:?}: only https:// URLs are accepted",
+            url
+        ));
+    }
+
+    let output_path_str = output_path.to_str().ok_or("Invalid output path")?;
+    if output_path_str.starts_with('-') {
+        return Err("Refusing an output path starting with '-'".to_string());
+    }
+
+    // Use curl to download the file. `--` terminates option parsing so the URL
+    // can never be mistaken for a flag.
     let output = std::process::Command::new("curl")
         .args([
             "-fsSL", // fail silently, follow redirects, show errors
+            "--proto",
+            "=https", // and don't let a redirect downgrade the scheme
             "--connect-timeout",
             "30",
             "--max-time",
             "120",
             "-o",
-            output_path.to_str().ok_or("Invalid output path")?,
+            output_path_str,
+            "--",
             url,
         ])
         .output()

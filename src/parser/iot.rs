@@ -8,6 +8,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
+use crate::device::sanitize_display_string;
 use crate::types::{DeviceType, Vendor};
 
 /// LIFX UDP discovery port
@@ -342,17 +343,12 @@ pub fn parse_coap_payload(
         offset = offset.checked_add(option_len)?;
     }
 
-    let parsed_payload = if let Some(start) = payload_start {
-        if start < payload.len() {
-            String::from_utf8(payload[start..].to_vec())
-                .ok()
-                .map(|s| s.trim().to_string())
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    // The CoAP payload runs to the end of the datagram and is echoed to the
+    // console, so bound and neutralize it here rather than at the print site.
+    let parsed_payload = payload_start
+        .filter(|start| *start < payload.len())
+        .and_then(|start| std::str::from_utf8(&payload[start..]).ok())
+        .and_then(sanitize_display_string);
 
     Some(CoapPacket {
         source_mac,
@@ -452,12 +448,9 @@ pub fn parse_knx_payload(
                 // Find first null byte to trim name
                 let end = name_bytes.iter().position(|&b| b == 0).unwrap_or(30);
                 if end > 0
-                    && let Ok(name) = String::from_utf8(name_bytes[..end].to_vec())
+                    && let Ok(name) = std::str::from_utf8(&name_bytes[..end])
                 {
-                    let name_trimmed = name.trim().to_string();
-                    if !name_trimmed.is_empty() {
-                        friendly_name = Some(name_trimmed);
-                    }
+                    friendly_name = sanitize_display_string(name);
                 }
                 break;
             }

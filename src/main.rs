@@ -13,7 +13,7 @@ use lanwatch::{
 #[cfg(feature = "mdns")]
 use lanwatch::{MdnsQuerier, MdnsRecordData, MdnsServiceRegistry};
 #[cfg(any(feature = "mdns", feature = "ssdp"))]
-use lanwatch::{NetworkEvent, NetworkSniffer, format_mac};
+use lanwatch::{NetworkEvent, NetworkSniffer, display_safe, format_mac};
 #[cfg(feature = "ssdp")]
 use lanwatch::{SsdpPacket, SsdpQuerier};
 use std::env;
@@ -31,6 +31,8 @@ const DEFAULT_OUI_DOWNLOAD_PATH: &str = "ieee-oui.txt";
 const EVENT_CHANNEL_CAPACITY: usize = 4096;
 const DB_FLUSH_BATCH_SIZE: usize = 32;
 const DB_FLUSH_INTERVAL_MS: u64 = 300;
+/// How often (in dropped events) to warn that the worker is falling behind.
+const DROPPED_EVENT_REPORT_INTERVAL: u64 = 1000;
 
 fn main() {
     // Parse command line arguments
@@ -231,6 +233,32 @@ fn main() {
     run_dhcp_sniffer(&config.interface_name, tracker);
 }
 
+/// Hands `event` to the worker thread without ever blocking the capture loop.
+///
+/// `SyncSender::send` blocks when the channel is full, which stalls packet
+/// capture and silently overflows the kernel's ring buffer -- packets are lost
+/// either way, but blocking loses them invisibly. Dropping the event instead
+/// keeps capture running and makes the loss countable, so a periodic notice
+/// can tell the operator their data has gaps.
+///
+/// Returns `false` only when the worker is gone, which ends the capture loop.
+fn forward_event<T>(tx: &mpsc::SyncSender<T>, event: T, dropped: &mut u64) -> bool {
+    match tx.try_send(event) {
+        Ok(()) => true,
+        Err(mpsc::TrySendError::Full(_)) => {
+            *dropped += 1;
+            if dropped.is_multiple_of(DROPPED_EVENT_REPORT_INTERVAL) {
+                eprintln!(
+                    "Warning: worker cannot keep up; {} event(s) dropped so far",
+                    dropped
+                );
+            }
+            true
+        }
+        Err(mpsc::TrySendError::Disconnected(_)) => false,
+    }
+}
+
 fn run_dhcp_sniffer(interface_name: &str, tracker: Arc<RwLock<DeviceTracker>>) {
     let (tx, rx) = mpsc::sync_channel::<DhcpEvent>(EVENT_CHANNEL_CAPACITY);
     let worker = start_dhcp_worker(rx, Arc::clone(&tracker));
@@ -240,10 +268,12 @@ fn run_dhcp_sniffer(interface_name: &str, tracker: Arc<RwLock<DeviceTracker>>) {
         std::process::exit(1);
     });
 
-    sniffer.run(|event| tx.send(event).is_ok());
+    let mut dropped = 0u64;
+    sniffer.run(|event| forward_event(&tx, event, &mut dropped));
 
     drop(tx);
     let _ = worker.join();
+    report_dropped_events(dropped);
 }
 
 #[cfg(any(feature = "mdns", feature = "ssdp"))]
@@ -261,10 +291,23 @@ fn run_network_sniffer(
         std::process::exit(1);
     });
 
-    sniffer.run(|event| tx.send(event).is_ok());
+    let mut dropped = 0u64;
+    sniffer.run(|event| forward_event(&tx, event, &mut dropped));
 
     drop(tx);
     let _ = worker.join();
+    report_dropped_events(dropped);
+}
+
+/// Reports the final dropped-event tally, if any, so a run that silently shed
+/// load doesn't look like a clean one.
+fn report_dropped_events(dropped: u64) {
+    if dropped > 0 {
+        eprintln!(
+            "Warning: {} event(s) were dropped because the database worker fell behind",
+            dropped
+        );
+    }
 }
 
 fn start_dhcp_worker(
@@ -878,22 +921,31 @@ fn print_mdns_packet(packet: &lanwatch::MdnsPacket, updated_count: usize, total:
     );
 
     for q in &packet.questions {
-        println!("  ? {} ({})", q.name, q.record_type);
+        println!("  ? {} ({})", display_safe(&q.name), q.record_type);
     }
 
     for record in packet.all_records() {
         match &record.data {
             MdnsRecordData::A(addr) => {
-                println!("  A: {} -> {}", record.name, addr);
+                println!("  A: {} -> {}", display_safe(&record.name), addr);
             }
             MdnsRecordData::Aaaa(addr) => {
-                println!("  AAAA: {} -> {}", record.name, addr);
+                println!("  AAAA: {} -> {}", display_safe(&record.name), addr);
             }
             MdnsRecordData::Ptr(target) => {
-                println!("  PTR: {} -> {}", record.name, target);
+                println!(
+                    "  PTR: {} -> {}",
+                    display_safe(&record.name),
+                    display_safe(target)
+                );
             }
             MdnsRecordData::Srv { port, target, .. } => {
-                println!("  SRV: {} -> {}:{}", record.name, target, port);
+                println!(
+                    "  SRV: {} -> {}:{}",
+                    display_safe(&record.name),
+                    display_safe(target),
+                    port
+                );
             }
             MdnsRecordData::Txt(strings) => {
                 if !strings.is_empty() {
@@ -928,16 +980,16 @@ fn print_llmnr_packet(packet: &lanwatch::MdnsPacket, updated_count: usize, total
     );
 
     for q in &packet.questions {
-        println!("  ? {} ({})", q.name, q.record_type);
+        println!("  ? {} ({})", display_safe(&q.name), q.record_type);
     }
 
     for record in packet.all_records() {
         match &record.data {
             MdnsRecordData::A(addr) => {
-                println!("  A: {} -> {}", record.name, addr);
+                println!("  A: {} -> {}", display_safe(&record.name), addr);
             }
             MdnsRecordData::Aaaa(addr) => {
-                println!("  AAAA: {} -> {}", record.name, addr);
+                println!("  AAAA: {} -> {}", display_safe(&record.name), addr);
             }
             _ => {}
         }
@@ -959,7 +1011,7 @@ fn print_nbns_packet(packet: &lanwatch::NbnsPacket, updated_count: usize, total:
         packet.source_ip,
         format_mac(packet.source_mac)
     );
-    println!("  Name: {}", packet.name);
+    println!("  Name: {}", display_safe(&packet.name));
     let suffix_desc = match packet.suffix {
         0x00 => "Workstation",
         0x03 => "Messenger",
@@ -985,22 +1037,22 @@ fn print_ssdp_packet(packet: &SsdpPacket, updated_count: usize, total: usize) {
         packet.source_ip,
         format_mac(packet.source_mac)
     );
-    println!("Start line: {}", packet.start_line);
+    println!("Start line: {}", display_safe(&packet.start_line));
 
     if let Some(nt) = packet.header("nt") {
-        println!("  NT: {}", nt);
+        println!("  NT: {}", display_safe(nt));
     }
     if let Some(st) = packet.header("st") {
-        println!("  ST: {}", st);
+        println!("  ST: {}", display_safe(st));
     }
     if let Some(usn) = packet.header("usn") {
-        println!("  USN: {}", usn);
+        println!("  USN: {}", display_safe(usn));
     }
     if let Some(server) = packet.header("server") {
-        println!("  Server: {}", server);
+        println!("  Server: {}", display_safe(server));
     }
     if let Some(location) = packet.header("location") {
-        println!("  Location: {}", location);
+        println!("  Location: {}", display_safe(location));
     }
 
     if updated_count > 0 {

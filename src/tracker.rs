@@ -1370,14 +1370,15 @@ impl DeviceTracker {
             device.last_seen = SystemTime::now();
         }
 
-        if updated > 0 && self.auto_save {
-            let _ = self.save_to_db();
-        }
-
+        // Mark dirty before flushing -- see the note in `update_from_ssdp`.
         self.dirty_devices
             .lock()
             .unwrap()
             .insert(target_mac.to_string());
+
+        if updated > 0 && self.auto_save {
+            let _ = self.save_to_db();
+        }
 
         updated
     }
@@ -1913,11 +1914,14 @@ impl DeviceTracker {
 
         device.last_seen = SystemTime::now();
 
+        // Mark dirty *before* flushing: `save_to_db` only writes the macs in
+        // `dirty_devices`, so flushing first persists the previous backlog and
+        // leaves this update on disk only if some later call happens to flush.
+        self.dirty_devices.lock().unwrap().insert(mac);
+
         if updated > 0 && self.auto_save {
             let _ = self.save_to_db();
         }
-
-        self.dirty_devices.lock().unwrap().insert(mac);
 
         updated
     }
@@ -1967,12 +1971,12 @@ impl DeviceTracker {
 
         device.last_seen = SystemTime::now();
 
-        if updated > 0 && self.auto_save {
-            let _ = self.save_to_db();
-        }
-
+        // Mark dirty before flushing -- see the note in `update_from_ssdp`.
         if updated > 0 {
             self.dirty_devices.lock().unwrap().insert(mac.clone());
+            if self.auto_save {
+                let _ = self.save_to_db();
+            }
         }
 
         updated
@@ -2021,12 +2025,12 @@ impl DeviceTracker {
 
         device.last_seen = SystemTime::now();
 
-        if updated > 0 && self.auto_save {
-            let _ = self.save_to_db();
-        }
-
+        // Mark dirty before flushing -- see the note in `update_from_ssdp`.
         if updated > 0 {
             self.dirty_devices.lock().unwrap().insert(mac.clone());
+            if self.auto_save {
+                let _ = self.save_to_db();
+            }
         }
 
         updated
@@ -2081,12 +2085,12 @@ impl DeviceTracker {
 
         device.last_seen = SystemTime::now();
 
-        if updated > 0 && self.auto_save {
-            let _ = self.save_to_db();
-        }
-
+        // Mark dirty before flushing -- see the note in `update_from_ssdp`.
         if updated > 0 {
             self.dirty_devices.lock().unwrap().insert(mac.clone());
+            if self.auto_save {
+                let _ = self.save_to_db();
+            }
         }
 
         updated
@@ -2149,12 +2153,12 @@ impl DeviceTracker {
 
         device.last_seen = SystemTime::now();
 
-        if updated > 0 && self.auto_save {
-            let _ = self.save_to_db();
-        }
-
+        // Mark dirty before flushing -- see the note in `update_from_ssdp`.
         if updated > 0 {
             self.dirty_devices.lock().unwrap().insert(mac.clone());
+            if self.auto_save {
+                let _ = self.save_to_db();
+            }
         }
 
         updated
@@ -2221,12 +2225,12 @@ impl DeviceTracker {
 
         device.last_seen = SystemTime::now();
 
-        if updated > 0 && self.auto_save {
-            let _ = self.save_to_db();
-        }
-
+        // Mark dirty before flushing -- see the note in `update_from_ssdp`.
         if updated > 0 {
             self.dirty_devices.lock().unwrap().insert(mac.clone());
+            if self.auto_save {
+                let _ = self.save_to_db();
+            }
         }
 
         updated
@@ -2271,12 +2275,12 @@ impl DeviceTracker {
 
         device.last_seen = SystemTime::now();
 
-        if updated > 0 && self.auto_save {
-            let _ = self.save_to_db();
-        }
-
+        // Mark dirty before flushing -- see the note in `update_from_ssdp`.
         if updated > 0 {
             self.dirty_devices.lock().unwrap().insert(mac.clone());
+            if self.auto_save {
+                let _ = self.save_to_db();
+            }
         }
 
         updated
@@ -2347,12 +2351,12 @@ impl DeviceTracker {
 
         device.last_seen = SystemTime::now();
 
-        if updated > 0 && self.auto_save {
-            let _ = self.save_to_db();
-        }
-
+        // Mark dirty before flushing -- see the note in `update_from_ssdp`.
         if updated > 0 {
             self.dirty_devices.lock().unwrap().insert(mac.clone());
+            if self.auto_save {
+                let _ = self.save_to_db();
+            }
         }
 
         updated

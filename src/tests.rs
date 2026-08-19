@@ -100,6 +100,9 @@ mod tests {
         // Create a minimal valid DHCPv4 packet
         let mut payload = vec![0u8; 300];
         payload[0] = 1; // BootRequest
+        payload[1] = 1; // htype: Ethernet
+        payload[2] = 6; // hlen: 6-byte MAC
+        payload[236..240].copy_from_slice(&[99, 130, 83, 99]); // DHCP magic cookie
         // Set client MAC at offset 28-33
         payload[28] = 0xAA;
         payload[29] = 0xBB;
@@ -136,6 +139,9 @@ mod tests {
     fn test_parse_dhcpv4_with_hostname() {
         let mut payload = vec![0u8; 300];
         payload[0] = 1; // BootRequest
+        payload[1] = 1; // htype: Ethernet
+        payload[2] = 6; // hlen: 6-byte MAC
+        payload[236..240].copy_from_slice(&[99, 130, 83, 99]); // DHCP magic cookie
         // Add hostname option at 240
         payload[240] = 12; // Option: Hostname
         payload[241] = 4; // Length: 4
@@ -162,6 +168,9 @@ mod tests {
     fn test_parse_dhcpv4_with_requested_ip() {
         let mut payload = vec![0u8; 300];
         payload[0] = 1; // BootRequest
+        payload[1] = 1; // htype: Ethernet
+        payload[2] = 6; // hlen: 6-byte MAC
+        payload[236..240].copy_from_slice(&[99, 130, 83, 99]); // DHCP magic cookie
         // Add requested IP option at 240
         payload[240] = 50; // Option: Requested IP
         payload[241] = 4; // Length: 4
@@ -189,6 +198,9 @@ mod tests {
         // Minimal DHCPv4 packet where yiaddr is populated by server reply.
         let mut payload = vec![0u8; 300];
         payload[0] = 2; // BootReply
+        payload[1] = 1; // htype: Ethernet
+        payload[2] = 6; // hlen: 6-byte MAC
+        payload[236..240].copy_from_slice(&[99, 130, 83, 99]); // DHCP magic cookie
         // yiaddr (bytes 16..20)
         payload[16] = 192;
         payload[17] = 168;
@@ -1789,6 +1801,9 @@ mod tests {
         // Payload with option that claims longer length than available
         let mut payload = vec![0u8; 300];
         payload[0] = 1; // BootRequest
+        payload[1] = 1; // htype: Ethernet
+        payload[2] = 6; // hlen: 6-byte MAC
+        payload[236..240].copy_from_slice(&[99, 130, 83, 99]); // DHCP magic cookie
         payload[240] = 12; // Option: Hostname
         payload[241] = 100; // Length: 100 (but only a few bytes available)
         payload[242] = b't';
@@ -1830,6 +1845,9 @@ mod tests {
     fn test_dhcpv4_packet_fields() {
         let mut payload = vec![0u8; 300];
         payload[0] = 2; // BootReply
+        payload[1] = 1; // htype: Ethernet
+        payload[2] = 6; // hlen: 6-byte MAC
+        payload[236..240].copy_from_slice(&[99, 130, 83, 99]); // DHCP magic cookie
         // Set client MAC
         for i in 0..6 {
             payload[28 + i] = (i + 1) as u8;
@@ -2665,6 +2683,9 @@ mod tests {
     fn test_dhcpv4_option55_parsing() {
         let mut payload = vec![0u8; 300];
         payload[0] = 1; // BootRequest
+        payload[1] = 1; // htype: Ethernet
+        payload[2] = 6; // hlen: 6-byte MAC
+        payload[236..240].copy_from_slice(&[99, 130, 83, 99]); // DHCP magic cookie
 
         // Option 55 (Parameter Request List)
         // Code 55, Length 4, Values [1, 3, 6, 42]
@@ -2694,6 +2715,9 @@ mod tests {
     fn test_dhcpv4_option60_parsing() {
         let mut payload = vec![0u8; 300];
         payload[0] = 1; // BootRequest
+        payload[1] = 1; // htype: Ethernet
+        payload[2] = 6; // hlen: 6-byte MAC
+        payload[236..240].copy_from_slice(&[99, 130, 83, 99]); // DHCP magic cookie
 
         // Option 60 (Vendor Class Identifier)
         // Code 60, Length 8, Value "MSFT 5.0"
@@ -2935,6 +2959,9 @@ mod tests {
     fn test_dhcpv4_option43_parsing() {
         let mut payload = vec![0u8; 300];
         payload[0] = 1; // BootRequest
+        payload[1] = 1; // htype: Ethernet
+        payload[2] = 6; // hlen: 6-byte MAC
+        payload[236..240].copy_from_slice(&[99, 130, 83, 99]); // DHCP magic cookie
         payload[28] = 0xAA;
         payload[29] = 0xBB;
         payload[30] = 0xCC;
@@ -3995,7 +4022,10 @@ mod tests {
         let result = crate::parser::cctv::parse_sadp_payload(payload, parse_mac("00:11:22:33:44:55").unwrap(), source_ip);
         assert!(result.is_some());
         let packet = result.unwrap();
-        assert_eq!(packet.source_mac, parse_mac("70:3d:15:ab:cd:ef").unwrap());
+        // The observed sender identifies the device; the MAC asserted in the
+        // payload is kept separately and never allowed to become the identity.
+        assert_eq!(packet.source_mac, parse_mac("00:11:22:33:44:55").unwrap());
+        assert_eq!(packet.claimed_mac, parse_mac("70:3d:15:ab:cd:ef"));
         assert_eq!(packet.vendor, Vendor::Hikvision);
         assert_eq!(packet.model.as_deref(), Some("DS-2CD2132F-I"));
         assert_eq!(packet.serial_number.as_deref(), Some("DS-2CD2132F-I20140922AAWR481234567"));
@@ -4010,7 +4040,8 @@ mod tests {
         let result = crate::parser::cctv::parse_dahua_payload(payload, parse_mac("00:11:22:33:44:55").unwrap(), source_ip);
         assert!(result.is_some());
         let packet = result.unwrap();
-        assert_eq!(packet.source_mac, parse_mac("00:1a:2b:3c:4d:5e").unwrap());
+        assert_eq!(packet.source_mac, parse_mac("00:11:22:33:44:55").unwrap());
+        assert_eq!(packet.claimed_mac, parse_mac("00:1a:2b:3c:4d:5e"));
         assert_eq!(packet.vendor, Vendor::Dahua);
         assert_eq!(packet.model.as_deref(), Some("IPC-HFW4431R-ZS"));
         assert_eq!(packet.serial_number.as_deref(), Some("XYZ98765"));
@@ -4027,6 +4058,7 @@ mod tests {
         {
             let mut tracker = DeviceTracker::new(temp_path).unwrap();
             let packet = crate::parser::cctv::CctvPacket {
+                claimed_mac: None,
                 source_mac: parse_mac("11:22:33:44:55:66").unwrap(),
                 source_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 55)),
                 vendor: Vendor::Hikvision,
@@ -4248,5 +4280,203 @@ mod tests {
         // Test unspecified source IP
         let unspecified = std::net::Ipv6Addr::UNSPECIFIED;
         assert!(parse_ndp_packet(&ndp_payload, unspecified, parse_mac("00:11:22:33:44:55").unwrap()).is_none());
+    }
+
+    // ---- Regression tests for the hardening pass ----
+
+    #[test]
+    #[cfg(feature = "mdns")]
+    fn test_dns_name_pointer_chain_is_bounded() {
+        // A chain of compression pointers where every hop lands on a fresh
+        // offset. The old "have I seen this offset?" guard never fired on
+        // this shape and rescanned a growing vector at each hop, making one
+        // 9 KiB datagram cost tens of milliseconds of CPU.
+        const CHAIN: usize = 3000;
+        let mut payload = vec![0u8; CHAIN * 2];
+        for i in 1..CHAIN {
+            let target = (i - 1) * 2;
+            payload[i * 2] = 0xC0 | ((target >> 8) as u8 & 0x3F);
+            payload[i * 2 + 1] = (target & 0xFF) as u8;
+        }
+        payload[0] = 0; // root label
+
+        let start = std::time::Instant::now();
+        let result = crate::parser::mdns::parse_dns_name(&payload, (CHAIN - 1) * 2);
+        let elapsed = start.elapsed();
+
+        // Rejected outright once the jump budget is spent.
+        assert!(result.is_none());
+        // Generous bound: the point is that it no longer scales with the
+        // chain length, not that it hits a specific number.
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "pointer chain took {:?}, expected a bounded walk",
+            elapsed
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "mdns")]
+    fn test_dns_name_allows_normal_compression() {
+        // "b.local" at offset 0, then a name "a" whose parent is a pointer
+        // back to it -- ordinary compression must still decode.
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&[1, b'b', 5, b'l', b'o', b'c', b'a', b'l', 0]);
+        let name_start = payload.len();
+        payload.extend_from_slice(&[1, b'a', 0xC0, 0x00]);
+
+        let (name, next) = crate::parser::mdns::parse_dns_name(&payload, name_start).unwrap();
+        assert_eq!(name, "a.b.local");
+        assert_eq!(next, payload.len());
+    }
+
+    #[test]
+    fn test_add_service_is_capped() {
+        let mut device = DeviceInfo::new(
+            "aa:bb:cc:dd:ee:ff".to_string(),
+            "10.0.0.1".parse().unwrap(),
+            None,
+        );
+        for i in 0..500 {
+            device.add_service(&format!("_svc{}._tcp", i));
+        }
+        assert_eq!(device.services.len(), 64);
+
+        // An over-long name is rejected rather than stored.
+        let mut fresh = DeviceInfo::new(
+            "aa:bb:cc:dd:ee:00".to_string(),
+            "10.0.0.2".parse().unwrap(),
+            None,
+        );
+        assert!(!fresh.add_service(&"_".repeat(500)));
+        assert!(fresh.services.is_empty());
+    }
+
+    #[test]
+    fn test_add_service_deduplicates_case_insensitively() {
+        let mut device = DeviceInfo::new(
+            "aa:bb:cc:dd:ee:ff".to_string(),
+            "10.0.0.1".parse().unwrap(),
+            None,
+        );
+        assert!(device.add_service("_HTTP._TCP.local"));
+        assert!(!device.add_service("_http._tcp"));
+        assert!(!device.add_service("_Http._Tcp.local"));
+        assert_eq!(device.services, vec!["_http._tcp".to_string()]);
+    }
+
+    #[test]
+    fn test_dhcpv4_rejects_packet_without_magic_cookie() {
+        let mut payload = vec![0u8; 300];
+        payload[0] = 1;
+        payload[1] = 1;
+        payload[2] = 6;
+        // No magic cookie: this is some other protocol on port 67/68.
+        assert!(
+            parse_dhcpv4_payload(
+                &payload,
+                Ipv4Addr::new(0, 0, 0, 0),
+                Ipv4Addr::new(255, 255, 255, 255),
+                68,
+                67,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn test_dhcpv4_rejects_non_ethernet_hardware_type() {
+        let mut payload = vec![0u8; 300];
+        payload[0] = 1;
+        payload[1] = 6; // htype: IEEE 802 networks, not Ethernet
+        payload[2] = 6;
+        payload[236..240].copy_from_slice(&[99, 130, 83, 99]);
+        assert!(
+            parse_dhcpv4_payload(
+                &payload,
+                Ipv4Addr::new(0, 0, 0, 0),
+                Ipv4Addr::new(255, 255, 255, 255),
+                68,
+                67,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn test_display_safe_strips_escapes_and_spoofing() {
+        // ANSI escape sequence plus a right-to-left override.
+        let hostile = "ok\u{1b}[2Jgone\u{202e}reversed\u{200b}";
+        assert_eq!(display_safe(hostile).to_string(), "ok[2Jgonereversed");
+        // Ordinary text is untouched.
+        assert_eq!(display_safe("Living Room TV").to_string(), "Living Room TV");
+    }
+
+    #[test]
+    fn test_sanitize_display_string_strips_spoofing_chars() {
+        assert_eq!(
+            crate::device::sanitize_display_string("Front\u{202e}Door\u{1b}[31m"),
+            Some("FrontDoor[31m".to_string())
+        );
+        assert_eq!(crate::device::sanitize_display_string("\u{200b}\u{1b}"), None);
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_ssdp_payload_and_header_counts_are_capped() {
+        let mut message = String::from("NOTIFY * HTTP/1.1\r\n");
+        for i in 0..5000 {
+            message.push_str(&format!("x{}: y\r\n", i));
+        }
+        let packet = crate::parser::ssdp::parse_ssdp_payload(
+            message.as_bytes(),
+            [0; 6],
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(239, 255, 255, 250)),
+        )
+        .unwrap();
+        assert!(packet.headers().len() <= 64);
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_lldp_without_usable_tlvs_is_rejected() {
+        // A single unrecognised TLV: nothing to report, so no device.
+        let payload = [0x0Eu8, 0x02, 0x00, 0x00];
+        assert!(crate::parser::ssdp::parse_lldp_payload(&payload, [0; 6]).is_none());
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_rtsp_detection_requires_server_side_traffic() {
+        assert!(crate::parser::cctv::is_rtsp_response(b"RTSP/1.0 200 OK\r\n"));
+        assert!(crate::parser::cctv::is_rtsp_response(
+            b"OPTIONS rtsp://cam/ RTSP/1.0\r\n"
+        ));
+        // A bare TCP handshake carries nothing identifying.
+        assert!(!crate::parser::cctv::is_rtsp_response(b""));
+        assert!(!crate::parser::cctv::is_rtsp_response(b"GET / HTTP/1.1\r\n"));
+    }
+
+    #[test]
+    fn test_download_ieee_oui_rejects_non_https_urls() {
+        // Anything curl could read as a flag, or a plaintext scheme, is
+        // refused before the process is spawned.
+        for url in ["-K/tmp/evil.conf", "http://example.com/oui.txt", "file:///etc/passwd"] {
+            assert!(crate::oui::download_ieee_oui("/tmp/lanwatch_oui_probe.txt", Some(url)).is_err());
+        }
+    }
+
+    #[test]
+    fn test_oui_registry_accepts_every_mac_spelling() {
+        let mut registry = OuiRegistry::new();
+        registry.add("00-1B-63", "Apple");
+        for mac in ["00:1B:63:AA:BB:CC", "001b63aabbcc", "00:1b:63", "001B63"] {
+            assert_eq!(registry.lookup(mac), Some("Apple"), "failed for {}", mac);
+        }
+        // Fewer than six hex digits is not an OUI.
+        let mut partial = OuiRegistry::new();
+        partial.add("00:1B", "Nope");
+        assert_eq!(partial.len(), 0);
     }
 }

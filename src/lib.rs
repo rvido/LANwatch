@@ -30,7 +30,7 @@ pub mod api;
 
 // Re-export public interface
 pub use classifier::*;
-pub use device::{DeviceInfo, format_timestamp, parse_timestamp};
+pub use device::{DeviceInfo, DisplaySafe, display_safe, format_timestamp, parse_timestamp};
 pub use oui::{IEEE_OUI_URL, OuiRegistry, download_ieee_oui};
 pub use parser::*;
 pub use sniffer::*;

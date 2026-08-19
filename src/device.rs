@@ -3,12 +3,35 @@
 //
 // LANwatch - Network device discovery and tracking
 
+use std::fmt::Write as _;
 use std::net::{IpAddr, Ipv6Addr};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
 use crate::types::{DeviceType, Vendor};
+
+/// Maximum number of distinct service types retained per device.
+///
+/// Service names arrive from unauthenticated LAN traffic and are deduplicated
+/// but were previously never capped, so a host advertising endless synthetic
+/// `_xxxx._tcp.local` types could grow one device's list without limit -- and
+/// the whole list is re-serialized into a single SQLite text column on every
+/// flush, making the write cost grow with the square of what was injected.
+/// A real device advertises a handful.
+const MAX_SERVICES_PER_DEVICE: usize = 64;
+
+/// Maximum length of a single service name, in bytes.
+const MAX_SERVICE_NAME_LEN: usize = 128;
+
+/// Lowercases `value` lazily, one `char` at a time.
+///
+/// Used for both the duplicate check and the stored form in
+/// [`DeviceInfo::add_service`] so the comparison and the insert can never
+/// normalize differently.
+fn lowercase_chars(value: &str) -> impl Iterator<Item = char> + '_ {
+    value.chars().flat_map(char::to_lowercase)
+}
 
 /// Information about a detected DHCP device
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,17 +148,32 @@ impl DeviceInfo {
     /// # Returns
     /// `true` if a new service was added, `false` if it was already in the list.
     pub fn add_service(&mut self, service: &str) -> bool {
-        let normalized = service
-            .to_lowercase()
-            .trim_end_matches(".local")
-            .to_string();
-        match self.services.binary_search(&normalized) {
-            Ok(_) => false,
-            Err(index) => {
-                self.services.insert(index, normalized);
-                true
-            }
+        let trimmed = service.trim_end_matches(".local");
+        if trimmed.is_empty() || trimmed.len() > MAX_SERVICE_NAME_LEN {
+            return false;
         }
+
+        // Compare against the normalized form without building it: service
+        // advertisements repeat constantly, so the overwhelmingly common
+        // outcome is "already present", and allocating a lowercased `String`
+        // just to throw it away on every mDNS packet is pure waste. Both the
+        // comparison and the stored value go through `lowercase_chars`, so the
+        // two can't disagree about what "already present" means.
+        let index = match self
+            .services
+            .binary_search_by(|existing| existing.chars().cmp(lowercase_chars(trimmed)))
+        {
+            Ok(_) => return false,
+            Err(index) => index,
+        };
+
+        if self.services.len() >= MAX_SERVICES_PER_DEVICE {
+            return false;
+        }
+
+        self.services
+            .insert(index, lowercase_chars(trimmed).collect());
+        true
     }
 
     /// Sets the device vendor if it is not already defined.
@@ -591,6 +629,56 @@ pub(crate) fn sanitize_hostname(input: &str) -> Option<String> {
     }
 }
 
+/// Wraps a string so that printing it cannot emit control characters or
+/// display-spoofing codepoints. See [`display_safe`].
+pub struct DisplaySafe<'a>(&'a str);
+
+impl std::fmt::Display for DisplaySafe<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for c in self
+            .0
+            .chars()
+            .filter(|c| !c.is_control() && !is_display_spoofing_char(*c))
+        {
+            f.write_char(c)?;
+        }
+        Ok(())
+    }
+}
+
+/// Renders untrusted text safely to a terminal, dropping control characters
+/// (ANSI escapes above all) and display-spoofing codepoints as it writes.
+///
+/// Free-text fields are already neutralized by [`sanitize_display_string`]
+/// when the parsers lift them off the wire. This is for the values that must
+/// keep their exact bytes to stay useful -- DNS record names, NetBIOS names,
+/// SSDP header values, all of which feed service matching and vendor
+/// fingerprinting -- so they can only be made safe where they are displayed,
+/// not where they are parsed.
+///
+/// Borrows rather than allocating, so it costs nothing when the text is
+/// already clean, which it almost always is.
+pub fn display_safe(value: &str) -> DisplaySafe<'_> {
+    DisplaySafe(value)
+}
+
+/// Returns true for characters that are not control codes but still let a
+/// string misrepresent itself when displayed: bidirectional overrides and
+/// isolates, which can visually reorder surrounding text, and zero-width
+/// characters, which can hide content outright.
+///
+/// `char::is_control` does not cover these -- they are `Cf` (format), not `Cc`
+/// -- so a device name could otherwise render in a terminal or the dashboard
+/// as something quite different from what is stored.
+fn is_display_spoofing_char(c: char) -> bool {
+    matches!(c,
+        '\u{200B}'..='\u{200F}'   // zero-width space/joiners, LRM, RLM
+        | '\u{202A}'..='\u{202E}' // embeddings and overrides
+        | '\u{2066}'..='\u{2069}' // isolates
+        | '\u{FEFF}'              // zero-width no-break space
+    )
+}
+
 /// Sanitize a free-form, human-readable string (device/friendly name, model,
 /// system description) harvested from untrusted network packets.
 ///
@@ -603,11 +691,16 @@ pub(crate) fn sanitize_hostname(input: &str) -> Option<String> {
 ///
 /// Returns `None` if nothing printable remains. The result is capped at 255
 /// characters to bound memory and output size.
+///
+/// Applied by the protocol parsers as each string is lifted off the wire, so
+/// that everything downstream -- the tracker, the SQLite record, the JSON API,
+/// and the CLI's own `println!` output -- is working from already-neutralized
+/// text rather than each having to remember to neutralize it again.
 #[cfg_attr(not(any(feature = "mdns", feature = "ssdp", test)), allow(dead_code))]
 pub(crate) fn sanitize_display_string(input: &str) -> Option<String> {
     let cleaned: String = input
         .chars()
-        .filter(|c| !c.is_control())
+        .filter(|c| !c.is_control() && !is_display_spoofing_char(*c))
         .take(255)
         .collect();
 

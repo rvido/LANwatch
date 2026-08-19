@@ -5,6 +5,8 @@
 
 //! MQTT, MQTT-SN, and Plex GDM (Good Day Mate) discovery parsers.
 
+use crate::device::sanitize_display_string;
+
 /// MQTT standard TCP/UDP port
 pub const MQTT_PORT: u16 = 1883;
 
@@ -126,7 +128,7 @@ pub fn parse_mqtt_connect(
     Some(MqttPacket {
         source_mac,
         source_ip,
-        client_id: client_id.to_string(),
+        client_id: sanitize_display_string(client_id)?,
         protocol: "MQTT".to_string(),
     })
 }
@@ -156,11 +158,13 @@ pub fn parse_mqtt_sn_connect(
         return None;
     }
 
+    // The client ID runs to the end of the datagram, so this is the one field
+    // whose length an attacker picks freely; `sanitize_display_string` caps it.
     let client_id = std::str::from_utf8(&payload[client_id_offset..]).ok()?;
     Some(MqttPacket {
         source_mac,
         source_ip,
-        client_id: client_id.trim().to_string(),
+        client_id: sanitize_display_string(client_id)?,
         protocol: "MQTT-SN".to_string(),
     })
 }
@@ -185,10 +189,9 @@ pub fn parse_gdm_payload(
         let line = line.trim();
         if let Some(colon) = line.find(':') {
             let key = line[..colon].trim().to_lowercase();
-            let val = line[colon + 1..].trim().to_string();
-            if val.is_empty() {
+            let Some(val) = sanitize_display_string(&line[colon + 1..]) else {
                 continue;
-            }
+            };
             match key.as_str() {
                 "name" => name = Some(val),
                 "product" => product = Some(val),

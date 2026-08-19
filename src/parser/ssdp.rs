@@ -5,6 +5,7 @@
 
 #![cfg(feature = "ssdp")]
 
+use crate::device::sanitize_display_string;
 use crate::types::{CdpPacket, DeviceType, LldpPacket, Vendor};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -112,11 +113,15 @@ impl SsdpPacket {
     }
 
     /// Returns the value of a specific header, if present.
+    ///
+    /// Keys are lowercased when the packet is parsed, so this is a hash lookup
+    /// on the lowercased name rather than a linear scan of the map.
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(header, _)| header.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
+        if name.bytes().any(|b| b.is_ascii_uppercase()) {
+            self.headers.get(&name.to_lowercase()).map(String::as_str)
+        } else {
+            self.headers.get(name).map(String::as_str)
+        }
     }
 
     /// Returns a reference to the complete map of SSDP headers.
@@ -517,8 +522,12 @@ pub fn parse_wsd_payload(
     source_mac: [u8; 6],
     source_ip: std::net::IpAddr,
 ) -> Option<WsdPacket> {
-    let max_len = std::cmp::min(payload.len(), 8192);
-    let s = std::str::from_utf8(&payload[..max_len]).ok()?;
+    let max_len = std::cmp::min(payload.len(), MAX_SSDP_PAYLOAD);
+    // Lossy rather than strict: truncating at a fixed byte offset can land
+    // mid-character, and `from_utf8` would then reject an otherwise perfectly
+    // good packet just because it happened to be long.
+    let s = String::from_utf8_lossy(&payload[..max_len]);
+    let s = s.as_ref();
 
     if !s.contains("http://schemas.xmlsoap.org/ws/2005/04/discovery") {
         return None;
@@ -584,12 +593,17 @@ pub fn parse_ssdp_payload(
         return None;
     }
 
-    let text = String::from_utf8_lossy(payload);
+    // Bound the work a single datagram can cost. A real SSDP message is a few
+    // hundred bytes; a UDP payload can be 64 KiB, and without a cap every byte
+    // of it is a potential header line costing two `String` allocations and a
+    // map insert -- at line rate, from anyone on the LAN.
+    let len = std::cmp::min(payload.len(), MAX_SSDP_PAYLOAD);
+    let text = String::from_utf8_lossy(&payload[..len]);
     let mut lines = text
         .lines()
         .map(|line| line.trim())
         .filter(|line| !line.is_empty());
-    let start_line = lines.next()?.to_string();
+    let start_line = truncate_on_char_boundary(lines.next()?, MAX_SSDP_HEADER_LEN).to_string();
 
     let message_type = if starts_with_ascii_case_insensitive(&start_line, "M-SEARCH * HTTP/1.1") {
         SsdpMessageType::Search
@@ -603,9 +617,12 @@ pub fn parse_ssdp_payload(
 
     let mut headers = HashMap::new();
     for line in lines {
+        if headers.len() >= MAX_SSDP_HEADERS {
+            break;
+        }
         if let Some((name, value)) = line.split_once(':') {
-            let key = name.trim().to_lowercase();
-            let value = value.trim().to_string();
+            let key = truncate_on_char_boundary(name.trim(), MAX_SSDP_HEADER_LEN).to_lowercase();
+            let value = truncate_on_char_boundary(value.trim(), MAX_SSDP_HEADER_LEN).to_string();
             if !key.is_empty() {
                 headers.insert(key, value);
             }
@@ -620,6 +637,29 @@ pub fn parse_ssdp_payload(
         start_line,
         headers,
     })
+}
+
+/// Largest SSDP datagram body parsed. Anything beyond this is ignored rather
+/// than allocated for.
+const MAX_SSDP_PAYLOAD: usize = 8192;
+
+/// Largest number of headers retained from one SSDP message.
+const MAX_SSDP_HEADERS: usize = 64;
+
+/// Largest header name/value (and start line) retained, in bytes.
+const MAX_SSDP_HEADER_LEN: usize = 512;
+
+/// Truncates `value` to at most `max` bytes without splitting a UTF-8
+/// character (slicing a `&str` at a non-boundary index would panic).
+fn truncate_on_char_boundary(value: &str, max: usize) -> &str {
+    if value.len() <= max {
+        return value;
+    }
+    let mut end = max;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
 }
 
 #[inline(always)]
@@ -677,7 +717,8 @@ pub fn parse_lldp_payload(payload: &[u8], source_mac: [u8; 6]) -> Option<LldpPac
                                 port_bytes[5]
                             )
                         }
-                        _ => String::from_utf8_lossy(port_bytes).trim().to_string(),
+                        _ => sanitize_display_string(&String::from_utf8_lossy(port_bytes))
+                            .unwrap_or_default(),
                     };
                     if !p_id.is_empty() {
                         port_id = Some(p_id);
@@ -686,17 +727,11 @@ pub fn parse_lldp_payload(payload: &[u8], source_mac: [u8; 6]) -> Option<LldpPac
             }
             5 => {
                 // System Name
-                let name = String::from_utf8_lossy(value).trim().to_string();
-                if !name.is_empty() {
-                    system_name = Some(name);
-                }
+                system_name = sanitize_display_string(&String::from_utf8_lossy(value));
             }
             6 => {
                 // System Description
-                let desc = String::from_utf8_lossy(value).trim().to_string();
-                if !desc.is_empty() {
-                    system_description = Some(desc);
-                }
+                system_description = sanitize_display_string(&String::from_utf8_lossy(value));
             }
             8 if value.len() >= 2 => {
                 // Management Address
@@ -722,6 +757,17 @@ pub fn parse_lldp_payload(payload: &[u8], source_mac: [u8; 6]) -> Option<LldpPac
             }
             _ => {}
         }
+    }
+
+    // A frame that yielded no usable TLV is not an LLDP advertisement worth
+    // reporting -- returning `Some` here would mint a device entry out of
+    // whatever noise happened to arrive on the LLDP ethertype.
+    if system_name.is_none()
+        && system_description.is_none()
+        && port_id.is_none()
+        && management_address.is_none()
+    {
+        return None;
     }
 
     Some(LldpPacket {
@@ -769,10 +815,7 @@ pub fn parse_cdp_payload(payload: &[u8], source_mac: [u8; 6]) -> Option<CdpPacke
         match tlv_type {
             1 => {
                 // Device ID
-                let d_id = String::from_utf8_lossy(value).trim().to_string();
-                if !d_id.is_empty() {
-                    device_id = Some(d_id);
-                }
+                device_id = sanitize_display_string(&String::from_utf8_lossy(value));
             }
             2 => {
                 // Address
@@ -831,27 +874,29 @@ pub fn parse_cdp_payload(payload: &[u8], source_mac: [u8; 6]) -> Option<CdpPacke
             }
             3 => {
                 // Port ID
-                let p_id = String::from_utf8_lossy(value).trim().to_string();
-                if !p_id.is_empty() {
-                    port_id = Some(p_id);
-                }
+                port_id = sanitize_display_string(&String::from_utf8_lossy(value));
             }
             5 => {
                 // Software Version
-                let ver = String::from_utf8_lossy(value).trim().to_string();
-                if !ver.is_empty() {
-                    software_version = Some(ver);
-                }
+                software_version = sanitize_display_string(&String::from_utf8_lossy(value));
             }
             6 => {
                 // Platform
-                let plat = String::from_utf8_lossy(value).trim().to_string();
-                if !plat.is_empty() {
-                    platform = Some(plat);
-                }
+                platform = sanitize_display_string(&String::from_utf8_lossy(value));
             }
             _ => {}
         }
+    }
+
+    // Same rationale as the LLDP path: no recognised TLV means this wasn't a
+    // CDP advertisement, so don't manufacture a device from it.
+    if device_id.is_none()
+        && software_version.is_none()
+        && port_id.is_none()
+        && platform.is_none()
+        && management_address.is_none()
+    {
+        return None;
     }
 
     Some(CdpPacket {

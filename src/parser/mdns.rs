@@ -607,13 +607,30 @@ pub fn parse_mdns_payload(
     })
 }
 
+/// Maximum number of compression-pointer jumps tolerated while decoding one
+/// name. A legitimate name needs at most a handful; a hostile packet can chain
+/// pointers until it runs out of address space. Capping the jump count keeps
+/// the walk O(1)-bounded regardless of payload contents.
+///
+/// This replaces an earlier "have I visited this offset before?" set: that
+/// only caught pointers that revisit an offset, so a chain descending through
+/// fresh offsets slipped past it and cost a linear scan of the visited set per
+/// hop -- quadratic in the chain length, and paid again for every record in
+/// the packet.
+const MAX_NAME_POINTER_JUMPS: usize = 64;
+
+/// Maximum length of a decoded DNS name, per RFC 1035 s2.3.4. Bounds both the
+/// output `String` and the number of labels a single name can contribute.
+const MAX_NAME_LEN: usize = 255;
+
 /// Parse a DNS name from the packet (handles compression)
 pub(crate) fn parse_dns_name(payload: &[u8], start: usize) -> Option<(String, usize)> {
     let mut name_parts: Vec<&str> = Vec::new();
     let mut offset = start;
     let mut jumped = false;
     let mut return_offset = 0;
-    let mut visited_offsets: Vec<usize> = Vec::new();
+    let mut jumps = 0usize;
+    let mut name_len = 0usize;
 
     loop {
         if offset >= payload.len() {
@@ -633,10 +650,13 @@ pub(crate) fn parse_dns_name(payload: &[u8], start: usize) -> Option<(String, us
                 return None;
             }
             let pointer = ((len & 0x3F) << 8) | (payload[offset + 1] as usize);
-            if pointer >= payload.len() || pointer == offset || visited_offsets.contains(&pointer) {
+            if pointer >= payload.len() || pointer == offset {
                 return None;
             }
-            visited_offsets.push(pointer);
+            jumps += 1;
+            if jumps > MAX_NAME_POINTER_JUMPS {
+                return None;
+            }
             if !jumped {
                 return_offset = offset + 2;
                 jumped = true;
@@ -647,6 +667,12 @@ pub(crate) fn parse_dns_name(payload: &[u8], start: usize) -> Option<(String, us
 
         offset += 1;
         if offset + len > payload.len() {
+            return None;
+        }
+
+        // Account for the label plus the '.' that will join it.
+        name_len += len + 1;
+        if name_len > MAX_NAME_LEN {
             return None;
         }
 
@@ -766,7 +792,10 @@ fn parse_record_data(
                 if pos + str_len > end {
                     break;
                 }
-                let s = String::from_utf8_lossy(&payload[pos..pos + str_len]).to_string();
+                // `into_owned` moves the borrow through untouched when the
+                // bytes are already valid UTF-8 (the normal case); `to_string`
+                // would copy unconditionally.
+                let s = String::from_utf8_lossy(&payload[pos..pos + str_len]).into_owned();
                 strings.push(s);
                 pos += str_len;
             }
