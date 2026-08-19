@@ -28,7 +28,7 @@ A Rust library and CLI tool for network device discovery and tracking via DHCP, 
 - **Smart Home & IoT Discovery**: Extracts model and vendor metadata from HomeKit (HAP) and Matter service advertisements (Google, Apple, Amazon, Eve, Signify/Philips Hue, Aqara, IKEA, Nanoleaf, Tuya, Somfy, TP-Link, Lutron, Yale, Belkin, Bosch, etc.)
 - **Specialized IoT & Constrained Protocols**: Captures and parses CoAP (Constrained Application Protocol) on UDP port 5683, KNXnet/IP building automation traffic on UDP port 3671, and MQTT/MQTT-SN on TCP/UDP port 1883 to dynamically identify sensors, smart lights, smart plugs, and home automation systems
 - **Media Server & Player Discovery**: Parses Plex GDM (Good Day Mate) XML/HTTP-like discovery broadcasts on UDP ports 32410, 32412, and 32414 to locate and identify Plex Media Servers and Players
-- **IP Camera & CCTV Discovery (Physical Security)**: Identifies physical security hardware by parsing Hikvision SADP (port 9999) XML discovery messages, Dahua discovery (port 37810) JSON payloads, and active RTSP (TCP port 554) video streams
+- **IP Camera & CCTV Discovery (Physical Security)**: Identifies physical security hardware by parsing Hikvision SADP (port 9999) XML discovery messages, Dahua discovery (port 37810) JSON payloads, and RTSP (TCP port 554) server responses
 - **IEEE OUI Database**: Built-in vendor identification from MAC addresses using IEEE OUI (Organizationally Unique Identifier) prefixes (40,000+ entries)
 - **Device Tracking & Persistence**: Automatically track detected devices and persist them to a high-performance embedded SQLite database (`devices.db`) with index-sorted queries and Write-Ahead Logging (WAL) for lock-free, concurrent reads and writes.
 - **HTTP API** (optional): Opt-in REST API server to query devices as JSON. (Requires the `http-api` feature.)
@@ -44,10 +44,10 @@ Add to your `Cargo.toml`. The `http-api` feature is opt-in to keep binary size s
 ```toml
 [dependencies]
 # Smallest binary footprint, core DHCP & MAC tracking only
-lanwatch = "0.12"
+lanwatch = "0.14"
 
 # With HTTP API server and active discovery protocols
-lanwatch = { version = "0.12", features = ["http-api", "mdns", "ssdp"] }
+lanwatch = { version = "0.14", features = ["http-api", "mdns", "ssdp"] }
 ```
 
 Or clone and build from source. Release builds are automatically optimized for size (`opt-level = "z"`, `strip = true`, `panic = "abort"`):
@@ -173,6 +173,11 @@ To prevent the binary from growing bloated and containing stale database listing
    sudo cargo run -- --download-oui
    # This downloads the official list from standards-oui.ieee.org and saves it to `ieee-oui.txt`
    ```
+
+   The download shells out to `curl` and accepts `https://` URLs only, with
+   `--proto =https` so a redirect cannot downgrade the transport. Library
+   callers passing a custom URL to `download_ieee_oui` are held to the same
+   rule.
 
 2. Run LANwatch loading the downloaded OUI database:
    ```bash
@@ -465,8 +470,9 @@ cargo run --example parse_payload
 - `is_ssdp_ports(src, dest)` - Check if ports indicate SSDP (requires `ssdp` feature)
 - `parse_dhcpv4_payload(payload, src, dst, src_port, dst_port)` - Parse DHCPv4 from raw bytes
 - `parse_dhcpv6_payload(payload, src, dst, src_port, dst_port)` - Parse DHCPv6 from raw bytes
-- `parse_mdns_payload(payload, src, dst)` - Parse mDNS from raw bytes (requires `mdns` feature)
+- `parse_mdns_payload(payload, source_mac, src, dst)` - Parse mDNS from raw bytes (requires `mdns` feature)
 - `parse_ssdp_payload(payload, source_mac, src, dst)` - Parse SSDP from raw bytes (requires `ssdp` feature)
+- `display_safe(value)` - Wrap untrusted text so printing it cannot emit terminal escapes or display-spoofing codepoints (borrows, no allocation)
 - `build_mdns_query(name, record_type)` - Build an mDNS query packet (requires `mdns` feature)
 - `build_ssdp_search_request(search_target)` - Build an SSDP M-SEARCH request (requires `ssdp` feature)
 - `start_api_server(addr, tracker)` - Start HTTP API server in background thread (requires `http-api` feature)
@@ -581,8 +587,10 @@ Under the `ssdp` feature gate, LANwatch passively sniffs UDP port 5683 to parse 
 
 Under the `ssdp` feature gate, LANwatch sniffs physical security endpoints via:
 - **Hikvision SADP**: Sniffing UDP ports 9999 and 37020 for SOAP XML probe/response frames, extracting exact model names and serial numbers.
-- **Dahua Discovery**: Sniffing UDP port 37810 JSON-over-UDP frames, parsing camera models, MACs, and serial numbers.
-- **RTSP Active Traffic**: Sniffing TCP port 554 connections to identify generic surveillance and media streaming cameras.
+- **Dahua Discovery**: Sniffing UDP port 37810 JSON-over-UDP frames, parsing camera models and serial numbers.
+- **RTSP Traffic**: Sniffing TCP port 554 to identify generic surveillance and media streaming cameras. Only traffic *originating* from port 554 with an RTSP-shaped payload is counted, so a client connecting to a camera is not itself recorded as one.
+
+A device is always keyed on the MAC observed in the Ethernet header. SADP and Dahua payloads may also *claim* a MAC; that value is surfaced separately as `CctvPacket::claimed_mac` and never used as an identity, since any host on the segment can assert an arbitrary one.
 
 ### MQTT & MQTT-SN Sniffing
 
@@ -659,6 +667,85 @@ A `Makefile` is provided to simplify common development, testing, linting, and d
     make help
     ```
 
+## Handling Untrusted Traffic
+
+Everything LANwatch parses arrives unauthenticated from the local segment, and
+any host on that segment can send whatever it likes. The parsers are written to
+treat all of it as hostile input: malformed or truncated frames yield `None`
+rather than panicking or over-allocating, and the limits below bound what a
+single sender can cost you.
+
+### Parsing limits
+
+| Limit | Value | Why |
+|---|---|---|
+| DNS compression-pointer jumps per name | 64 | A pointer chain through fresh offsets would otherwise make name decoding quadratic, and it is paid again for every record in the packet |
+| Decoded DNS name length | 255 bytes | RFC 1035 §2.3.4 |
+| SSDP payload parsed | 8 KiB | A 64 KiB datagram of one-character headers is thousands of allocations at line rate |
+| SSDP headers retained | 64, 512 bytes each | Same |
+| Services stored per device | 64, 128 bytes each | The list is re-serialized into one SQLite cell on every flush, so unbounded growth costs write amplification as well as memory |
+| CCTV model / serial fields | 255 bytes | These land in the database verbatim |
+| Consecutive capture errors before giving up | 100 | A removed interface would otherwise spin forever on stderr |
+
+Traffic beyond a limit is dropped, not truncated: a value that long is
+malformed rather than merely verbose, and silently trimming it would invent a
+plausible-looking model or hostname no device ever reported.
+
+### Identity is never self-reported
+
+A device is keyed on the MAC address observed in the Ethernet header. Where a
+protocol lets a payload assert its own MAC — Hikvision SADP `<MAC>`, Dahua
+`"mac"` — that value is recorded separately and never becomes an identity.
+Otherwise a single crafted datagram could create or overwrite any entry in the
+inventory, including a real device's.
+
+DHCPv4 frames are validated against the RFC 2131 magic cookie and an Ethernet
+`htype`/`hlen` before `chaddr` is read as a MAC, so an unrelated datagram that
+happens to use port 67/68 cannot contribute six arbitrary bytes as a device.
+
+### Text harvested from the network
+
+Device names, models, and descriptions are attacker-controlled strings that end
+up on your terminal, in the database, in JSON responses, and in the dashboard.
+They are neutralized in two places, depending on what the value is for:
+
+- **Free text** (LLDP/CDP TLVs, CCTV model and serial, MQTT client ID, Plex GDM
+  and KNX names, CoAP payloads) is sanitized in the parsers, as it comes off
+  the wire. Control characters, ANSI escapes, bidirectional overrides, and
+  zero-width characters are stripped, and the result is capped at 255
+  characters. Everything downstream receives already-clean text.
+- **Protocol identifiers** (DNS record names, NetBIOS names, SSDP header
+  values) must keep their exact bytes to drive service matching and vendor
+  fingerprinting, so they are stored as received and passed through
+  `display_safe()` at the point they are printed.
+
+The dashboard additionally HTML-escapes every value it renders, and the CLI
+prints TXT record contents with Rust's `Debug` formatting, which escapes
+control characters on its own.
+
+### Backpressure
+
+The capture thread never blocks on the database worker. If the worker falls
+behind, events are dropped and counted rather than stalling capture — blocking
+would overflow the kernel's ring buffer and lose the same packets invisibly.
+A warning is printed every 1000 dropped events, and a final tally on exit:
+
+```
+Warning: worker cannot keep up; 1000 event(s) dropped so far
+```
+
+Seeing this means your capture has gaps. It usually indicates the database is
+on slow storage, or the interface is carrying more discovery traffic than one
+worker can classify.
+
+### Scope
+
+These measures bound resource use and prevent one host from corrupting another
+host's record. They are not an authentication boundary. In particular the HTTP
+API has no authentication: it binds `127.0.0.1:8080` by default, and `DELETE
+/devices` will wipe the database for anyone who can reach it. If you bind it to
+a routable address, put your own access control in front of it.
+
 ## Performance Tuning & Optimizations
 
 LANwatch includes several configurations and design patterns to maximize execution speed and scalability on hotpaths under high network traffic:
@@ -666,7 +753,8 @@ LANwatch includes several configurations and design patterns to maximize executi
 *   **Host-Specific CPU Optimizations (`target-cpu=native`)**: Configured globally in `.cargo/config.toml` to compile LANwatch utilizing all instruction set extensions (AVX2, SSE4.2, NEON, etc.) supported by your local CPU, allowing LLVM to perform advanced loop vectorization and unrolling.
 *   **O(1) Transactional Database Updates**: Migrated the storage backend from full-file serializations to SQLite with Write-Ahead Logging (WAL), reducing write amplification from O(N) full file rewrites to O(1) single-row updates.
 *   **O(log N) Indexed Sorting**: Refactored the REST API query engine to run paginated, pre-sorted index scans inside SQLite directly rather than cloning and sorting the entire registry in-memory, cutting memory overhead to O(page_size) and sorting to O(log N).
-*   **Zero-Allocation Hostname Classification**: Device classification in the parser loops avoids heap allocations for case conversion.
+*   **Zero-Allocation Hostname Classification**: Device classification in the parser loops avoids heap allocations for case conversion. Service de-duplication compares against the normalized form without building it, so the common "already advertised" case allocates nothing.
+*   **Integer-Keyed OUI Registry**: An OUI is three bytes, so the vendor table is keyed on the prefix packed into a `u32` rather than an `"AA:BB:CC"` string — removing roughly 35,000 key allocations when the full IEEE registry is loaded, along with a string hash and comparison on every lookup.
 *   **Dynamic Allocator Swap**: For concurrent HTTP API and high-traffic packet capture, you can preload lock-free allocators (`mimalloc` or `jemalloc`) dynamically without altering code:
     ```bash
     LD_PRELOAD=/usr/lib/libmimalloc.so ./target/release/lanwatch eth0 --api
