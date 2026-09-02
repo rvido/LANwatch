@@ -4,7 +4,7 @@
 // LANwatch - Network device discovery and tracking
 
 use std::fmt::Write as _;
-use std::net::{IpAddr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -133,7 +133,9 @@ impl DeviceInfo {
             }
         }
 
-        let new_hostname = hostname.and_then(sanitize_hostname);
+        let new_hostname = hostname
+            .and_then(sanitize_hostname)
+            .filter(|h| !hostname_echoes_mac(&self.mac_address, h));
         if self.hostname != new_hostname && new_hostname.is_some() {
             self.hostname = new_hostname;
             changed = true;
@@ -231,6 +233,40 @@ impl DeviceInfo {
                 changed = true;
             }
         }
+        changed
+    }
+
+    /// Drops `ip` from this device, if it holds it.
+    ///
+    /// Used when another device proves the address is now its own. The primary
+    /// IPv6 address falls back to the best remaining one, and a dropped primary
+    /// IPv4 address leaves the entry unspecified so the next sighting can fill
+    /// it in again.
+    ///
+    /// Returns `true` if anything was removed.
+    pub fn remove_ip(&mut self, ip: IpAddr) -> bool {
+        let mut changed = false;
+
+        if let IpAddr::V6(v6) = ip {
+            let before = self.ipv6_addresses.len();
+            self.ipv6_addresses.retain(|addr| *addr != v6);
+            changed |= self.ipv6_addresses.len() != before;
+
+            if self.ipv6_address == Some(IpAddr::V6(v6)) {
+                self.ipv6_address = self
+                    .ipv6_addresses
+                    .iter()
+                    .max_by_key(|addr| ipv6_preference_score(addr))
+                    .map(|addr| IpAddr::V6(*addr));
+                changed = true;
+            }
+        }
+
+        if self.ip_address == ip {
+            self.ip_address = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+            changed = true;
+        }
+
         changed
     }
 
@@ -607,6 +643,41 @@ pub(crate) fn normalize_device_identifier(raw: &str) -> String {
     }
 
     candidate
+}
+
+/// Returns `true` when `hostname` carries nothing but the device's own MAC.
+///
+/// Some devices advertise their MAC as their hostname (`dca632bb3547`,
+/// `DC-A6-32-BB-35-47`). That name adds no information the record does not
+/// already hold, it reads as a bug in the UI, and because most hostname
+/// updates only fire when the field is still empty it permanently blocks the
+/// real name from being adopted later. Treating it as "no hostname" keeps the
+/// slot open.
+///
+/// Deliberately strict: only a name whose hex digits are exactly the MAC's is
+/// rejected, so a legitimate name that merely embeds the MAC
+/// (`printer-dca632bb3547`) is kept.
+pub fn hostname_echoes_mac(mac: &str, hostname: &str) -> bool {
+    let mac_hex = mac.chars().filter(|c| c.is_ascii_hexdigit());
+    let host_hex = hostname.chars().filter(|c| c.is_ascii_hexdigit());
+
+    // Any non-separator character means the name says more than the MAC does.
+    if hostname
+        .chars()
+        .any(|c| !c.is_ascii_hexdigit() && !matches!(c, ':' | '-' | '.' | '_'))
+    {
+        return false;
+    }
+
+    let mut mac_hex = mac_hex.map(|c| c.to_ascii_lowercase());
+    let mut host_hex = host_hex.map(|c| c.to_ascii_lowercase());
+    loop {
+        match (mac_hex.next(), host_hex.next()) {
+            (None, None) => return true,
+            (Some(a), Some(b)) if a == b => continue,
+            _ => return false,
+        }
+    }
 }
 
 /// Keep hostnames printable and safe for CSV/UI output.

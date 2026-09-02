@@ -9,10 +9,14 @@ mod tests {
     use std::collections::HashMap;
 
     use crate::device::{
-        escape_csv_field, is_leap_year, sanitize_display_string, sanitize_hostname,
-        unescape_csv_field,
+        escape_csv_field, hostname_echoes_mac, is_leap_year, sanitize_display_string,
+        sanitize_hostname, unescape_csv_field,
     };
     use crate::parser::dhcp::extract_mac_from_duid;
+
+    /// Ethernet source MAC for synthetic DHCPv6 frames whose identity is
+    /// supposed to come from the DUID rather than the frame.
+    const TEST_FRAME_MAC: [u8; 6] = [0; 6];
 
     #[cfg(feature = "mdns")]
     use crate::parser::mdns::{parse_dns_name, is_mdns_ports};
@@ -233,6 +237,7 @@ mod tests {
         let payload = vec![0u8; 2];
         let result = parse_dhcpv6_payload(
             &payload,
+            TEST_FRAME_MAC,
             Ipv6Addr::UNSPECIFIED,
             Ipv6Addr::UNSPECIFIED,
             546,
@@ -251,7 +256,7 @@ mod tests {
         payload[3] = 0x56; // Transaction ID byte 3
 
         let result =
-            parse_dhcpv6_payload(&payload, Ipv6Addr::LOCALHOST, Ipv6Addr::LOCALHOST, 546, 547);
+            parse_dhcpv6_payload(&payload, TEST_FRAME_MAC, Ipv6Addr::LOCALHOST, Ipv6Addr::LOCALHOST, 546, 547);
 
         assert!(result.is_some());
         let packet = result.unwrap();
@@ -272,7 +277,7 @@ mod tests {
         ];
 
         let result =
-            parse_dhcpv6_payload(&payload, Ipv6Addr::LOCALHOST, Ipv6Addr::LOCALHOST, 546, 547);
+            parse_dhcpv6_payload(&payload, TEST_FRAME_MAC, Ipv6Addr::LOCALHOST, Ipv6Addr::LOCALHOST, 546, 547);
 
         assert!(result.is_some());
         let packet = result.unwrap();
@@ -299,7 +304,7 @@ mod tests {
         ];
 
         let result =
-            parse_dhcpv6_payload(&payload, Ipv6Addr::LOCALHOST, Ipv6Addr::LOCALHOST, 546, 547);
+            parse_dhcpv6_payload(&payload, TEST_FRAME_MAC, Ipv6Addr::LOCALHOST, Ipv6Addr::LOCALHOST, 546, 547);
 
         assert!(result.is_some());
         let packet = result.unwrap();
@@ -660,6 +665,7 @@ mod tests {
 
         // Create a DHCPv6 packet with ClientId
         let packet = Dhcpv6Packet {
+            source_mac: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
             source_ip: "fe80::1".parse().unwrap(),
             dest_ip: "ff02::1:2".parse().unwrap(),
             source_port: 546,
@@ -701,6 +707,7 @@ mod tests {
 
         // DHCPv6 packet without ClientId should not be tracked
         let packet = Dhcpv6Packet {
+            source_mac: TEST_FRAME_MAC,
             source_ip: "fe80::1".parse().unwrap(),
             dest_ip: "ff02::1:2".parse().unwrap(),
             source_port: 546,
@@ -1703,7 +1710,7 @@ mod tests {
         ];
 
         let result =
-            parse_dhcpv6_payload(&payload, Ipv6Addr::LOCALHOST, Ipv6Addr::LOCALHOST, 547, 546);
+            parse_dhcpv6_payload(&payload, TEST_FRAME_MAC, Ipv6Addr::LOCALHOST, Ipv6Addr::LOCALHOST, 547, 546);
 
         assert!(result.is_some());
         let packet = result.unwrap();
@@ -1742,7 +1749,7 @@ mod tests {
         payload.extend_from_slice(&fqdn_data);
 
         let result =
-            parse_dhcpv6_payload(&payload, Ipv6Addr::LOCALHOST, Ipv6Addr::LOCALHOST, 546, 547);
+            parse_dhcpv6_payload(&payload, TEST_FRAME_MAC, Ipv6Addr::LOCALHOST, Ipv6Addr::LOCALHOST, 546, 547);
 
         assert!(result.is_some());
         let packet = result.unwrap();
@@ -1765,7 +1772,7 @@ mod tests {
         ];
 
         let result =
-            parse_dhcpv6_payload(&payload, Ipv6Addr::LOCALHOST, Ipv6Addr::LOCALHOST, 546, 547);
+            parse_dhcpv6_payload(&payload, TEST_FRAME_MAC, Ipv6Addr::LOCALHOST, Ipv6Addr::LOCALHOST, 546, 547);
 
         assert!(result.is_some());
         let packet = result.unwrap();
@@ -1789,7 +1796,7 @@ mod tests {
         ];
 
         let result =
-            parse_dhcpv6_payload(&payload, Ipv6Addr::LOCALHOST, Ipv6Addr::LOCALHOST, 546, 547);
+            parse_dhcpv6_payload(&payload, TEST_FRAME_MAC, Ipv6Addr::LOCALHOST, Ipv6Addr::LOCALHOST, 546, 547);
 
         assert!(result.is_some());
         let packet = result.unwrap();
@@ -1833,7 +1840,7 @@ mod tests {
         ];
 
         let result =
-            parse_dhcpv6_payload(&payload, Ipv6Addr::LOCALHOST, Ipv6Addr::LOCALHOST, 546, 547);
+            parse_dhcpv6_payload(&payload, TEST_FRAME_MAC, Ipv6Addr::LOCALHOST, Ipv6Addr::LOCALHOST, 546, 547);
 
         // Should parse but truncated option won't be included
         assert!(result.is_some());
@@ -1877,6 +1884,7 @@ mod tests {
     #[test]
     fn test_dhcpv6_packet_transaction_id_string() {
         let packet = Dhcpv6Packet {
+            source_mac: TEST_FRAME_MAC,
             source_ip: Ipv6Addr::LOCALHOST,
             dest_ip: Ipv6Addr::LOCALHOST,
             source_port: 546,
@@ -1888,6 +1896,7 @@ mod tests {
         assert_eq!(packet.transaction_id_string(), "0x000000");
 
         let packet2 = Dhcpv6Packet {
+            source_mac: TEST_FRAME_MAC,
             source_ip: Ipv6Addr::LOCALHOST,
             dest_ip: Ipv6Addr::LOCALHOST,
             source_port: 546,
@@ -3538,6 +3547,7 @@ mod tests {
 
         let result = parse_dhcpv6_payload(
             &opt15_data,
+            TEST_FRAME_MAC,
             Ipv6Addr::LOCALHOST,
             Ipv6Addr::LOCALHOST,
             546,
@@ -3574,6 +3584,7 @@ mod tests {
 
         let result2 = parse_dhcpv6_payload(
             &opt16_data,
+            TEST_FRAME_MAC,
             Ipv6Addr::LOCALHOST,
             Ipv6Addr::LOCALHOST,
             546,
@@ -3602,6 +3613,7 @@ mod tests {
 
             // Setup a fake Dhcpv6Packet with client ID and VendorClass
             let packet = Dhcpv6Packet {
+                source_mac: [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
                 source_ip: Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 2),
                 dest_ip: Ipv6Addr::LOCALHOST,
                 source_port: 546,
@@ -4599,5 +4611,356 @@ mod tests {
                 raw
             );
         }
+    }
+
+    #[test]
+    fn test_dhcpv6_uuid_duid_uses_frame_mac_not_a_phantom_device() {
+        let temp_path = "/tmp/lanwatch_test_v6_uuid_duid.csv";
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+
+        let mut tracker = DeviceTracker::new(temp_path).unwrap();
+
+        // DUID-UUID (RFC 6355, type 4) carries a UUID, never a link-layer
+        // address, so the DUID alone cannot identify the client.
+        let packet = Dhcpv6Packet {
+            source_mac: parse_mac("dc:a6:32:bb:35:47").unwrap(),
+            source_ip: "fe80::c715:5c8a:bc2c:9583".parse().unwrap(),
+            dest_ip: "ff02::1:2".parse().unwrap(),
+            source_port: 546,
+            dest_port: 547,
+            message_type: Dhcpv6MessageType::Solicit,
+            transaction_id: [0x12, 0x34, 0x56],
+            options: vec![Dhcpv6Option::ClientId(vec![
+                0x00, 0x04, 0x0b, 0x53, 0xf6, 0xe0, 0x34, 0xd2, 0x8a, 0xa3, 0xc7, 0x74, 0x04,
+                0x22, 0x0d, 0x48, 0xcd, 0x03,
+            ])],
+        };
+
+        assert!(tracker.update_from_dhcpv6(&packet));
+
+        // The lease lands on the real device, and no `duid:...` twin appears.
+        assert_eq!(tracker.device_count(), 1);
+        assert!(tracker.devices.contains_key("dc:a6:32:bb:35:47"));
+        assert!(tracker.devices.keys().all(|mac| !mac.starts_with("duid:")));
+
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+    }
+
+    #[cfg(feature = "mdns")]
+    #[test]
+    fn test_mdns_query_known_answers_are_not_attributed_to_the_querier() {
+        let temp_path = "/tmp/lanwatch_test_mdns_known_answers.csv";
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+
+        let mut tracker = DeviceTracker::new(temp_path).unwrap();
+
+        let known_answer = MdnsRecord {
+            name: "_googlecast._tcp.local".to_string(),
+            record_type: MdnsRecordType::Ptr,
+            ttl: 120,
+            data: MdnsRecordData::Ptr("Living Room TV._googlecast._tcp.local".to_string()),
+        };
+
+        // A query's answer section holds Known-Answer Suppression records: they
+        // describe the querier's neighbours, not the querier.
+        let query = MdnsPacket {
+            source_mac: parse_mac("aa:aa:aa:00:00:01").unwrap(),
+            source_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)),
+            dest_ip: IpAddr::V4(Ipv4Addr::new(224, 0, 0, 251)),
+            transaction_id: 1,
+            is_response: false,
+            questions: vec![],
+            answers: vec![known_answer.clone()],
+            authority: vec![],
+            additional: vec![],
+        };
+        tracker.update_from_mdns(&query);
+
+        let querier = tracker.devices.get("aa:aa:aa:00:00:01").unwrap();
+        assert!(querier.services.is_empty());
+        assert_eq!(querier.hostname, None);
+        assert_eq!(querier.device_type, None);
+
+        // The same record in a *response* does describe the sender, so it is
+        // still attributed as before.
+        let response = MdnsPacket {
+            source_mac: parse_mac("aa:aa:aa:00:00:02").unwrap(),
+            source_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 51)),
+            dest_ip: IpAddr::V4(Ipv4Addr::new(224, 0, 0, 251)),
+            transaction_id: 2,
+            is_response: true,
+            questions: vec![],
+            answers: vec![known_answer],
+            authority: vec![],
+            additional: vec![],
+        };
+        tracker.update_from_mdns(&response);
+
+        let responder = tracker.devices.get("aa:aa:aa:00:00:02").unwrap();
+        assert!(
+            responder
+                .services
+                .contains(&"_googlecast._tcp".to_string())
+        );
+        assert_eq!(responder.hostname.as_deref(), Some("Living Room TV"));
+
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+    }
+
+    #[cfg(feature = "ssdp")]
+    #[test]
+    fn test_reflected_ssdp_is_credited_to_the_device_not_the_repeater() {
+        let temp_path = "/tmp/lanwatch_test_reflected_ssdp.csv";
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+
+        let mut tracker = DeviceTracker::new(temp_path).unwrap();
+
+        // The camera is known at 192.168.1.70 from a direct DHCP sighting.
+        let camera = "11:22:33:44:55:66";
+        tracker.update_device(camera, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 70)), None);
+
+        // A mesh router repeats the camera's announcement: its own source MAC,
+        // the camera's source IP.
+        let mut headers = HashMap::new();
+        headers.insert("nt".to_string(), "upnp:rootdevice".to_string());
+        let reflected = SsdpPacket {
+            source_mac: parse_mac("dc:69:b5:a5:57:72").unwrap(),
+            source_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 70)),
+            dest_ip: IpAddr::V4(Ipv4Addr::new(239, 255, 255, 250)),
+            message_type: SsdpMessageType::Notify,
+            start_line: "NOTIFY * HTTP/1.1".to_string(),
+            headers,
+        };
+        tracker.update_from_ssdp(&reflected);
+
+        assert!(!tracker.devices.contains_key("dc:69:b5:a5:57:72"));
+        assert!(
+            tracker
+                .devices
+                .get(camera)
+                .unwrap()
+                .services
+                .contains(&"upnp:rootdevice".to_string())
+        );
+
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+    }
+
+    #[test]
+    fn test_ip_address_ownership_is_exclusive() {
+        let temp_path = "/tmp/lanwatch_test_ip_ownership.csv";
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+
+        let mut tracker = DeviceTracker::new(temp_path).unwrap();
+        let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10));
+
+        tracker.update_device("aa:aa:aa:00:00:01", ip, None);
+        tracker.update_device("aa:aa:aa:00:00:02", ip, None);
+
+        // The lease moved: the new holder owns the address and the index agrees.
+        assert_eq!(
+            tracker.ip_index.get(&ip).map(String::as_str),
+            Some("aa:aa:aa:00:00:02")
+        );
+        assert!(
+            tracker
+                .devices
+                .get("aa:aa:aa:00:00:01")
+                .unwrap()
+                .ip_address
+                .is_unspecified()
+        );
+
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+    }
+
+    #[cfg(feature = "mdns")]
+    #[test]
+    fn test_mdns_multi_host_packet_does_not_merge_devices() {
+        let temp_path = "/tmp/lanwatch_test_mdns_aggregate.csv";
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+
+        let mut tracker = DeviceTracker::new(temp_path).unwrap();
+
+        // One response carrying address records for two hosts: only the
+        // sender's own host may be attributed to the sender.
+        let packet = MdnsPacket {
+            source_mac: parse_mac("bb:bb:bb:00:00:01").unwrap(),
+            source_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 11)),
+            dest_ip: IpAddr::V4(Ipv4Addr::new(224, 0, 0, 251)),
+            transaction_id: 3,
+            is_response: true,
+            questions: vec![],
+            answers: vec![
+                MdnsRecord {
+                    name: "printer.local".to_string(),
+                    record_type: MdnsRecordType::A,
+                    ttl: 120,
+                    data: MdnsRecordData::A(Ipv4Addr::new(192, 168, 1, 11)),
+                },
+                MdnsRecord {
+                    name: "sprinkler.local".to_string(),
+                    record_type: MdnsRecordType::A,
+                    ttl: 120,
+                    data: MdnsRecordData::A(Ipv4Addr::new(192, 168, 1, 12)),
+                },
+                MdnsRecord {
+                    name: "_googlecast._tcp.local".to_string(),
+                    record_type: MdnsRecordType::Ptr,
+                    ttl: 120,
+                    data: MdnsRecordData::Ptr(
+                        "Sprinkler._googlecast._tcp.local".to_string(),
+                    ),
+                },
+            ],
+            authority: vec![],
+            additional: vec![],
+        };
+        tracker.update_from_mdns(&packet);
+
+        let device = tracker.devices.get("bb:bb:bb:00:00:01").unwrap();
+        assert_eq!(device.hostname.as_deref(), Some("printer"));
+        assert_eq!(device.ip_address, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 11)));
+        // The other host's service (and its name) stays off this device.
+        assert!(device.services.is_empty());
+        assert_eq!(tracker.device_count(), 1);
+
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+    }
+
+    #[test]
+    fn test_load_settles_addresses_claimed_by_two_devices() {
+        use std::time::{Duration, UNIX_EPOCH};
+
+        let temp_path = "/tmp/lanwatch_test_ip_conflict_load.csv";
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+
+        let shared: Ipv6Addr = "fe80::99".parse().unwrap();
+        let older = "aa:aa:aa:00:00:01";
+        let newer = "aa:aa:aa:00:00:02";
+
+        // A database written before ownership was exclusive: both devices hold
+        // the same link-local address.
+        {
+            let mut tracker = DeviceTracker::new(temp_path).unwrap();
+            for (mac, seen) in [(older, 100u64), (newer, 200u64)] {
+                let mut device =
+                    DeviceInfo::new(mac.to_string(), IpAddr::V4(Ipv4Addr::UNSPECIFIED), None);
+                device.set_ipv6_address(shared);
+                device.last_seen = UNIX_EPOCH + Duration::from_secs(seen);
+                tracker.devices.insert(mac.to_string(), device);
+                tracker.dirty_devices.lock().unwrap().insert(mac.to_string());
+            }
+            tracker.save_to_db().unwrap();
+        }
+
+        let tracker = DeviceTracker::new(temp_path).unwrap();
+
+        // The most recently seen device keeps it; the index agrees.
+        assert!(
+            tracker
+                .devices
+                .get(newer)
+                .unwrap()
+                .ipv6_addresses
+                .contains(&shared)
+        );
+        assert!(
+            tracker
+                .devices
+                .get(older)
+                .unwrap()
+                .ipv6_addresses
+                .is_empty()
+        );
+        assert_eq!(
+            tracker.ip_index.get(&IpAddr::V6(shared)).map(String::as_str),
+            Some(newer)
+        );
+
+        let _ = std::fs::remove_file(temp_path);
+        let _ = std::fs::remove_file(format!("{}.journal", temp_path));
+    }
+
+    #[test]
+    fn test_hostname_that_only_repeats_the_mac_is_rejected() {
+        let mac = "dc:a6:32:bb:35:47";
+
+        // Every separator style a device might use for its own address.
+        assert!(hostname_echoes_mac(mac, "dca632bb3547"));
+        assert!(hostname_echoes_mac(mac, "DCA632BB3547"));
+        assert!(hostname_echoes_mac(mac, "dc-a6-32-bb-35-47"));
+        assert!(hostname_echoes_mac(mac, "dc.a6.32.bb.35.47"));
+
+        // A real name is kept, including one that merely embeds the MAC.
+        assert!(!hostname_echoes_mac(mac, "raspberrypi"));
+        assert!(!hostname_echoes_mac(mac, "printer-dca632bb3547"));
+        assert!(!hostname_echoes_mac(mac, "dca632bb35"));
+        assert!(!hostname_echoes_mac(mac, "dca632bb354799"));
+        // Scoped to this device only: some other device's MAC is not an echo,
+        // it is a name this device chose, so the check leaves it alone.
+        assert!(!hostname_echoes_mac(mac, "aabbccddeeff"));
+    }
+
+    #[test]
+    fn test_device_update_ignores_a_mac_shaped_hostname() {
+        let mac = "dc:a6:32:bb:35:47";
+        let mut device = DeviceInfo::new(
+            mac.to_string(),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 7, 161)),
+            None,
+        );
+
+        device.update(IpAddr::V4(Ipv4Addr::new(192, 168, 7, 161)), Some("dca632bb3547"));
+        assert_eq!(
+            device.hostname, None,
+            "a hostname that only repeats the MAC must leave the field empty"
+        );
+
+        // The empty slot stays available for the device's real name.
+        device.update(IpAddr::V4(Ipv4Addr::new(192, 168, 7, 161)), Some("raspberrypi"));
+        assert_eq!(device.hostname.as_deref(), Some("raspberrypi"));
+    }
+
+    #[test]
+    fn test_load_clears_a_stored_mac_shaped_hostname() {
+        let dir = std::env::temp_dir().join(format!("lanwatch_mac_host_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("devices.db");
+
+        let mac = "dc:a6:32:bb:35:47";
+        {
+            let mut tracker = DeviceTracker::new(&db).unwrap();
+            // Write the bad name straight into the record, the way an older build
+            // would have persisted it.
+            tracker.update_device(mac, IpAddr::V4(Ipv4Addr::new(192, 168, 7, 161)), None);
+            tracker
+                .devices
+                .get_mut(mac)
+                .unwrap()
+                .hostname = Some("dca632bb3547".to_string());
+            tracker.save_to_db().unwrap();
+        }
+
+        let tracker = DeviceTracker::new(&db).unwrap();
+        assert_eq!(
+            tracker.get_device(mac).unwrap().hostname,
+            None,
+            "loading must drop a hostname that is only the MAC"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

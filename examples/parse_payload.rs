@@ -55,6 +55,7 @@ fn main() {
 
     if let Some(parsed) = parse_dhcpv6_payload(
         &dhcpv6_packet,
+        [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
         Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1),
         Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 1, 2),
         546,

@@ -173,6 +173,24 @@ impl MdnsPacket {
             .chain(self.additional.iter())
     }
 
+    /// Returns the records that describe the *sender* of this packet.
+    ///
+    /// For a response that is every record it carries. For a query it is not:
+    /// the answer section of a query holds Known-Answer Suppression records
+    /// (RFC 6762 s7.1), which describe the other hosts the querier has already
+    /// heard from. Attributing those to the querier gives it a neighbour's
+    /// name, services and model -- the reason a sprinkler controller ended up
+    /// named after a Chromecast. The authority section (probe records,
+    /// s8.2) and the additional section of a query do describe the sender, so
+    /// they are kept.
+    pub fn attribution_records(&self) -> impl Iterator<Item = &MdnsRecord> {
+        let answers: &[MdnsRecord] = if self.is_response { &self.answers } else { &[] };
+        answers
+            .iter()
+            .chain(self.authority.iter())
+            .chain(self.additional.iter())
+    }
+
     /// Extracts service instance names from PTR records.
     ///
     /// # Returns

@@ -166,6 +166,7 @@ pub fn parse_dhcpv4_payload(
 /// Parses a raw DHCPv6 UDP payload into a structured `Dhcpv6Packet`.
 pub fn parse_dhcpv6_payload(
     payload: &[u8],
+    source_mac: [u8; 6],
     source_ip: Ipv6Addr,
     dest_ip: Ipv6Addr,
     source_port: u16,
@@ -274,6 +275,7 @@ pub fn parse_dhcpv6_payload(
     }
 
     Some(Dhcpv6Packet {
+        source_mac,
         source_ip,
         dest_ip,
         source_port,

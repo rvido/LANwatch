@@ -13,12 +13,13 @@ use rusqlite::{Connection, params};
 
 #[cfg(any(feature = "mdns", feature = "ssdp"))]
 use crate::device::sanitize_display_string;
-use crate::device::{DeviceInfo, normalize_device_identifier, sanitize_hostname};
+use crate::device::{
+    DeviceInfo, hostname_echoes_mac, normalize_device_identifier, sanitize_hostname,
+};
 use crate::oui::OuiRegistry;
-use crate::types::{DHCPV4_CLIENT_PORT, DeviceType, Dhcpv4Packet, Dhcpv6Packet, Vendor};
-
-#[cfg(any(feature = "mdns", feature = "ssdp"))]
-use crate::types::format_mac;
+use crate::types::{
+    DHCPV4_CLIENT_PORT, DeviceType, Dhcpv4Packet, Dhcpv6Packet, Vendor, format_mac,
+};
 
 #[cfg(feature = "mdns")]
 use crate::mdns_registry::MdnsServiceRegistry;
@@ -467,87 +468,238 @@ impl DeviceTracker {
 
     /// Load devices from existing SQLite database file
     fn load_from_db(&mut self) -> std::io::Result<()> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn
-            .prepare(
-                "SELECT mac_address, ip_address, ipv6_address, ipv6_addresses, hostname,
+        {
+            let conn = self.conn.lock().unwrap();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT mac_address, ip_address, ipv6_address, ipv6_addresses, hostname,
                     system_description, services, vendor, device_type, first_seen, last_seen
              FROM devices;",
-            )
-            .map_err(std::io::Error::other)?;
+                )
+                .map_err(std::io::Error::other)?;
 
-        let device_iter = stmt
-            .query_map([], |row| {
-                let mac_address: String = row.get(0)?;
-                let ip_address_str: String = row.get(1)?;
-                let ipv6_address_str: Option<String> = row.get(2)?;
-                let ipv6_addresses_str: Option<String> = row.get(3)?;
-                let hostname: Option<String> = row.get(4)?;
-                let system_description: Option<String> = row.get(5)?;
-                let services_str: Option<String> = row.get(6)?;
-                let vendor: Option<String> = row.get(7)?;
-                let device_type: Option<String> = row.get(8)?;
-                let first_seen_str: String = row.get(9)?;
-                let last_seen_str: String = row.get(10)?;
+            let device_iter = stmt
+                .query_map([], |row| {
+                    let mac_address: String = row.get(0)?;
+                    let ip_address_str: String = row.get(1)?;
+                    let ipv6_address_str: Option<String> = row.get(2)?;
+                    let ipv6_addresses_str: Option<String> = row.get(3)?;
+                    let hostname: Option<String> = row.get(4)?;
+                    let system_description: Option<String> = row.get(5)?;
+                    let services_str: Option<String> = row.get(6)?;
+                    let vendor: Option<String> = row.get(7)?;
+                    let device_type: Option<String> = row.get(8)?;
+                    let first_seen_str: String = row.get(9)?;
+                    let last_seen_str: String = row.get(10)?;
 
-                let ip_address: IpAddr = ip_address_str
-                    .parse()
-                    .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
-                let ipv6_address: Option<IpAddr> = ipv6_address_str.and_then(|s| s.parse().ok());
-                let mut ipv6_addresses = Vec::new();
-                if let Some(s) = ipv6_addresses_str {
-                    for ip in s.split(';') {
-                        if let Ok(ipv6) = ip.parse() {
-                            ipv6_addresses.push(ipv6);
+                    let ip_address: IpAddr = ip_address_str
+                        .parse()
+                        .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+                    let ipv6_address: Option<IpAddr> =
+                        ipv6_address_str.and_then(|s| s.parse().ok());
+                    let mut ipv6_addresses = Vec::new();
+                    if let Some(s) = ipv6_addresses_str {
+                        for ip in s.split(';') {
+                            if let Ok(ipv6) = ip.parse() {
+                                ipv6_addresses.push(ipv6);
+                            }
                         }
                     }
-                }
 
-                let mut services = Vec::new();
-                if let Some(s) = services_str {
-                    for service in s.split(';') {
-                        if !service.is_empty() {
-                            services.push(service.to_string());
+                    let mut services = Vec::new();
+                    if let Some(s) = services_str {
+                        for service in s.split(';') {
+                            if !service.is_empty() {
+                                services.push(service.to_string());
+                            }
                         }
                     }
-                }
 
-                let first_seen =
-                    crate::device::parse_timestamp(&first_seen_str).unwrap_or_else(SystemTime::now);
-                let last_seen =
-                    crate::device::parse_timestamp(&last_seen_str).unwrap_or_else(SystemTime::now);
+                    let first_seen = crate::device::parse_timestamp(&first_seen_str)
+                        .unwrap_or_else(SystemTime::now);
+                    let last_seen = crate::device::parse_timestamp(&last_seen_str)
+                        .unwrap_or_else(SystemTime::now);
 
-                Ok(DeviceInfo {
-                    mac_address,
-                    ip_address,
-                    ipv6_address,
-                    ipv6_addresses,
-                    hostname,
-                    system_description,
-                    services,
-                    vendor: vendor.map(Vendor::from),
-                    device_type: device_type.map(DeviceType::from),
-                    first_seen,
-                    last_seen,
+                    Ok(DeviceInfo {
+                        mac_address,
+                        ip_address,
+                        ipv6_address,
+                        ipv6_addresses,
+                        hostname,
+                        system_description,
+                        services,
+                        vendor: vendor.map(Vendor::from),
+                        device_type: device_type.map(DeviceType::from),
+                        first_seen,
+                        last_seen,
+                    })
                 })
-            })
-            .map_err(std::io::Error::other)?;
+                .map_err(std::io::Error::other)?;
 
-        for device in device_iter.flatten() {
-            Self::index_device_ips(&mut self.ip_index, &device);
-            self.devices.insert(device.mac_address.clone(), device);
+            for device in device_iter.flatten() {
+                Self::index_device_ips(&mut self.ip_index, &device);
+                self.devices.insert(device.mac_address.clone(), device);
+            }
         }
+
+        self.drop_mac_echo_hostnames();
+        self.resolve_ip_conflicts();
 
         Ok(())
     }
 
-    /// Adds every IP address currently known for `device` (its primary `ip_address`, plus
-    /// all of `ipv6_addresses`) to the IP→MAC index. Idempotent and safe to call after any
-    /// device mutation — inserts are cheap and simply overwrite with the current owner.
+    /// Returns the device a packet really came from, when the frame was sent by
+    /// somebody else on that device's behalf.
     ///
-    /// Takes the index directly (rather than `&mut self`) so it can be called while the
-    /// caller still holds a `&mut DeviceInfo` borrowed from `self.devices`: `self.ip_index`
-    /// and `self.devices` are disjoint fields, but a `&mut self` method would conflict.
+    /// Mesh routers (eero above all) repeat mDNS and SSDP for the whole LAN.
+    /// They re-inject the frame with their own source MAC but keep the original
+    /// source IP, so the frame MAC names the repeater while the IP names the
+    /// device the packet is about. Trusting the frame MAC is what let a single
+    /// router entry collect every service and every link-local address on the
+    /// network.
+    ///
+    /// An IP belongs to one interface, so a source IP already owned by a
+    /// *different* device is proof of a repeated frame. `None` means the frame
+    /// MAC can be trusted: either the IP is unknown, or it is already this
+    /// sender's.
+    ///
+    /// Self-healing: a lease change or an ARP/NDP sighting re-points the index
+    /// through [`Self::claim_ips`], so an address that moves between devices
+    /// stops looking like a reflection as soon as its new owner is seen.
+    #[cfg(any(feature = "mdns", feature = "ssdp"))]
+    fn reflected_owner(&self, frame_mac: &str, source_ip: IpAddr) -> Option<String> {
+        if source_ip.is_unspecified() {
+            return None;
+        }
+        let owner = self.ip_index.get(&source_ip)?;
+        if owner == frame_mac || !self.devices.contains_key(owner) {
+            return None;
+        }
+        Some(owner.clone())
+    }
+
+    /// The identity to record a packet against: the sender, or the device it
+    /// was repeated for. See [`Self::reflected_owner`].
+    #[cfg(any(feature = "mdns", feature = "ssdp"))]
+    fn packet_owner(&self, source_mac: [u8; 6], source_ip: IpAddr) -> String {
+        let frame_mac = format_mac(source_mac);
+        self.reflected_owner(&frame_mac, source_ip)
+            .unwrap_or(frame_mac)
+    }
+
+    /// Settles addresses claimed by more than one device, newest sighting wins.
+    ///
+    /// A database written before IP ownership was exclusive can hold the same
+    /// address on several devices, which leaves the index owner down to load
+    /// order and misdirects relay resolution. This runs once after load so the
+    /// stored state starts consistent instead of healing device by device.
+    /// Clears stored hostnames that are only a restatement of the device's MAC.
+    ///
+    /// Runs once per load so records written before [`hostname_echoes_mac`]
+    /// existed are cleaned in place, without asking the operator to delete
+    /// the database. The rows are marked dirty so the next flush persists it.
+    fn drop_mac_echo_hostnames(&mut self) {
+        let mut cleaned = Vec::new();
+        for (mac, device) in self.devices.iter_mut() {
+            if let Some(host) = device.hostname.as_deref()
+                && hostname_echoes_mac(mac, host)
+            {
+                device.hostname = None;
+                cleaned.push(mac.clone());
+            }
+        }
+        if !cleaned.is_empty() {
+            let mut dirty = self.dirty_devices.lock().unwrap();
+            dirty.extend(cleaned);
+        }
+    }
+
+    fn resolve_ip_conflicts(&mut self) {
+        let mut owners: HashMap<IpAddr, (String, SystemTime)> = HashMap::new();
+        let mut evictions: Vec<(String, IpAddr)> = Vec::new();
+
+        for device in self.devices.values() {
+            let mut ips = Vec::with_capacity(device.ipv6_addresses.len() + 1);
+            if !device.ip_address.is_unspecified() {
+                ips.push(device.ip_address);
+            }
+            ips.extend(device.ipv6_addresses.iter().copied().map(IpAddr::V6));
+
+            for ip in ips {
+                match owners.get(&ip) {
+                    Some((_, seen)) if *seen >= device.last_seen => {
+                        evictions.push((device.mac_address.clone(), ip));
+                    }
+                    Some((previous, _)) => {
+                        evictions.push((previous.clone(), ip));
+                        owners.insert(ip, (device.mac_address.clone(), device.last_seen));
+                    }
+                    None => {
+                        owners.insert(ip, (device.mac_address.clone(), device.last_seen));
+                    }
+                }
+            }
+        }
+
+        for (mac, ip) in evictions {
+            if let Some(device) = self.devices.get_mut(&mac)
+                && device.remove_ip(ip)
+            {
+                self.dirty_devices.lock().unwrap().insert(mac);
+            }
+        }
+
+        self.ip_index.clear();
+        self.ip_index
+            .extend(owners.into_iter().map(|(ip, (mac, _))| (ip, mac)));
+    }
+
+    /// Gives `mac` exclusive ownership of every IP address it currently holds.
+    ///
+    /// An IP address belongs to exactly one interface at a time, so a second
+    /// device claiming one means the first no longer has it. `index_device_ips`
+    /// only overwrote the index entry and left the stale address on the losing
+    /// device, so both kept the address, the index owner depended on write
+    /// order, and relay resolution (which reads the index) could hand a
+    /// packet's records to the wrong device -- contamination that then fed
+    /// itself. This evicts the address from the previous owner instead.
+    ///
+    /// Call it after the borrow of the updated device ends.
+    fn claim_ips(&mut self, mac: &str) {
+        let ips: Vec<IpAddr> = match self.devices.get(mac) {
+            Some(device) => {
+                let mut ips = Vec::with_capacity(device.ipv6_addresses.len() + 1);
+                if !device.ip_address.is_unspecified() {
+                    ips.push(device.ip_address);
+                }
+                ips.extend(device.ipv6_addresses.iter().copied().map(IpAddr::V6));
+                ips
+            }
+            None => return,
+        };
+
+        for ip in ips {
+            let previous = self.ip_index.insert(ip, mac.to_string());
+            let Some(previous) = previous else { continue };
+            if previous == mac {
+                continue;
+            }
+            if let Some(loser) = self.devices.get_mut(&previous)
+                && loser.remove_ip(ip)
+            {
+                self.dirty_devices.lock().unwrap().insert(previous);
+            }
+        }
+    }
+
+    /// Seeds the IP→MAC index for a device loaded from the database.
+    ///
+    /// Takes the index directly (rather than `&mut self`) so it can be called
+    /// while the caller still holds a `&mut DeviceInfo` borrowed from
+    /// `self.devices`: `self.ip_index` and `self.devices` are disjoint fields,
+    /// but a `&mut self` method would conflict. It overwrites blindly, so
+    /// [`Self::resolve_ip_conflicts`] settles the ownership afterwards; live
+    /// updates go through [`Self::claim_ips`] instead.
     fn index_device_ips(index: &mut HashMap<IpAddr, String>, device: &DeviceInfo) {
         if !device.ip_address.is_unspecified() {
             index.insert(device.ip_address, device.mac_address.clone());
@@ -860,11 +1012,28 @@ impl DeviceTracker {
         }
 
         // If no client-id, we can't track this device
-        let mac = match client_id {
-            Some(data) => {
-                extract_mac_from_duid(data).unwrap_or_else(|| format_duid_identifier(data))
+        if client_id.is_none() {
+            return false;
+        }
+
+        // Identity, best source first:
+        //   1. the Ethernet source MAC of the frame -- always present, always a
+        //      real link-layer address, and the same key every other subsystem
+        //      uses, so a DHCPv6 lease lands on the device's existing entry;
+        //   2. a MAC embedded in the DUID (DUID-LLT/DUID-LL), for the synthetic
+        //      packets in tests and for frames with no usable source address;
+        //   3. a `duid:...` identifier, only when neither of the above exists.
+        // Without step 1 a DUID-UUID client (RFC 6355) creates a phantom
+        // `duid:...` device that mirrors the real one.
+        let mac = if !packet.source_mac.iter().all(|&b| b == 0) {
+            format_mac(packet.source_mac)
+        } else {
+            match client_id {
+                Some(data) => {
+                    extract_mac_from_duid(data).unwrap_or_else(|| format_duid_identifier(data))
+                }
+                None => return false,
             }
-            None => return false,
         };
 
         let ip = IpAddr::V6(packet.source_ip);
@@ -1088,37 +1257,71 @@ impl DeviceTracker {
     pub fn update_from_mdns(&mut self, packet: &MdnsPacket) -> usize {
         // 1. Target MAC resolution logic to handle proxying/relaying (e.g. from Eero routers)
         let mut advertised_ips = Vec::new();
-        for record in packet.all_records() {
+        let mut advertised_hosts: Vec<(&str, IpAddr)> = Vec::new();
+        for record in packet.attribution_records() {
             match &record.data {
                 MdnsRecordData::A(addr) => {
                     advertised_ips.push(IpAddr::V4(*addr));
+                    advertised_hosts.push((record.name.as_str(), IpAddr::V4(*addr)));
                 }
                 MdnsRecordData::Aaaa(addr) => {
                     advertised_ips.push(IpAddr::V6(*addr));
+                    advertised_hosts.push((record.name.as_str(), IpAddr::V6(*addr)));
                 }
                 _ => {}
             }
         }
 
+        // A packet whose address records name more than one host describes more
+        // than one device -- a proxy answering for several clients, say. The
+        // records below carry no owner of their own (a PTR names a service
+        // type, an SRV/TXT names a service instance), so folding them all into
+        // one entry is what gave a printer a sprinkler's model string. Such a
+        // packet is treated as an aggregate: only address records for the
+        // target's own host are used, and nothing else is attributed.
+        let aggregate = advertised_hosts
+            .iter()
+            .any(|(name, _)| !name.eq_ignore_ascii_case(advertised_hosts[0].0));
+
+        let frame_mac = format_mac(packet.source_mac);
+        let reflected_from = self.reflected_owner(&frame_mac, packet.source_ip);
+        let is_reflected = reflected_from.is_some();
+
         let target_mac = if advertised_ips.is_empty() {
-            Some(format_mac(packet.source_mac))
+            // Nothing in the packet says who it is about, so it can only be the
+            // sender -- unless the sender is repeating someone else's packet.
+            reflected_from.or(Some(frame_mac))
+        } else if advertised_ips.contains(&packet.source_ip) && reflected_from.is_none() {
+            Some(frame_mac)
         } else {
-            let directly_from_host = advertised_ips.contains(&packet.source_ip);
-            if directly_from_host {
-                Some(format_mac(packet.source_mac))
-            } else {
-                // Relayed/proxied packet: resolve via the IP index (kept in sync on every
-                // device update) instead of scanning every tracked device.
-                advertised_ips
-                    .iter()
-                    .find_map(|ip| self.ip_index.get(ip).cloned())
-            }
+            // Relayed/proxied packet: resolve via the IP index (kept in sync on every
+            // device update) instead of scanning every tracked device.
+            advertised_ips
+                .iter()
+                .find_map(|ip| self.ip_index.get(ip).cloned())
+                .or(reflected_from)
         };
 
         // If target_mac cannot be resolved, skip processing to avoid polluting the router's entry
         let target_mac = match target_mac {
             Some(m) => m,
             None => return 0,
+        };
+
+        // In an aggregate packet, the target's own host is the one whose address
+        // the target already owns (or, for an unrelayed packet, the source
+        // address). Without a match there is nothing safe to attribute.
+        let own_host: Option<&str> = if aggregate {
+            let host = advertised_hosts.iter().find(|(_, ip)| {
+                self.ip_index.get(ip) == Some(&target_mac)
+                    || (!is_reflected && *ip == packet.source_ip)
+            });
+            match host {
+                Some((name, _)) => Some(*name),
+                None => return 0,
+            }
+        } else {
+            None
         };
 
         let mut updated = 0;
@@ -1154,7 +1357,16 @@ impl DeviceTracker {
         let mut seen_services: HashSet<&str> = HashSet::new();
         let mut txt_attrs = HashMap::new();
 
-        for record in packet.all_records() {
+        for record in packet.attribution_records() {
+            // In an aggregate packet keep only the target's own address records
+            // (see `own_host`); everything else belongs to another device or
+            // cannot be tied to one.
+            if let Some(host) = own_host
+                && !record.name.eq_ignore_ascii_case(host)
+            {
+                continue;
+            }
+
             match &record.data {
                 MdnsRecordData::A(addr) => {
                     // Strip .local suffix for hostname and record first IPv4
@@ -1276,6 +1488,7 @@ impl DeviceTracker {
             if device.hostname.is_none()
                 && let Some(h) = first_hostname
                 && let Some(clean) = sanitize_display_string(h)
+                && !hostname_echoes_mac(&device.mac_address, &clean)
             {
                 device.hostname = Some(clean);
                 updated += 1;
@@ -1295,8 +1508,6 @@ impl DeviceTracker {
             {
                 updated += 1;
             }
-
-            Self::index_device_ips(&mut self.ip_index, device);
 
             // Add services
             for service in &services {
@@ -1368,6 +1579,8 @@ impl DeviceTracker {
             device.last_seen = SystemTime::now();
         }
 
+        self.claim_ips(&target_mac);
+
         // Mark dirty before flushing -- see the note in `update_from_ssdp`.
         self.dirty_devices
             .lock()
@@ -1396,7 +1609,7 @@ impl DeviceTracker {
     /// Number of updated/added devices.
     #[cfg(feature = "mdns")]
     pub fn update_from_nbns(&mut self, packet: &NbnsPacket) -> usize {
-        let mac = format_mac(packet.source_mac);
+        let mac = self.packet_owner(packet.source_mac, packet.source_ip);
         let mut updated = 0;
 
         let hostname = Some(packet.name.as_str());
@@ -1432,11 +1645,11 @@ impl DeviceTracker {
                 device.ip_address = packet.source_ip;
                 updated += 1;
             }
-            Self::index_device_ips(&mut self.ip_index, device);
 
             // Update hostname
             if device.hostname.is_none()
                 && let Some(clean) = sanitize_display_string(&packet.name)
+                && !hostname_echoes_mac(&device.mac_address, &clean)
             {
                 device.hostname = Some(clean);
                 updated += 1;
@@ -1463,6 +1676,8 @@ impl DeviceTracker {
         }
 
         if updated > 0 {
+            self.claim_ips(&mac);
+
             self.dirty_devices.lock().unwrap().insert(mac.clone());
             if self.auto_save {
                 let _ = self.save_to_db();
@@ -1838,7 +2053,7 @@ impl DeviceTracker {
     #[cfg(feature = "ssdp")]
     pub fn update_from_ssdp(&mut self, packet: &SsdpPacket) -> usize {
         let mut updated = 0;
-        let mac = format_mac(packet.source_mac);
+        let mac = self.packet_owner(packet.source_mac, packet.source_ip);
         let services = packet.service_terms();
         let oui_vendor = self
             .oui_registry
@@ -1880,8 +2095,6 @@ impl DeviceTracker {
             updated += 1;
         }
 
-        Self::index_device_ips(&mut self.ip_index, device);
-
         for service in &services {
             if device.add_service(service) {
                 updated += 1;
@@ -1910,6 +2123,8 @@ impl DeviceTracker {
 
         device.last_seen = SystemTime::now();
 
+        self.claim_ips(&mac);
+
         // Mark dirty *before* flushing: `save_to_db` only writes the macs in
         // `dirty_devices`, so flushing first persists the previous backlog and
         // leaves this update on disk only if some later call happens to flush.
@@ -1928,7 +2143,7 @@ impl DeviceTracker {
     /// The count of unique updates applied to the device entry.
     #[cfg(feature = "ssdp")]
     pub fn update_from_wsd(&mut self, packet: &WsdPacket) -> usize {
-        let mac = format_mac(packet.source_mac);
+        let mac = self.packet_owner(packet.source_mac, packet.source_ip);
         let mut updated = 0;
 
         let device = self.devices.entry(mac.clone()).or_insert_with(|| {
@@ -1941,7 +2156,6 @@ impl DeviceTracker {
             device.ip_address = packet.source_ip;
             updated += 1;
         }
-        Self::index_device_ips(&mut self.ip_index, device);
 
         // Update vendor
         if let Some(ref v) = packet.vendor {
@@ -1967,6 +2181,8 @@ impl DeviceTracker {
 
         device.last_seen = SystemTime::now();
 
+        self.claim_ips(&mac);
+
         // Mark dirty before flushing -- see the note in `update_from_ssdp`.
         if updated > 0 {
             self.dirty_devices.lock().unwrap().insert(mac.clone());
@@ -1984,7 +2200,7 @@ impl DeviceTracker {
     /// The count of unique updates applied to the device entry.
     #[cfg(feature = "ssdp")]
     pub fn update_from_lifx(&mut self, packet: &crate::parser::iot::LifxPacket) -> usize {
-        let mac = format_mac(packet.source_mac);
+        let mac = self.packet_owner(packet.source_mac, packet.source_ip);
         let mut updated = 0;
 
         let device = self.devices.entry(mac.clone()).or_insert_with(|| {
@@ -1997,7 +2213,6 @@ impl DeviceTracker {
             device.ip_address = packet.source_ip;
             updated += 1;
         }
-        Self::index_device_ips(&mut self.ip_index, device);
 
         // Set LIFX as vendor if not set or if we should replace it
         let oui_vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(&mac));
@@ -2021,6 +2236,8 @@ impl DeviceTracker {
 
         device.last_seen = SystemTime::now();
 
+        self.claim_ips(&mac);
+
         // Mark dirty before flushing -- see the note in `update_from_ssdp`.
         if updated > 0 {
             self.dirty_devices.lock().unwrap().insert(mac.clone());
@@ -2038,7 +2255,7 @@ impl DeviceTracker {
     /// The count of unique updates applied to the device entry.
     #[cfg(feature = "ssdp")]
     pub fn update_from_coap(&mut self, packet: &crate::parser::iot::CoapPacket) -> usize {
-        let mac = format_mac(packet.source_mac);
+        let mac = self.packet_owner(packet.source_mac, packet.source_ip);
         let mut updated = 0;
 
         let device = self.devices.entry(mac.clone()).or_insert_with(|| {
@@ -2051,7 +2268,6 @@ impl DeviceTracker {
             device.ip_address = packet.source_ip;
             updated += 1;
         }
-        Self::index_device_ips(&mut self.ip_index, device);
 
         let mut dev_type = DeviceType::IotDevice;
 
@@ -2081,6 +2297,8 @@ impl DeviceTracker {
 
         device.last_seen = SystemTime::now();
 
+        self.claim_ips(&mac);
+
         // Mark dirty before flushing -- see the note in `update_from_ssdp`.
         if updated > 0 {
             self.dirty_devices.lock().unwrap().insert(mac.clone());
@@ -2098,7 +2316,7 @@ impl DeviceTracker {
     /// The count of unique updates applied to the device entry.
     #[cfg(feature = "ssdp")]
     pub fn update_from_knx(&mut self, packet: &crate::parser::iot::KnxPacket) -> usize {
-        let mac = format_mac(packet.source_mac);
+        let mac = self.packet_owner(packet.source_mac, packet.source_ip);
         let mut updated = 0;
 
         let device = self.devices.entry(mac.clone()).or_insert_with(|| {
@@ -2111,7 +2329,6 @@ impl DeviceTracker {
             device.ip_address = packet.source_ip;
             updated += 1;
         }
-        Self::index_device_ips(&mut self.ip_index, device);
 
         // Set vendor if friendly name or serial number suggests one, otherwise generic KNX
         let oui_vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(&mac));
@@ -2130,6 +2347,7 @@ impl DeviceTracker {
         if let Some(ref name) = packet.friendly_name
             && let Some(clean) = sanitize_display_string(name)
             && device.hostname.as_ref() != Some(&clean)
+            && !hostname_echoes_mac(&device.mac_address, &clean)
         {
             device.hostname = Some(clean);
             updated += 1;
@@ -2149,6 +2367,8 @@ impl DeviceTracker {
 
         device.last_seen = SystemTime::now();
 
+        self.claim_ips(&mac);
+
         // Mark dirty before flushing -- see the note in `update_from_ssdp`.
         if updated > 0 {
             self.dirty_devices.lock().unwrap().insert(mac.clone());
@@ -2166,7 +2386,7 @@ impl DeviceTracker {
     /// The count of unique updates applied to the device entry.
     #[cfg(feature = "ssdp")]
     pub fn update_from_cctv(&mut self, packet: &crate::parser::cctv::CctvPacket) -> usize {
-        let mac = format_mac(packet.source_mac);
+        let mac = self.packet_owner(packet.source_mac, packet.source_ip);
         let mut updated = 0;
 
         let device = self.devices.entry(mac.clone()).or_insert_with(|| {
@@ -2179,7 +2399,6 @@ impl DeviceTracker {
             device.ip_address = packet.source_ip;
             updated += 1;
         }
-        Self::index_device_ips(&mut self.ip_index, device);
 
         // Set vendor if appropriate
         let oui_vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(&mac));
@@ -2198,6 +2417,7 @@ impl DeviceTracker {
         if let Some(ref model) = packet.model
             && let Some(clean) = sanitize_display_string(model)
             && device.hostname.as_ref() != Some(&clean)
+            && !hostname_echoes_mac(&device.mac_address, &clean)
         {
             device.hostname = Some(clean);
             updated += 1;
@@ -2221,6 +2441,8 @@ impl DeviceTracker {
 
         device.last_seen = SystemTime::now();
 
+        self.claim_ips(&mac);
+
         // Mark dirty before flushing -- see the note in `update_from_ssdp`.
         if updated > 0 {
             self.dirty_devices.lock().unwrap().insert(mac.clone());
@@ -2238,7 +2460,7 @@ impl DeviceTracker {
     /// The count of unique updates applied to the device entry.
     #[cfg(feature = "ssdp")]
     pub fn update_from_mqtt(&mut self, packet: &crate::parser::mqtt_gdm::MqttPacket) -> usize {
-        let mac = format_mac(packet.source_mac);
+        let mac = self.packet_owner(packet.source_mac, packet.source_ip);
         let mut updated = 0;
 
         let device = self.devices.entry(mac.clone()).or_insert_with(|| {
@@ -2251,7 +2473,6 @@ impl DeviceTracker {
             device.ip_address = packet.source_ip;
             updated += 1;
         }
-        Self::index_device_ips(&mut self.ip_index, device);
 
         // Set device type to "IoT Device"
         if Self::should_replace_device_type(device, &DeviceType::IotDevice) {
@@ -2271,6 +2492,8 @@ impl DeviceTracker {
 
         device.last_seen = SystemTime::now();
 
+        self.claim_ips(&mac);
+
         // Mark dirty before flushing -- see the note in `update_from_ssdp`.
         if updated > 0 {
             self.dirty_devices.lock().unwrap().insert(mac.clone());
@@ -2288,7 +2511,7 @@ impl DeviceTracker {
     /// The count of unique updates applied to the device entry.
     #[cfg(feature = "ssdp")]
     pub fn update_from_gdm(&mut self, packet: &crate::parser::mqtt_gdm::GdmPacket) -> usize {
-        let mac = format_mac(packet.source_mac);
+        let mac = self.packet_owner(packet.source_mac, packet.source_ip);
         let mut updated = 0;
 
         let device = self.devices.entry(mac.clone()).or_insert_with(|| {
@@ -2301,7 +2524,6 @@ impl DeviceTracker {
             device.ip_address = packet.source_ip;
             updated += 1;
         }
-        Self::index_device_ips(&mut self.ip_index, device);
 
         // Set vendor to "Plex"
         let oui_vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(&mac));
@@ -2329,6 +2551,7 @@ impl DeviceTracker {
         if let Some(ref name) = packet.name
             && let Some(clean) = sanitize_display_string(name)
             && device.hostname.as_ref() != Some(&clean)
+            && !hostname_echoes_mac(&device.mac_address, &clean)
         {
             device.hostname = Some(clean);
             updated += 1;
@@ -2346,6 +2569,8 @@ impl DeviceTracker {
         }
 
         device.last_seen = SystemTime::now();
+
+        self.claim_ips(&mac);
 
         // Mark dirty before flushing -- see the note in `update_from_ssdp`.
         if updated > 0 {
@@ -2469,7 +2694,6 @@ impl DeviceTracker {
             if device.ip_address != old_ip && !old_ip.is_unspecified() {
                 self.ip_index.remove(&old_ip);
             }
-            Self::index_device_ips(&mut self.ip_index, device);
 
             let mut vendor_to_apply = hostname_vendor;
             let mut oui_vendor = None;
@@ -2526,10 +2750,11 @@ impl DeviceTracker {
             if let Some(v) = vendor {
                 device.vendor = Some(v);
             }
-            Self::index_device_ips(&mut self.ip_index, &device);
             self.devices.insert(mac.to_string(), device);
             true
         };
+
+        self.claim_ips(mac);
 
         self.dirty_devices.lock().unwrap().insert(mac.to_string());
 

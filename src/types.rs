@@ -1122,6 +1122,13 @@ pub enum Dhcpv6Option {
 /// Parsed DHCPv6 packet information
 #[derive(Debug, Clone)]
 pub struct Dhcpv6Packet {
+    /// Source MAC address of the Ethernet frame that carried this packet.
+    ///
+    /// This is the authoritative identity for the client: unlike the DUID, it
+    /// is always present and always an Ethernet address. DUID types that carry
+    /// no link-layer address (DUID-UUID, RFC 6355) would otherwise force a
+    /// synthetic `duid:...` identifier and a phantom device entry.
+    pub source_mac: [u8; 6],
     /// Source IPv6 address
     pub source_ip: Ipv6Addr,
     /// Destination IPv6 address

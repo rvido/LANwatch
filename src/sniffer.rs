@@ -374,6 +374,7 @@ fn process_ipv6_packet(ethernet: &EthernetPacket) -> Option<DhcpEvent> {
 
     let packet = parse_dhcpv6_payload(
         udp.payload(),
+        ethernet.get_source().octets(),
         ipv6.get_source(),
         ipv6.get_destination(),
         src,
@@ -424,6 +425,7 @@ fn process_ipv6_packet_extended(ethernet: &EthernetPacket) -> Option<NetworkEven
         if is_dhcpv6_ports(src, dest) {
             let packet = parse_dhcpv6_payload(
                 udp.payload(),
+                source_mac,
                 ipv6.get_source(),
                 ipv6.get_destination(),
                 src,
