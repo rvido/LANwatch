@@ -48,10 +48,10 @@ Add to your `Cargo.toml`. The `http-api` feature is opt-in to keep binary size s
 ```toml
 [dependencies]
 # Smallest binary footprint, core DHCP & MAC tracking only
-lanwatch = "0.15"
+lanwatch = "0.16"
 
 # With HTTP API server and active discovery protocols
-lanwatch = { version = "0.15", features = ["http-api", "mdns", "ssdp"] }
+lanwatch = { version = "0.16", features = ["http-api", "mdns", "ssdp"] }
 ```
 
 Or clone and build from source. Release builds are automatically optimized for size (`opt-level = "z"`, `strip = true`, `panic = "abort"`):
@@ -72,7 +72,7 @@ cargo build --release --all-features
 LANwatch is pre-1.0, so minor versions may break API compatibility. Only
 library consumers are affected; the CLI and its flags are unchanged.
 
-### 0.15 → next
+### 0.15 → 0.16
 
 **No action is required.** The three fingerprint columns and the two new tables
 (`device_attributes`, `device_overrides`) are created on an existing database at
