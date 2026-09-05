@@ -12,6 +12,11 @@ mod tests {
         escape_csv_field, hostname_echoes_mac, is_leap_year, sanitize_display_string,
         sanitize_hostname, unescape_csv_field,
     };
+    use crate::fingerprint::{
+        FINGERPRINT_MIN_AGE_SECS, FINGERPRINT_QUIET_SECS, GENERIC_OUI_THRESHOLD,
+        MAX_CATALOGUE_LINE, MAX_TOKEN_LEN, MAX_TOKENS_PER_DEVICE, MIN_TOKENS_FOR_MATCH,
+        collect_dhcpv4_tokens, collect_dhcpv6_tokens,
+    };
     use crate::parser::dhcp::extract_mac_from_duid;
 
     /// Ethernet source MAC for synthetic DHCPv6 frames whose identity is
@@ -358,6 +363,10 @@ mod tests {
             services: vec!["_http._tcp".to_string(), "_ssh._tcp".to_string()],
             vendor: Some(Vendor::Other("TestVendor".to_string())),
             device_type: Some(DeviceType::Server),
+            fingerprint: None,
+            fingerprint_label: None,
+            fingerprint_confidence: None,
+            product_label: None,
             first_seen: parse_timestamp("2026-01-15T10:00:00Z").unwrap(),
             last_seen: parse_timestamp("2026-01-15T12:00:00Z").unwrap(),
         };
@@ -398,6 +407,10 @@ mod tests {
             services: Vec::new(),
             vendor: None,
             device_type: None,
+            fingerprint: None,
+            fingerprint_label: None,
+            fingerprint_confidence: None,
+            product_label: None,
             first_seen: parse_timestamp("2026-01-15T10:00:00Z").unwrap(),
             last_seen: parse_timestamp("2026-01-15T12:00:00Z").unwrap(),
         };
@@ -420,6 +433,10 @@ mod tests {
             services: Vec::new(),
             vendor: None,
             device_type: None,
+            fingerprint: None,
+            fingerprint_label: None,
+            fingerprint_confidence: None,
+            product_label: None,
             first_seen: parse_timestamp("2026-01-15T10:00:00Z").unwrap(),
             last_seen: parse_timestamp("2026-01-15T10:00:00Z").unwrap(),
         };
@@ -1632,6 +1649,10 @@ mod tests {
             services: vec!["_airplay._tcp".to_string()],
             vendor: Some(Vendor::Apple),
             device_type: Some(DeviceType::AirPlayDevice),
+            fingerprint: None,
+            fingerprint_label: None,
+            fingerprint_confidence: None,
+            product_label: None,
             first_seen: parse_timestamp("2026-01-15T10:00:00Z").unwrap(),
             last_seen: parse_timestamp("2026-01-15T12:00:00Z").unwrap(),
         };
@@ -4962,5 +4983,1427 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- Device attribute fingerprinting (src/fingerprint.rs) ----
+
+    /// A minimal DHCPv4 DISCOVER with no fingerprint options set.
+    fn sample_dhcpv4_packet() -> Dhcpv4Packet {
+        Dhcpv4Packet {
+            source_ip: Ipv4Addr::new(0, 0, 0, 0),
+            dest_ip: Ipv4Addr::new(255, 255, 255, 255),
+            source_port: 68,
+            dest_port: 67,
+            operation: Dhcpv4Operation::BootRequest,
+            client_mac: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+            message_type: Some(Dhcpv4MessageType::Discover),
+            hostname: None,
+            requested_ip: None,
+            parameter_request_list: None,
+            vendor_class_id: None,
+            vendor_specific_info: None,
+        }
+    }
+
+    /// Builds a token set from prefixed token strings, as the DB read path does.
+    fn token_set(tokens: &[&str]) -> TokenSet {
+        TokenSet::from_tokens(tokens.iter().copied())
+    }
+
+    /// Builds a catalogue line whose stored hash matches its own tokens.
+    fn catalogue_line(
+        device_type: &str,
+        vendor: &str,
+        label: &str,
+        flags: &str,
+        tokens: &[&str],
+        meta: &str,
+    ) -> String {
+        let hash = token_set(tokens).fingerprint().core;
+        format!(
+            "{:016x}\t{}\t{}\t{}\t{}\t{}\t{}",
+            hash,
+            device_type,
+            vendor,
+            label,
+            flags,
+            tokens.join(","),
+            meta
+        )
+    }
+
+    fn load_catalogue(lines: &[String]) -> (FingerprintCatalogue, usize, CatalogueSkips) {
+        let dir = std::env::temp_dir().join(format!(
+            "lanwatch_fp_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fingerprints.txt");
+        std::fs::write(&path, lines.join("\n")).unwrap();
+
+        let mut catalogue = FingerprintCatalogue::new();
+        let (accepted, skips) = catalogue.load_from_file(&path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        (catalogue, accepted, skips)
+    }
+
+    #[test]
+    fn test_fnv1a64_matches_known_vectors() {
+        // Reference values from the FNV specification.
+        assert_eq!(fnv1a64(b""), 0xcbf29ce484222325);
+        assert_eq!(fnv1a64(b"a"), 0xaf63dc4c8601ec8c);
+        assert_eq!(fnv1a64(b"foobar"), 0x85944171f73967e8);
+    }
+
+    #[test]
+    fn test_a_token_string_and_a_built_token_are_the_same() {
+        // The database read path and the collector path must agree, or a
+        // restarted process would rebuild a different fingerprint.
+        let a = token_set(&["m:_googlecast._tcp"]);
+        let mut b = TokenSet::new();
+        b.insert(TokenNamespace::MdnsService, "_googlecast._tcp");
+        assert_eq!(a, b);
+    }
+
+    #[cfg(feature = "mdns")]
+    #[test]
+    fn test_normalisation_folds_case_and_trailing_dot() {
+        // Rules 1 and 2: one attribute must not become three tokens just
+        // because the wire spelling varies.
+        let mut set = TokenSet::new();
+        for name in [
+            "Living Room._GoogleCast._tcp.local.",
+            "kitchen._googlecast._tcp.local",
+            "_googlecast._tcp",
+        ] {
+            let service = crate::fingerprint::service_type_of(name).unwrap();
+            set.insert(TokenNamespace::MdnsService, &service);
+        }
+        assert_eq!(set.len(), 1, "three spellings must give one token");
+        assert!(set.contains("m:_googlecast._tcp"));
+    }
+
+    #[cfg(feature = "mdns")]
+    #[test]
+    fn test_instance_label_with_an_underscore_is_still_removed() {
+        // The cut is made at the first *label* starting with `_`, not at the
+        // first underscore, so an instance name may contain one.
+        let service = crate::fingerprint::service_type_of("my_device._ipp._tcp.local")
+            .expect("service type");
+        assert_eq!(service, "_ipp._tcp");
+    }
+
+    #[cfg(feature = "mdns")]
+    #[test]
+    fn test_txt_value_is_discarded_and_key_is_kept() {
+        // Rule 4: TXT values carry firmware versions and user typed names, so
+        // two units of the same model must give the same token.
+        let mut first = TokenSet::new();
+        let mut second = TokenSet::new();
+        for (set, entry) in [(&mut first, "md=Chromecast"), (&mut second, "md=Nest Hub")] {
+            let key = crate::fingerprint::txt_key(entry).unwrap();
+            set.insert(TokenNamespace::MdnsTxtKey, &format!("_googlecast._tcp/{}", key));
+        }
+        assert_eq!(first, second);
+        assert!(first.contains("t:_googlecast._tcp/md"));
+    }
+
+    #[test]
+    fn test_version_suffix_is_stripped_from_vendor_class() {
+        // Rule 7: a firmware bump must not move the device to a new fingerprint.
+        for value in ["msft 5.0", "msft-5.1", "msft_5", "msft"] {
+            assert_eq!(crate::fingerprint::strip_version_suffix(value), "msft");
+        }
+        // A value that is nothing but digits would be stripped to nothing, so
+        // it is left alone instead.
+        assert_eq!(crate::fingerprint::strip_version_suffix("5.0"), "5.0");
+    }
+
+    #[test]
+    fn test_dhcpv4_option_55_keeps_its_order() {
+        // Option 55's order is the fingerprint. Every other namespace is sorted.
+        let mut packet = sample_dhcpv4_packet();
+        packet.parameter_request_list = Some(vec![1, 3, 6, 15, 119, 252]);
+        let mut forward = TokenSet::new();
+        collect_dhcpv4_tokens(&packet, &mut forward);
+
+        packet.parameter_request_list = Some(vec![252, 119, 15, 6, 3, 1]);
+        let mut reverse = TokenSet::new();
+        collect_dhcpv4_tokens(&packet, &mut reverse);
+
+        assert!(forward.contains("d:55=1-3-6-15-119-252"));
+        assert!(reverse.contains("d:55=252-119-15-6-3-1"));
+        assert_ne!(forward, reverse);
+    }
+
+    #[test]
+    fn test_dhcpv4_collects_vendor_class_and_option_43_flag() {
+        let mut packet = sample_dhcpv4_packet();
+        packet.vendor_class_id = Some("MSFT 5.0".to_string());
+        packet.vendor_specific_info = Some("anything".to_string());
+
+        let mut set = TokenSet::new();
+        collect_dhcpv4_tokens(&packet, &mut set);
+
+        assert!(set.contains("v:msft"));
+        assert!(set.contains("x:opt43"));
+    }
+
+    #[test]
+    fn test_dhcpv6_collects_enterprise_number_and_classes() {
+        // The IANA enterprise number is assigned, not chosen, so it is the
+        // strongest single token available.
+        let options = vec![
+            Dhcpv6Option::VendorClass {
+                enterprise_number: 311,
+                data: vec!["MSFT 5.0".to_string()],
+            },
+            Dhcpv6Option::UserClass(vec!["iPhone 17".to_string()]),
+            Dhcpv6Option::IaNa,
+        ];
+        let mut set = TokenSet::new();
+        collect_dhcpv6_tokens(&options, &mut set);
+
+        assert!(set.contains("e:311"));
+        assert!(set.contains("v:msft"));
+        assert!(set.contains("u:iphone"));
+    }
+
+    #[test]
+    fn test_token_longer_than_the_cap_is_dropped_not_truncated() {
+        // Truncating would map two different attributes onto one token.
+        let mut set = TokenSet::new();
+        let long = "a".repeat(MAX_TOKEN_LEN);
+        assert!(!set.insert(TokenNamespace::MdnsService, &long));
+        assert!(set.is_empty());
+
+        let fits = "a".repeat(MAX_TOKEN_LEN - TokenNamespace::MdnsService.prefix().len());
+        assert!(set.insert(TokenNamespace::MdnsService, &fits));
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn test_token_cap_keeps_the_same_set_whatever_the_arrival_order() {
+        let mut values: Vec<String> = (0..MAX_TOKENS_PER_DEVICE + 50)
+            .map(|i| format!("_svc{:04}._tcp", i))
+            .collect();
+
+        let mut forward = TokenSet::new();
+        for value in &values {
+            forward.insert(TokenNamespace::MdnsService, value);
+        }
+
+        values.reverse();
+        let mut reverse = TokenSet::new();
+        for value in &values {
+            reverse.insert(TokenNamespace::MdnsService, value);
+        }
+
+        assert_eq!(forward.len(), MAX_TOKENS_PER_DEVICE);
+        assert_eq!(forward, reverse, "the kept set must not depend on order");
+        assert!(forward.is_capped());
+    }
+
+    #[test]
+    fn test_a_capped_device_is_never_matched() {
+        let tokens = ["m:_googlecast._tcp", "m:_http._tcp", "s:urn:x", "x:opt43"];
+        let line = catalogue_line("Media Player", "Google", "Chromecast", "-", &tokens, "n=4,oui=1");
+        let (catalogue, accepted, _) = load_catalogue(&[line]);
+        assert_eq!(accepted, 1);
+
+        let mut set = token_set(&tokens);
+        assert!(catalogue.match_tokens(&set, true, None).is_some());
+
+        // Fill past the cap. The set now describes the device incompletely, so
+        // any score over it would be measured against discarded attributes.
+        for i in 0..MAX_TOKENS_PER_DEVICE + 1 {
+            set.insert(TokenNamespace::MdnsService, &format!("_pad{:04}._tcp", i));
+        }
+        assert!(set.is_capped());
+        assert!(catalogue.match_tokens(&set, true, None).is_none());
+    }
+
+    #[test]
+    fn test_core_hash_survives_a_firmware_change_that_moves_the_full_hash() {
+        // The same device on two firmware versions: it gained a TXT key and an
+        // SSDP header, but speaks the same protocols.
+        let before = token_set(&["m:_googlecast._tcp", "s:urn:x", "t:_googlecast._tcp/md"]);
+        let after = token_set(&[
+            "m:_googlecast._tcp",
+            "s:urn:x",
+            "t:_googlecast._tcp/md",
+            "t:_googlecast._tcp/rs",
+            "h:server",
+        ]);
+
+        assert_eq!(before.fingerprint().core, after.fingerprint().core);
+        assert_ne!(before.fingerprint().full, after.fingerprint().full);
+    }
+
+    #[test]
+    fn test_fingerprint_string_round_trips_and_rejects_an_old_version() {
+        let fingerprint = token_set(&["m:_googlecast._tcp", "h:server"]).fingerprint();
+        let rendered = fingerprint.to_string();
+
+        assert!(rendered.starts_with("lwfp1:"));
+        assert_eq!(Fingerprint::parse(&rendered), Some(fingerprint));
+        assert!(Fingerprint::is_current(&rendered));
+
+        // A row written by an older version must not be reinterpreted. It is
+        // cleared and recomputed instead.
+        let old = rendered.replacen("lwfp1:", "lwfp0:", 1);
+        assert_eq!(Fingerprint::parse(&old), None);
+        assert!(!Fingerprint::is_current(&old));
+        assert_eq!(Fingerprint::version_of(&old), Some("lwfp0"));
+    }
+
+    #[test]
+    fn test_catalogue_skips_malformed_lines_without_failing_the_load() {
+        let good = catalogue_line(
+            "Media Player",
+            "Google",
+            "Chromecast",
+            "-",
+            &["m:_googlecast._tcp", "m:_http._tcp", "s:urn:x", "x:opt43"],
+            "n=4,oui=1",
+        );
+        let lines = vec![
+            "# a comment".to_string(),
+            "// another comment".to_string(),
+            String::new(),
+            good.clone(),
+            "0000\ttoo\tfew".to_string(),
+            format!("{:016x}\t-\t-\tBad hash\t-\tm:_x._tcp\tn=1", 1u64),
+            format!("{}{}", good, "x".repeat(MAX_CATALOGUE_LINE)),
+        ];
+        let (catalogue, accepted, skips) = load_catalogue(&lines);
+
+        assert_eq!(accepted, 1);
+        assert_eq!(catalogue.len(), 1);
+        assert_eq!(skips.bad_field_count, 1);
+        assert_eq!(skips.hash_mismatch, 1);
+        assert_eq!(skips.too_long, 1);
+        assert_eq!(skips.total(), 3);
+        assert!(!skips.is_empty());
+    }
+
+    #[test]
+    fn test_catalogue_maps_unset_fields_and_unknown_enum_values() {
+        let tokens = ["m:_googlecast._tcp", "m:_http._tcp", "s:urn:x", "x:opt43"];
+        let unset = catalogue_line("-", "-", "Generic thing", "-", &tokens, "n=1,oui=1");
+        let (catalogue, accepted, _) = load_catalogue(&[unset]);
+        assert_eq!(accepted, 1);
+        let profile = &catalogue.profiles()[0];
+        // `-` must not become `Other("-")` and show up in the UI.
+        assert_eq!(profile.device_type, None);
+        assert_eq!(profile.vendor, None);
+
+        let other = ["m:_zzz._tcp", "m:_http._tcp", "s:urn:y", "x:opt43"];
+        let unknown = catalogue_line("Toaster", "Acme", "Smart toaster", "-", &other, "n=1,oui=1");
+        let (catalogue, accepted, _) = load_catalogue(&[unknown]);
+        assert_eq!(accepted, 1);
+        let profile = &catalogue.profiles()[0];
+        // An unknown value is kept as a label, not rejected.
+        assert_eq!(profile.device_type, Some(DeviceType::Other("Toaster".to_string())));
+        assert_eq!(profile.vendor, Some(Vendor::Other("Acme".to_string())));
+    }
+
+    #[test]
+    fn test_a_generic_profile_never_sets_a_device_type() {
+        let tokens = ["s:urn:schemas-upnp-org:device:mediarenderer:1", "h:server", "h:st", "m:_http._tcp"];
+        let line = catalogue_line(
+            "Media Player",
+            "Google",
+            "Generic UPnP MediaRenderer",
+            "generic",
+            &tokens,
+            "n=31,oui=9",
+        );
+        let (catalogue, accepted, _) = load_catalogue(&[line]);
+        assert_eq!(accepted, 1);
+
+        let hit = catalogue
+            .match_tokens(&token_set(&tokens), true, None)
+            .expect("exact full match");
+        assert!(hit.generic);
+        assert_eq!(hit.device_type, None, "a copied default names no device type");
+        assert_eq!(hit.vendor, None);
+        // 95 for the exact full match, minus 25 for being generic.
+        assert_eq!(hit.confidence, 70);
+    }
+
+    #[test]
+    fn test_many_oui_vendors_marks_a_profile_generic_on_its_own() {
+        // The automatic detector: one core hash under three unrelated vendors
+        // cannot be one product.
+        let tokens = ["m:_http._tcp", "s:urn:x", "h:server", "x:opt43"];
+        let meta = format!("n=40,oui={}", GENERIC_OUI_THRESHOLD);
+        let line = catalogue_line("Media Player", "-", "Shared default", "-", &tokens, &meta);
+        let (catalogue, accepted, _) = load_catalogue(&[line]);
+        assert_eq!(accepted, 1);
+        assert!(catalogue.profiles()[0].generic);
+        assert_eq!(catalogue.profiles()[0].observations, 40);
+    }
+
+    #[test]
+    fn test_matching_oui_vendor_adds_confidence_and_the_cap_holds() {
+        let tokens = ["m:_googlecast._tcp", "m:_http._tcp", "s:urn:x", "x:opt43"];
+        let line = catalogue_line("Media Player", "Google", "Chromecast", "-", &tokens, "n=4,oui=1");
+        let (catalogue, _, _) = load_catalogue(&[line]);
+        let set = token_set(&tokens);
+
+        let plain = catalogue.match_tokens(&set, true, None).unwrap();
+        assert_eq!(plain.confidence, 95);
+
+        let corroborated = catalogue
+            .match_tokens(&set, true, Some(&Vendor::Google))
+            .unwrap();
+        // 95 + 10 would be 105. Never 100: a fingerprint is evidence, not proof.
+        assert_eq!(corroborated.confidence, 99);
+
+        let contradicted = catalogue
+            .match_tokens(&set, true, Some(&Vendor::Apple))
+            .unwrap();
+        assert_eq!(contradicted.confidence, 95);
+    }
+
+    #[test]
+    fn test_an_unripe_set_only_gets_an_exact_full_match() {
+        let tokens = ["m:_googlecast._tcp", "m:_http._tcp", "s:urn:x", "x:opt43"];
+        let line = catalogue_line("Media Player", "Google", "Chromecast", "-", &tokens, "n=4,oui=1");
+        let (catalogue, _, _) = load_catalogue(&[line]);
+
+        // Exact full match: allowed at any age, because a partial set simply
+        // fails to match.
+        let exact = token_set(&tokens);
+        assert!(catalogue.match_tokens(&exact, false, None).is_some());
+
+        // Core-only match: needs a ripe set, so it is refused here.
+        let mut core_only = token_set(&tokens);
+        core_only.insert(TokenNamespace::SsdpHeader, "server");
+        assert!(catalogue.match_tokens(&core_only, false, None).is_none());
+        assert!(catalogue.match_tokens(&core_only, true, None).is_some());
+    }
+
+    #[test]
+    fn test_is_ripe_needs_tokens_age_and_quiet() {
+        assert!(is_ripe(
+            MIN_TOKENS_FOR_MATCH,
+            FINGERPRINT_MIN_AGE_SECS,
+            FINGERPRINT_QUIET_SECS
+        ));
+        assert!(!is_ripe(
+            MIN_TOKENS_FOR_MATCH - 1,
+            FINGERPRINT_MIN_AGE_SECS,
+            FINGERPRINT_QUIET_SECS
+        ));
+        assert!(!is_ripe(
+            MIN_TOKENS_FOR_MATCH,
+            FINGERPRINT_MIN_AGE_SECS - 1,
+            FINGERPRINT_QUIET_SECS
+        ));
+        assert!(!is_ripe(
+            MIN_TOKENS_FOR_MATCH,
+            FINGERPRINT_MIN_AGE_SECS,
+            FINGERPRINT_QUIET_SECS - 1
+        ));
+    }
+
+    #[test]
+    fn test_a_device_with_no_rare_token_gets_no_fuzzy_match() {
+        // Every token this device has is shared by every profile, so it is pure
+        // boilerplate and must not be guessed at.
+        let shared = ["m:_http._tcp", "s:urn:common", "x:opt43", "e:311"];
+        let lines: Vec<String> = (0..4)
+            .map(|i| {
+                let unique = format!("m:_uniq{}._tcp", i);
+                let mut tokens: Vec<&str> = shared.to_vec();
+                tokens.push(&unique);
+                catalogue_line("Media Player", "-", &format!("Profile {}", i), "-", &tokens, "n=1")
+            })
+            .collect();
+        let (catalogue, accepted, _) = load_catalogue(&lines);
+        assert_eq!(accepted, 4);
+
+        assert!(catalogue.match_tokens(&token_set(&shared), true, None).is_none());
+    }
+
+    #[test]
+    fn test_fuzzy_match_below_the_threshold_is_refused() {
+        let profile_tokens = [
+            "m:_googlecast._tcp",
+            "m:_http._tcp",
+            "s:urn:x",
+            "x:opt43",
+            "e:311",
+        ];
+        let line = catalogue_line(
+            "Media Player",
+            "Google",
+            "Chromecast",
+            "-",
+            &profile_tokens,
+            "n=4,oui=1",
+        );
+        let (catalogue, _, _) = load_catalogue(&[line]);
+
+        // Four of five core tokens shared, plus one of its own: J = 4/6 = 0.67.
+        let close = token_set(&[
+            "m:_googlecast._tcp",
+            "m:_http._tcp",
+            "s:urn:x",
+            "x:opt43",
+            "m:_extra._tcp",
+        ]);
+        let hit = catalogue.match_tokens(&close, true, None).expect("fuzzy hit");
+        assert!(hit.confidence >= 40 && hit.confidence < 85);
+
+        // One of five shared: J = 1/5 = 0.20, well under the 0.60 floor.
+        let far = token_set(&[
+            "m:_googlecast._tcp",
+            "m:_a._tcp",
+            "m:_b._tcp",
+            "m:_c._tcp",
+            "m:_d._tcp",
+        ]);
+        assert!(catalogue.match_tokens(&far, true, None).is_none());
+    }
+
+    #[test]
+    fn test_an_empty_catalogue_matches_nothing_and_does_not_panic() {
+        // The feature must work with zero profiles: no match simply means the
+        // existing heuristics run, exactly as they do today.
+        let catalogue = FingerprintCatalogue::new();
+        assert!(catalogue.is_empty());
+        assert!(
+            catalogue
+                .match_tokens(&token_set(&["m:_googlecast._tcp"]), true, None)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_a_token_with_an_unknown_prefix_is_dropped() {
+        let set = TokenSet::from_tokens(["zzz:not-a-namespace", "m:_ok._tcp"]);
+        assert_eq!(set.len(), 1);
+        assert!(set.contains("m:_ok._tcp"));
+    }
+
+    #[cfg(feature = "mdns")]
+    #[test]
+    fn test_non_ascii_is_dropped_without_panic() {
+        // Rule 1: non-ASCII bytes are dropped rather than stored.
+        let service =
+            crate::fingerprint::service_type_of("wohnzimmer._airplay\u{00fc}._tcp.local")
+                .expect("service type");
+        assert!(service.is_ascii());
+        assert_eq!(service, "_airplay._tcp");
+    }
+
+    // ---- Fingerprint wiring in the tracker (src/tracker.rs) ----
+
+    /// A private database path, removed by the caller when the test ends.
+    fn fingerprint_db_path(name: &str) -> String {
+        let path = std::env::temp_dir().join(format!(
+            "lanwatch_fp_{}_{}_{}.db",
+            name,
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        path.to_string_lossy().into_owned()
+    }
+
+    /// Removes a database and the WAL files that travel with it.
+    fn remove_db(path: &str) {
+        for suffix in ["", "-wal", "-shm", ".journal"] {
+            let _ = std::fs::remove_file(format!("{}{}", path, suffix));
+        }
+    }
+
+    /// A DHCPv4 request carrying every option the collector reads.
+    fn fingerprinted_dhcpv4_packet(mac: [u8; 6]) -> Dhcpv4Packet {
+        let mut packet = sample_dhcpv4_packet();
+        packet.client_mac = mac;
+        packet.requested_ip = Some(Ipv4Addr::new(192, 168, 7, 42));
+        packet.parameter_request_list = Some(vec![1, 3, 6, 15, 119, 252]);
+        packet.vendor_class_id = Some("MSFT 5.0".to_string());
+        packet.vendor_specific_info = Some("something".to_string());
+        packet
+    }
+
+    #[test]
+    fn test_dhcp_attributes_are_recorded_and_survive_a_restart() {
+        let path = fingerprint_db_path("roundtrip");
+        remove_db(&path);
+        let mac = [0xDC, 0xA6, 0x32, 0xBB, 0x35, 0x47];
+
+        {
+            let mut tracker = DeviceTracker::new(&path).unwrap();
+            tracker.update_from_dhcpv4(&fingerprinted_dhcpv4_packet(mac));
+            tracker.flush_to_db().unwrap();
+
+            let key = format_mac(mac);
+            let log = tracker.attributes_for(&key).expect("attributes recorded");
+            assert!(log.set().contains("d:55=1-3-6-15-119-252"));
+            assert!(log.set().contains("v:msft"));
+            assert!(log.set().contains("x:opt43"));
+
+            let device = tracker.get_device(&key).expect("device");
+            let stored = device.fingerprint.as_deref().expect("fingerprint stored");
+            assert!(stored.starts_with("lwfp1:"));
+        }
+
+        // A restart must rebuild the identical set from the stored tokens.
+        let reloaded = DeviceTracker::new(&path).unwrap();
+        let key = format_mac(mac);
+        let log = reloaded.attributes_for(&key).expect("attributes reloaded");
+        assert!(log.set().contains("d:55=1-3-6-15-119-252"));
+        assert_eq!(log.len(), 3);
+        assert_eq!(
+            reloaded.get_device(&key).unwrap().fingerprint,
+            Some(log.set().fingerprint().to_string())
+        );
+
+        remove_db(&path);
+    }
+
+    #[test]
+    fn test_the_column_migration_is_safe_to_run_twice() {
+        // The schema uses CREATE TABLE IF NOT EXISTS, so the columns are added
+        // by ALTER TABLE on every startup. A second run must not fail.
+        let path = fingerprint_db_path("migrate");
+        remove_db(&path);
+
+        let mac = [0x02, 0x11, 0x22, 0x33, 0x44, 0x55];
+        {
+            let mut tracker = DeviceTracker::new(&path).unwrap();
+            tracker.update_from_dhcpv4(&fingerprinted_dhcpv4_packet(mac));
+            tracker.flush_to_db().unwrap();
+        }
+        for _ in 0..3 {
+            let tracker = DeviceTracker::new(&path).unwrap();
+            assert_eq!(tracker.device_count(), 1);
+        }
+
+        remove_db(&path);
+    }
+
+    #[test]
+    fn test_a_fingerprint_from_an_old_version_is_cleared_at_load() {
+        let path = fingerprint_db_path("version");
+        remove_db(&path);
+        let mac = [0x02, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE];
+        let key = format_mac(mac);
+
+        {
+            let mut tracker = DeviceTracker::new(&path).unwrap();
+            tracker.update_from_dhcpv4(&fingerprinted_dhcpv4_packet(mac));
+            tracker.flush_to_db().unwrap();
+        }
+
+        // Rewrite the row as if an older LANwatch had produced it.
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute(
+                "UPDATE devices SET fingerprint = 'lwfp0:0:0:3', fingerprint_label = 'Stale';",
+                [],
+            )
+            .unwrap();
+        }
+
+        // A rules change makes the stored tokens wrong too, so both go.
+        let reloaded = DeviceTracker::new(&path).unwrap();
+        let device = reloaded.get_device(&key).expect("device");
+        assert_eq!(device.fingerprint, None);
+        assert_eq!(device.fingerprint_label, None);
+        assert!(reloaded.attributes_for(&key).is_none());
+
+        remove_db(&path);
+    }
+
+    #[test]
+    fn test_an_offline_device_keeps_every_token_when_stale_ones_are_pruned() {
+        // The prune window is measured against the device's own last_seen, not
+        // the wall clock, so a device offline for a year loses nothing.
+        let path = fingerprint_db_path("prune");
+        remove_db(&path);
+        let mac = [0x02, 0x01, 0x02, 0x03, 0x04, 0x05];
+        let key = format_mac(mac);
+
+        {
+            let mut tracker = DeviceTracker::new(&path).unwrap();
+            tracker.update_from_dhcpv4(&fingerprinted_dhcpv4_packet(mac));
+            tracker.flush_to_db().unwrap();
+        }
+
+        // Push the device and all of its tokens a year into the past together.
+        let long_ago = crate::device::format_timestamp(
+            SystemTime::now() - std::time::Duration::from_secs(365 * 24 * 60 * 60),
+        );
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute("UPDATE devices SET last_seen = ?;", rusqlite::params![long_ago])
+                .unwrap();
+            conn.execute(
+                "UPDATE device_attributes SET first_seen = ?, last_seen = ?;",
+                rusqlite::params![long_ago, long_ago],
+            )
+            .unwrap();
+        }
+
+        let reloaded = DeviceTracker::new(&path).unwrap();
+        assert_eq!(
+            reloaded.attributes_for(&key).map(|log| log.len()),
+            Some(3),
+            "an offline device keeps its whole set frozen"
+        );
+
+        remove_db(&path);
+    }
+
+    #[test]
+    fn test_a_token_the_device_stopped_advertising_is_pruned() {
+        let path = fingerprint_db_path("prune_one");
+        remove_db(&path);
+        let mac = [0x02, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E];
+        let key = format_mac(mac);
+
+        {
+            let mut tracker = DeviceTracker::new(&path).unwrap();
+            tracker.update_from_dhcpv4(&fingerprinted_dhcpv4_packet(mac));
+            tracker.flush_to_db().unwrap();
+        }
+
+        // The device is current, but one token has not been heard for a year.
+        let long_ago = crate::device::format_timestamp(
+            SystemTime::now() - std::time::Duration::from_secs(365 * 24 * 60 * 60),
+        );
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute(
+                "UPDATE device_attributes SET last_seen = ? WHERE token = 'x:opt43';",
+                rusqlite::params![long_ago],
+            )
+            .unwrap();
+        }
+
+        let reloaded = DeviceTracker::new(&path).unwrap();
+        let log = reloaded.attributes_for(&key).expect("attributes");
+        assert_eq!(log.len(), 2);
+        assert!(!log.set().contains("x:opt43"));
+
+        remove_db(&path);
+    }
+
+    #[test]
+    fn test_a_manual_override_still_beats_a_perfect_fingerprint_match() {
+        let path = fingerprint_db_path("override");
+        remove_db(&path);
+        let mac = [0x02, 0x77, 0x88, 0x99, 0xAA, 0xBB];
+        let key = format_mac(mac);
+
+        let mut tracker = DeviceTracker::new(&path).unwrap();
+        tracker.update_from_dhcpv4(&fingerprinted_dhcpv4_packet(mac));
+
+        // Build a catalogue that matches this device exactly.
+        let tokens: Vec<String> = tracker
+            .attributes_for(&key)
+            .unwrap()
+            .set()
+            .tokens()
+            .map(str::to_string)
+            .collect();
+        let refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+        let line = catalogue_line("Printer", "Brother", "Some printer", "-", &refs, "n=1,oui=1");
+        let (catalogue, accepted, _) = load_catalogue(&[line]);
+        assert_eq!(accepted, 1);
+
+        tracker.add_override(&key, Some(DeviceType::Router), Some(Vendor::Ubiquiti));
+        tracker.set_fingerprint_catalogue(catalogue);
+
+        let device = tracker.get_device(&key).expect("device");
+        assert_eq!(
+            device.fingerprint_label.as_deref(),
+            Some("Some printer"),
+            "the match is still reported"
+        );
+        assert_eq!(device.fingerprint_confidence, Some(95));
+        // ... but the operator's decision is what the device actually shows.
+        assert_eq!(device.device_type, Some(DeviceType::Router));
+        assert_eq!(device.vendor, Some(Vendor::Ubiquiti));
+
+        remove_db(&path);
+    }
+
+    #[test]
+    fn test_a_trusted_match_sets_the_device_type() {
+        let path = fingerprint_db_path("apply");
+        remove_db(&path);
+        let mac = [0x02, 0x66, 0x55, 0x44, 0x33, 0x22];
+        let key = format_mac(mac);
+
+        let mut tracker = DeviceTracker::new(&path).unwrap();
+        tracker.update_from_dhcpv4(&fingerprinted_dhcpv4_packet(mac));
+
+        let tokens: Vec<String> = tracker
+            .attributes_for(&key)
+            .unwrap()
+            .set()
+            .tokens()
+            .map(str::to_string)
+            .collect();
+        let refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+        let line = catalogue_line("Printer", "Brother", "Some printer", "-", &refs, "n=1,oui=1");
+        let (catalogue, _, _) = load_catalogue(&[line]);
+
+        tracker.set_fingerprint_catalogue(catalogue);
+
+        let device = tracker.get_device(&key).expect("device");
+        assert_eq!(device.device_type, Some(DeviceType::Printer));
+        assert_eq!(device.vendor, Some(Vendor::Brother));
+        assert_eq!(device.fingerprint_confidence, Some(95));
+
+        remove_db(&path);
+    }
+
+    #[test]
+    fn test_no_catalogue_records_tokens_but_names_nothing() {
+        // The feature must add information and never remove any: with no
+        // catalogue the existing heuristics run exactly as before.
+        let path = fingerprint_db_path("nocat");
+        remove_db(&path);
+        let mac = [0x02, 0x31, 0x41, 0x59, 0x26, 0x53];
+        let key = format_mac(mac);
+
+        let mut tracker = DeviceTracker::new(&path).unwrap();
+        tracker.update_from_dhcpv4(&fingerprinted_dhcpv4_packet(mac));
+
+        let device = tracker.get_device(&key).expect("device");
+        assert!(device.fingerprint.is_some());
+        assert_eq!(device.fingerprint_label, None);
+        assert_eq!(device.fingerprint_confidence, None);
+        assert_eq!(tracker.attributes_for(&key).map(|log| log.len()), Some(3));
+
+        remove_db(&path);
+    }
+
+    #[test]
+    fn test_a_catalogue_loaded_after_a_restart_names_a_stored_device() {
+        // The real startup order: tokens come back from disk first, the
+        // catalogue is loaded second. Profiles must reach devices that were
+        // captured before the file existed.
+        let path = fingerprint_db_path("restart_match");
+        remove_db(&path);
+        let mac = [0x02, 0x12, 0x34, 0x56, 0x78, 0x9A];
+        let key = format_mac(mac);
+
+        let tokens: Vec<String> = {
+            let mut tracker = DeviceTracker::new(&path).unwrap();
+            tracker.update_from_dhcpv4(&fingerprinted_dhcpv4_packet(mac));
+            tracker.flush_to_db().unwrap();
+            tracker
+                .attributes_for(&key)
+                .unwrap()
+                .set()
+                .tokens()
+                .map(str::to_string)
+                .collect()
+        };
+
+        let refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+        let line = catalogue_line("Printer", "Brother", "Some printer", "-", &refs, "n=2,oui=1");
+        let (catalogue, accepted, skips) = load_catalogue(&[line]);
+        assert_eq!(accepted, 1);
+        assert!(skips.is_empty());
+
+        let mut reloaded = DeviceTracker::new(&path).unwrap();
+        assert_eq!(reloaded.get_device(&key).unwrap().fingerprint_label, None);
+
+        reloaded.set_fingerprint_catalogue(catalogue);
+        let device = reloaded.get_device(&key).expect("device");
+        assert_eq!(device.fingerprint_label.as_deref(), Some("Some printer"));
+        assert_eq!(device.device_type, Some(DeviceType::Printer));
+
+        // The applied match must reach disk, not just memory.
+        reloaded.flush_to_db().unwrap();
+        let again = DeviceTracker::new(&path).unwrap();
+        assert_eq!(
+            again.get_device(&key).unwrap().fingerprint_label.as_deref(),
+            Some("Some printer")
+        );
+
+        remove_db(&path);
+    }
+
+    #[test]
+    fn test_dump_writes_only_ripe_devices() {
+        // A device discovered a moment ago has an unsettled set, so it must not
+        // reach a file that is meant for the shared catalogue.
+        let path = fingerprint_db_path("dump");
+        remove_db(&path);
+        let dump = format!("{}.dump.txt", path);
+        let mac = [0x02, 0xFE, 0xDC, 0xBA, 0x98, 0x76];
+
+        let mut tracker = DeviceTracker::new(&path).unwrap();
+        tracker.update_from_dhcpv4(&fingerprinted_dhcpv4_packet(mac));
+
+        assert_eq!(tracker.dump_fingerprints(&dump).unwrap(), 0);
+        let written = std::fs::read_to_string(&dump).unwrap();
+        // The header is still written, so the operator sees what to do next.
+        assert!(written.contains("# core_hash"));
+        assert!(!written.contains(&format_mac(mac)));
+
+        let _ = std::fs::remove_file(&dump);
+        remove_db(&path);
+    }
+
+    #[cfg(feature = "http-api")]
+    #[test]
+    fn test_the_json_api_exposes_the_fingerprint_fields() {
+        let path = fingerprint_db_path("json");
+        remove_db(&path);
+        let mac = [0x02, 0x0F, 0x1E, 0x2D, 0x3C, 0x4B];
+        let key = format_mac(mac);
+
+        let mut tracker = DeviceTracker::new(&path).unwrap();
+        tracker.update_from_dhcpv4(&fingerprinted_dhcpv4_packet(mac));
+
+        let tokens: Vec<String> = tracker
+            .attributes_for(&key)
+            .unwrap()
+            .set()
+            .tokens()
+            .map(str::to_string)
+            .collect();
+        let refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+        let line = catalogue_line("Printer", "Brother", "Some printer", "-", &refs, "n=1,oui=1");
+        let (catalogue, _, _) = load_catalogue(&[line]);
+        tracker.set_fingerprint_catalogue(catalogue);
+
+        let json = tracker.to_json_sorted().unwrap();
+        assert!(json.contains("\"fingerprint\""));
+        assert!(json.contains("\"fingerprint_label\": \"Some printer\""));
+        assert!(json.contains("\"fingerprint_confidence\": 95"));
+        assert!(json.contains("lwfp1:"));
+
+        remove_db(&path);
+    }
+
+    #[test]
+    fn test_attribute_only_changes_still_reach_the_database() {
+        let path = fingerprint_db_path("attronly");
+        remove_db(&path);
+        let mac = [0xDC, 0xA6, 0x32, 0xBB, 0x35, 0x48];
+        let key = format_mac(mac);
+
+        {
+            // The CLI batches its own writes, so the tracker never saves alone.
+            let mut tracker = DeviceTracker::new(&path).unwrap();
+            tracker.set_auto_save(false);
+
+            let mut first = fingerprinted_dhcpv4_packet(mac);
+            first.parameter_request_list = None;
+            first.vendor_specific_info = None;
+            tracker.update_from_dhcpv4(&first);
+            tracker.flush_to_db().unwrap();
+            assert!(!tracker.has_pending_writes());
+
+            // The same device speaks again, now carrying options it had not
+            // sent before. It is already known, so a count of changed devices
+            // can stay at zero -- but new tokens were recorded, and a caller
+            // that flushes on that count alone would never write them.
+            tracker.update_from_dhcpv4(&fingerprinted_dhcpv4_packet(mac));
+            assert!(tracker.has_pending_writes());
+            tracker.flush_to_db().unwrap();
+            assert!(!tracker.has_pending_writes());
+        }
+
+        let reloaded = DeviceTracker::new(&path).unwrap();
+        let log = reloaded.attributes_for(&key).expect("attributes reloaded");
+        assert!(log.set().contains("d:55=1-3-6-15-119-252"));
+        assert!(log.set().contains("x:opt43"));
+
+        remove_db(&path);
+    }
+
+    #[test]
+    fn test_the_dump_prefills_the_guess_but_never_the_label() {
+        // The worksheet is a review, not a transcription: the type and vendor
+        // LANwatch already inferred are written into the row, while `label`
+        // stays unset so an unreviewed row cannot reach the shared catalogue.
+        let path = fingerprint_db_path("prefill");
+        remove_db(&path);
+        let dump = format!("{}.dump.txt", path);
+        let mac = [0x02, 0xAB, 0xCD, 0xEF, 0x01, 0x02];
+        let key = format_mac(mac);
+
+        {
+            let mut tracker = DeviceTracker::new(&path).unwrap();
+            tracker.update_from_dhcpv4(&fingerprinted_dhcpv4_packet(mac));
+            tracker.flush_to_db().unwrap();
+        }
+
+        // DHCP alone yields three tokens, one short of the floor, so add a
+        // fourth and age everything past the ripeness window together.
+        let long_ago = crate::device::format_timestamp(
+            SystemTime::now() - std::time::Duration::from_secs(60 * 60),
+        );
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute(
+                "INSERT INTO device_attributes (mac_address, token, first_seen, last_seen)
+                 VALUES (?, ?, ?, ?);",
+                rusqlite::params![key, "m:_ipp._tcp", long_ago, long_ago],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE devices SET first_seen = ?, last_seen = ?;",
+                rusqlite::params![long_ago, long_ago],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE device_attributes SET first_seen = ?, last_seen = ?;",
+                rusqlite::params![long_ago, long_ago],
+            )
+            .unwrap();
+        }
+
+        let tracker = DeviceTracker::new(&path).unwrap();
+        let device = tracker.get_device(&key).expect("device reloaded");
+        let expected_type = device
+            .device_type
+            .as_ref()
+            .map(DeviceType::as_str)
+            .expect("the heuristics classified this packet");
+        let expected_vendor = device
+            .vendor
+            .as_ref()
+            .map(Vendor::as_str)
+            .expect("the heuristics named a vendor");
+
+        assert_eq!(tracker.dump_fingerprints(&dump).unwrap(), 1);
+        let written = std::fs::read_to_string(&dump).unwrap();
+        let row = written
+            .lines()
+            .find(|line| !line.starts_with('#'))
+            .expect("one data row");
+        let fields: Vec<&str> = row.split('\t').collect();
+        assert_eq!(fields.len(), 7, "row: {}", row);
+        assert_eq!(fields[1], expected_type);
+        assert_eq!(fields[2], expected_vendor);
+        assert_eq!(fields[3], "-", "the label stays for a human");
+        assert_eq!(fields[4], "-", "flags stay unset");
+
+        let _ = std::fs::remove_file(&dump);
+        remove_db(&path);
+    }
+
+    #[test]
+    fn test_every_offered_device_type_name_round_trips() {
+        // The picker offers these names and the API feeds them back through
+        // `From<&str>`. A name that does not survive the trip would silently
+        // become `DeviceType::Other`, which looks right in the UI and is wrong
+        // in the catalogue. This is the only thing keeping the list honest.
+        for name in crate::types::DEVICE_TYPE_NAMES {
+            let parsed = DeviceType::from(*name);
+            assert_eq!(
+                parsed.as_str(),
+                *name,
+                "{} does not round-trip through DeviceType",
+                name
+            );
+            assert!(
+                !matches!(parsed, DeviceType::Other(_)),
+                "{} is not a known variant",
+                name
+            );
+        }
+
+        let mut sorted = crate::types::DEVICE_TYPE_NAMES.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            crate::types::DEVICE_TYPE_NAMES.len(),
+            "the picker must not offer the same name twice"
+        );
+    }
+
+    #[test]
+    fn test_a_saved_classification_survives_a_restart() {
+        // A correction typed in the dashboard is worth nothing if it lives only
+        // in memory, which is what an `--override` file entry does.
+        let path = fingerprint_db_path("review");
+        remove_db(&path);
+        let mac = [0x02, 0x11, 0x22, 0x33, 0x44, 0x55];
+        let key = format_mac(mac);
+
+        {
+            let mut tracker = DeviceTracker::new(&path).unwrap();
+            tracker.update_from_dhcpv4(&fingerprinted_dhcpv4_packet(mac));
+            assert!(
+                tracker
+                    .set_classification(
+                        &key,
+                        Some(DeviceType::from("Chromecast")),
+                        Some(Vendor::from("Google")),
+                        Some("Chromecast with Google TV".to_string()),
+                    )
+                    .unwrap()
+            );
+        }
+
+        let reloaded = DeviceTracker::new(&path).unwrap();
+        let device = reloaded.get_device(&key).expect("device");
+        assert_eq!(device.device_type, Some(DeviceType::from("Chromecast")));
+        assert_eq!(device.vendor, Some(Vendor::from("Google")));
+        assert_eq!(
+            device.product_label.as_deref(),
+            Some("Chromecast with Google TV")
+        );
+
+        let review = reloaded.classification_for(&key).expect("override");
+        assert!(review.is_reviewed());
+        assert!(review.reviewed_at.is_some());
+
+        remove_db(&path);
+    }
+
+    #[test]
+    fn test_an_unknown_mac_cannot_be_classified() {
+        let path = fingerprint_db_path("review_missing");
+        remove_db(&path);
+        let mut tracker = DeviceTracker::new(&path).unwrap();
+        assert!(
+            !tracker
+                .set_classification("aa:bb:cc:dd:ee:ff", None, None, Some("Ghost".into()))
+                .unwrap()
+        );
+        remove_db(&path);
+    }
+
+    #[test]
+    fn test_clearing_a_classification_hands_the_device_back() {
+        let path = fingerprint_db_path("review_clear");
+        remove_db(&path);
+        let mac = [0x02, 0x66, 0x77, 0x88, 0x99, 0xAA];
+        let key = format_mac(mac);
+
+        let mut tracker = DeviceTracker::new(&path).unwrap();
+        tracker.update_from_dhcpv4(&fingerprinted_dhcpv4_packet(mac));
+        let guessed = tracker.get_device(&key).and_then(|d| d.device_type.clone());
+
+        tracker
+            .set_classification(&key, Some(DeviceType::from("Printer")), None, None)
+            .unwrap();
+        assert_eq!(
+            tracker.get_device(&key).unwrap().device_type,
+            Some(DeviceType::from("Printer"))
+        );
+
+        assert!(tracker.clear_classification(&key).unwrap());
+        assert!(tracker.classification_for(&key).is_none());
+        assert_eq!(
+            tracker.get_device(&key).unwrap().device_type,
+            guessed,
+            "the heuristics take the device back"
+        );
+        assert!(
+            !tracker.clear_classification(&key).unwrap(),
+            "clearing twice reports nothing to do"
+        );
+
+        remove_db(&path);
+    }
+
+    #[test]
+    fn test_a_correction_without_a_product_name_is_not_a_review() {
+        // Fixing a wrong type is useful on its own, but it is not the same as
+        // vouching for the exact model. Only the latter may be exported.
+        let path = fingerprint_db_path("review_partial");
+        remove_db(&path);
+        let mac = [0x02, 0xBB, 0xCC, 0xDD, 0xEE, 0x01];
+        let key = format_mac(mac);
+
+        let mut tracker = DeviceTracker::new(&path).unwrap();
+        tracker.update_from_dhcpv4(&fingerprinted_dhcpv4_packet(mac));
+        tracker
+            .set_classification(&key, Some(DeviceType::from("Printer")), None, Some("   ".into()))
+            .unwrap();
+
+        let review = tracker.classification_for(&key).expect("override");
+        assert!(!review.is_reviewed(), "whitespace is not a product name");
+        assert!(review.reviewed_at.is_none());
+        assert_eq!(tracker.reviewed_ripe_count(), 0);
+
+        remove_db(&path);
+    }
+
+    #[test]
+    fn test_the_export_carries_only_reviewed_and_ripe_devices() {
+        let path = fingerprint_db_path("export");
+        remove_db(&path);
+        let reviewed = [0x02, 0x10, 0x20, 0x30, 0x40, 0x50];
+        let unreviewed = [0x02, 0x10, 0x20, 0x30, 0x40, 0x51];
+        let reviewed_key = format_mac(reviewed);
+        let unreviewed_key = format_mac(unreviewed);
+
+        {
+            let mut tracker = DeviceTracker::new(&path).unwrap();
+            tracker.update_from_dhcpv4(&fingerprinted_dhcpv4_packet(reviewed));
+            tracker.update_from_dhcpv4(&fingerprinted_dhcpv4_packet(unreviewed));
+            tracker.flush_to_db().unwrap();
+        }
+
+        // Both need a fourth token and an aged set to be ripe at all.
+        let long_ago = crate::device::format_timestamp(
+            SystemTime::now() - std::time::Duration::from_secs(60 * 60),
+        );
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            for key in [&reviewed_key, &unreviewed_key] {
+                conn.execute(
+                    "INSERT INTO device_attributes (mac_address, token, first_seen, last_seen)
+                     VALUES (?, ?, ?, ?);",
+                    rusqlite::params![key, "m:_ipp._tcp", long_ago, long_ago],
+                )
+                .unwrap();
+            }
+            conn.execute(
+                "UPDATE devices SET first_seen = ?, last_seen = ?;",
+                rusqlite::params![long_ago, long_ago],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE device_attributes SET first_seen = ?, last_seen = ?;",
+                rusqlite::params![long_ago, long_ago],
+            )
+            .unwrap();
+        }
+
+        let mut tracker = DeviceTracker::new(&path).unwrap();
+        assert_eq!(tracker.reviewed_ripe_count(), 0, "nothing reviewed yet");
+        assert!(
+            tracker
+                .export_fingerprint_catalogue()
+                .lines()
+                .all(|line| line.starts_with('#')),
+            "an export with no reviewed device is header only"
+        );
+
+        tracker
+            .set_classification(
+                &reviewed_key,
+                Some(DeviceType::from("Printer")),
+                Some(Vendor::from("Brother")),
+                Some("Brother HL-L2350DW".to_string()),
+            )
+            .unwrap();
+
+        assert_eq!(tracker.reviewed_ripe_count(), 1);
+        let export = tracker.export_fingerprint_catalogue();
+        let rows: Vec<&str> = export.lines().filter(|l| !l.starts_with('#')).collect();
+        assert_eq!(rows.len(), 1, "only the reviewed device is exported");
+
+        let fields: Vec<&str> = rows[0].split('\t').collect();
+        assert_eq!(fields.len(), 7);
+        assert_eq!(fields[1], "Printer");
+        assert_eq!(fields[2], "Brother");
+        assert_eq!(fields[3], "Brother HL-L2350DW");
+
+        // The whole point of exporting instead of dumping: no private data.
+        assert!(!export.contains(&reviewed_key));
+        assert!(!export.contains(&unreviewed_key));
+        assert!(!export.contains("192.168"));
+
+        remove_db(&path);
+    }
+
+    #[test]
+    fn test_removing_a_device_keeps_its_correction_but_forgetting_does_not() {
+        // The two actions mean different things. Remove clears what LANwatch
+        // has seen; forget clears what a person said. A device that reappears
+        // seconds after a removal must still be labelled, or review work would
+        // be destroyed by a single click.
+        let path = fingerprint_db_path("forget");
+        remove_db(&path);
+        let mac = [0x02, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E];
+        let key = format_mac(mac);
+
+        let mut tracker = DeviceTracker::new(&path).unwrap();
+        tracker.update_from_dhcpv4(&fingerprinted_dhcpv4_packet(mac));
+        tracker
+            .set_classification(
+                &key,
+                Some(DeviceType::from("Printer")),
+                Some(Vendor::from("Brother")),
+                Some("Brother HL-L2350DW".to_string()),
+            )
+            .unwrap();
+        assert!(tracker.attributes_for(&key).is_some());
+
+        // Remove: the sighting goes, the verdict stays.
+        assert!(tracker.remove_device(&key).unwrap());
+        assert!(tracker.get_device(&key).is_none());
+        assert!(tracker.classification_for(&key).is_some());
+        assert!(tracker.attributes_for(&key).is_some());
+
+        // Seen again, it comes back already labelled.
+        tracker.update_from_dhcpv4(&fingerprinted_dhcpv4_packet(mac));
+        let device = tracker.get_device(&key).expect("rediscovered");
+        assert_eq!(device.vendor, Some(Vendor::from("Brother")));
+        assert_eq!(
+            device.product_label.as_deref(),
+            Some("Brother HL-L2350DW")
+        );
+
+        // Forget: everything goes, in memory and on disk.
+        assert!(tracker.forget_device(&key).unwrap());
+        assert!(tracker.get_device(&key).is_none());
+        assert!(tracker.classification_for(&key).is_none());
+        assert!(tracker.attributes_for(&key).is_none());
+        assert!(
+            !tracker.forget_device(&key).unwrap(),
+            "forgetting twice reports nothing to do"
+        );
+
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            let attributes: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM device_attributes WHERE mac_address = ?;",
+                    rusqlite::params![key],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let overrides: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM device_overrides WHERE mac_address = ?;",
+                    rusqlite::params![key],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(attributes, 0, "tokens are gone from the database");
+            assert_eq!(overrides, 0, "the correction is gone from the database");
+        }
+
+        // Seen again after forgetting, it is a stranger.
+        tracker.update_from_dhcpv4(&fingerprinted_dhcpv4_packet(mac));
+        let device = tracker.get_device(&key).expect("rediscovered");
+        assert_ne!(device.vendor, Some(Vendor::from("Brother")));
+        assert!(device.product_label.is_none());
+
+        remove_db(&path);
+    }
+
+    #[test]
+    fn test_forgetting_a_device_that_left_only_a_correction_behind() {
+        // A device removed long ago leaves rows no dashboard can reach, which
+        // is the whole reason `--forget` exists. It must still report success.
+        let path = fingerprint_db_path("forget_orphan");
+        remove_db(&path);
+        let mac = [0x02, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E];
+        let key = format_mac(mac);
+
+        let mut tracker = DeviceTracker::new(&path).unwrap();
+        tracker.update_from_dhcpv4(&fingerprinted_dhcpv4_packet(mac));
+        tracker
+            .set_classification(&key, None, None, Some("Gone Forever".to_string()))
+            .unwrap();
+        tracker.remove_device(&key).unwrap();
+
+        assert!(tracker.get_device(&key).is_none());
+        assert!(
+            tracker.forget_device(&key).unwrap(),
+            "an orphaned correction is still something to forget"
+        );
+        assert!(tracker.classification_for(&key).is_none());
+
+        remove_db(&path);
+    }
+
+    #[test]
+    fn test_the_export_summary_separates_reviewed_from_ripe() {
+        // "Nothing to export" has two causes. The counts must tell them apart,
+        // or a person is left guessing which half of the rule they failed.
+        let path = fingerprint_db_path("summary");
+        remove_db(&path);
+        let ripe_mac = [0x02, 0x30, 0x31, 0x32, 0x33, 0x34];
+        let fresh_mac = [0x02, 0x30, 0x31, 0x32, 0x33, 0x35];
+        let ripe_key = format_mac(ripe_mac);
+        let fresh_key = format_mac(fresh_mac);
+
+        {
+            let mut tracker = DeviceTracker::new(&path).unwrap();
+            tracker.update_from_dhcpv4(&fingerprinted_dhcpv4_packet(ripe_mac));
+            tracker.flush_to_db().unwrap();
+        }
+
+        let long_ago = crate::device::format_timestamp(
+            SystemTime::now() - std::time::Duration::from_secs(60 * 60),
+        );
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute(
+                "INSERT INTO device_attributes (mac_address, token, first_seen, last_seen)
+                 VALUES (?, ?, ?, ?);",
+                rusqlite::params![ripe_key, "m:_ipp._tcp", long_ago, long_ago],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE devices SET first_seen = ?, last_seen = ?;",
+                rusqlite::params![long_ago, long_ago],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE device_attributes SET first_seen = ?, last_seen = ?;",
+                rusqlite::params![long_ago, long_ago],
+            )
+            .unwrap();
+        }
+
+        let mut tracker = DeviceTracker::new(&path).unwrap();
+        // A second device, seen just now, so it cannot be ripe.
+        tracker.update_from_dhcpv4(&fingerprinted_dhcpv4_packet(fresh_mac));
+
+        let summary = tracker.export_summary();
+        assert_eq!(summary.with_attributes, 2);
+        assert_eq!(summary.reviewed, 0, "nothing named yet");
+        assert_eq!(summary.ripe, 1, "only the aged device settled");
+        assert_eq!(summary.exported, 0);
+
+        // Reviewing the device that has NOT settled must not make it exportable,
+        // and the counts must show exactly that disagreement.
+        tracker
+            .set_classification(&fresh_key, None, None, Some("Too Soon".to_string()))
+            .unwrap();
+        let summary = tracker.export_summary();
+        assert_eq!(summary.reviewed, 1);
+        assert_eq!(summary.ripe, 1);
+        assert_eq!(summary.exported, 0, "reviewed and ripe are different devices");
+
+        // The tally must reach the file, because the dashboard reads it back.
+        let export = tracker.export_fingerprint_catalogue();
+        assert!(
+            export.contains("# summary devices=2 reviewed=1 ripe=1 exported=0"),
+            "{}",
+            export
+        );
+
+        // Reviewing the settled one is what finally produces a row.
+        tracker
+            .set_classification(&ripe_key, None, None, Some("Settled Thing".to_string()))
+            .unwrap();
+        assert_eq!(tracker.export_summary().exported, 1);
+        assert_eq!(tracker.reviewed_ripe_count(), 1);
+
+        remove_db(&path);
     }
 }

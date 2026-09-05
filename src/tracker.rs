@@ -16,15 +16,16 @@ use crate::device::sanitize_display_string;
 use crate::device::{
     DeviceInfo, hostname_echoes_mac, normalize_device_identifier, sanitize_hostname,
 };
+use crate::fingerprint::{AttributeLog, Fingerprint, FingerprintCatalogue, FingerprintMatch};
 use crate::oui::OuiRegistry;
 use crate::types::{
-    DHCPV4_CLIENT_PORT, DeviceType, Dhcpv4Packet, Dhcpv6Packet, Vendor, format_mac,
+    DHCPV4_CLIENT_PORT, DeviceType, Dhcpv4Packet, Dhcpv6Option, Dhcpv6Packet, Vendor, format_mac,
 };
 
 #[cfg(feature = "mdns")]
 use crate::mdns_registry::MdnsServiceRegistry;
 #[cfg(feature = "mdns")]
-use crate::parser::mdns::{MdnsPacket, MdnsRecordData, NbnsPacket};
+use crate::parser::mdns::{MdnsPacket, MdnsRecord, MdnsRecordData, NbnsPacket};
 
 #[cfg(feature = "ssdp")]
 use crate::parser::ssdp::{SsdpPacket, WsdPacket};
@@ -141,6 +142,23 @@ const MODEL_RULES: &[ModelRule] = &[
     },
 ];
 
+/// Why a fingerprint export contains what it contains.
+///
+/// A row is exported only when a device is both reviewed and ripe. Reporting
+/// the two conditions separately is what turns "nothing to export" from a
+/// dead end into an instruction.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ExportSummary {
+    /// Devices that have recorded at least one attribute token.
+    pub with_attributes: usize,
+    /// Of those, how many a person has given a product name.
+    pub reviewed: usize,
+    /// Of those, how many have a settled attribute set (§6).
+    pub ripe: usize,
+    /// Of those, how many are both, and so are written to the file.
+    pub exported: usize,
+}
+
 /// A manual, per-device classification override keyed on MAC address.
 ///
 /// Used for devices that expose no reliable passive signature (e.g. a
@@ -153,6 +171,42 @@ pub struct DeviceOverride {
     pub device_type: Option<DeviceType>,
     /// Forced vendor, if set.
     pub vendor: Option<Vendor>,
+    /// The product name a person typed, e.g. "Chromecast with Google TV".
+    ///
+    /// No heuristic produces this: a classifier names a category, never a
+    /// model. Its presence is what marks a device as reviewed by a human, and
+    /// only reviewed devices are exported to the shared fingerprint catalogue.
+    pub label: Option<String>,
+    /// When a person last confirmed this override, RFC 3339, if ever.
+    ///
+    /// Overrides read from a file at startup have none: a file says what a
+    /// device is, but not that anyone looked at this particular device.
+    pub reviewed_at: Option<String>,
+    /// What the heuristics said before this override was first created.
+    ///
+    /// Kept so "reset to the guess" can honour its name. Some classifications
+    /// come from a DHCP packet that is long gone, and re-running the passive
+    /// heuristics cannot recover them; only a stored copy can.
+    pub prior_device_type: Option<DeviceType>,
+    /// The vendor the heuristics gave before this override was first created.
+    pub prior_vendor: Option<Vendor>,
+}
+
+impl DeviceOverride {
+    /// Whether a person has confirmed this device's identity.
+    pub fn is_reviewed(&self) -> bool {
+        self.label
+            .as_ref()
+            .is_some_and(|label| !label.trim().is_empty())
+    }
+
+    /// Whether this override pins nothing, so keeping it would be pointless.
+    ///
+    /// The remembered prior values do not count: they exist only to undo an
+    /// override, so an entry holding nothing else has nothing left to undo.
+    fn pins_nothing(&self) -> bool {
+        self.device_type.is_none() && self.vendor.is_none() && self.label.is_none()
+    }
 }
 
 /// Device tracker that maintains a list of seen devices and saves to SQLite
@@ -164,6 +218,12 @@ pub struct DeviceTracker {
     pub(crate) overrides: HashMap<String, DeviceOverride>,
     /// OUI registry for MAC address vendor lookup
     pub(crate) oui_registry: Option<OuiRegistry>,
+    /// Fingerprint profile catalogue, loaded from a file like the OUI registry.
+    pub(crate) fingerprint_catalogue: Option<FingerprintCatalogue>,
+    /// Observed attribute tokens per device, keyed on normalized MAC.
+    pub(crate) attributes: HashMap<String, AttributeLog>,
+    /// MACs whose attribute tokens changed since the last flush.
+    pub(crate) dirty_attributes: Mutex<HashSet<String>>,
     #[cfg(feature = "mdns")]
     pub(crate) service_registry: Option<MdnsServiceRegistry>,
     /// Track updated MAC addresses for incremental journal flushes
@@ -216,12 +276,55 @@ impl DeviceTracker {
         )
         .map_err(|e| std::io::Error::other(format!("Failed to create SQLite index: {}", e)))?;
 
+        // Raw attribute tokens, one row each. The set is stored, not only the
+        // hash, because a hash alone can never answer "how close is this?".
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS device_attributes (
+                mac_address TEXT NOT NULL,
+                token       TEXT NOT NULL,
+                first_seen  TEXT NOT NULL,
+                last_seen   TEXT NOT NULL,
+                PRIMARY KEY (mac_address, token)
+            );",
+            [],
+        )
+        .map_err(|e| std::io::Error::other(format!("Failed to create attribute schema: {}", e)))?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_device_attributes_token
+                ON device_attributes(token);",
+            [],
+        )
+        .map_err(|e| std::io::Error::other(format!("Failed to create attribute index: {}", e)))?;
+
+        // Manual classifications, entered from the dashboard or a file. Kept in
+        // their own table rather than as columns on `devices`, so a correction
+        // survives a device being removed and rediscovered.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS device_overrides (
+                mac_address TEXT PRIMARY KEY,
+                device_type TEXT,
+                vendor      TEXT,
+                label       TEXT,
+                reviewed_at TEXT,
+                prior_device_type TEXT,
+                prior_vendor      TEXT
+            );",
+            [],
+        )
+        .map_err(|e| std::io::Error::other(format!("Failed to create override schema: {}", e)))?;
+
+        Self::migrate_fingerprint_columns(&conn)?;
+
         let mut tracker = Self {
             devices: HashMap::new(),
             db_path: db_path_str,
             auto_save: true,
             overrides: HashMap::new(),
             oui_registry: None,
+            fingerprint_catalogue: None,
+            attributes: HashMap::new(),
+            dirty_attributes: Mutex::new(HashSet::new()),
             #[cfg(feature = "mdns")]
             service_registry: None,
             dirty_devices: Mutex::new(HashSet::new()),
@@ -234,9 +337,51 @@ impl DeviceTracker {
         Ok(tracker)
     }
 
+    /// Adds the fingerprint columns to an existing `devices` table.
+    ///
+    /// The schema is created with `CREATE TABLE IF NOT EXISTS`, so a database
+    /// written by an older build keeps its original column list. Each
+    /// `ALTER TABLE` is run on its own and a "duplicate column" error is
+    /// ignored, which makes the migration safe to run on every startup.
+    fn migrate_fingerprint_columns(conn: &Connection) -> std::io::Result<()> {
+        const COLUMNS: [&str; 4] = [
+            "ALTER TABLE devices ADD COLUMN fingerprint TEXT;",
+            "ALTER TABLE devices ADD COLUMN fingerprint_label TEXT;",
+            "ALTER TABLE devices ADD COLUMN fingerprint_confidence INTEGER;",
+            "ALTER TABLE devices ADD COLUMN fingerprint_flags TEXT;",
+        ];
+        for statement in COLUMNS {
+            match conn.execute(statement, []) {
+                Ok(_) => {}
+                Err(e) if e.to_string().contains("duplicate column name") => {}
+                Err(e) => {
+                    return Err(std::io::Error::other(format!(
+                        "Failed to migrate fingerprint columns: {}",
+                        e
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Sets the OUI registry used to identify device manufacturers from MAC addresses.
     pub fn set_oui_registry(&mut self, registry: OuiRegistry) {
         self.oui_registry = Some(registry);
+    }
+
+    /// Sets the fingerprint profile catalogue used to name observed attribute sets.
+    ///
+    /// The feature works with no catalogue at all: without a match the existing
+    /// heuristics run unchanged, so a fingerprint only ever adds information.
+    pub fn set_fingerprint_catalogue(&mut self, catalogue: FingerprintCatalogue) {
+        self.fingerprint_catalogue = Some(catalogue);
+        self.reapply_all_fingerprints();
+    }
+
+    /// The attribute log observed for one device, if any.
+    pub fn attributes_for(&self, mac: &str) -> Option<&AttributeLog> {
+        self.attributes.get(&normalize_device_identifier(mac))
     }
 
     /// Registers a manual classification override for a single device.
@@ -343,12 +488,58 @@ impl DeviceTracker {
                 device_changed = true;
             }
 
+            // The product name is carried on the device so the dashboard and
+            // the JSON API see one shape. It is not stored in `devices`; the
+            // override table owns it.
+            if device.product_label.as_deref() != ov.label.as_deref() {
+                device.product_label = ov.label.clone();
+            }
+
             if device_changed {
                 self.dirty_devices.lock().unwrap().insert(mac.clone());
                 changed += 1;
             }
         }
 
+        changed
+    }
+
+    /// Applies the override for one device, if it has one.
+    ///
+    /// [`DeviceTracker::apply_overrides`] sweeps every device and is what the
+    /// capture loop calls. This is the same rule for a single MAC, cheap enough
+    /// to run on every packet, so a device that is rediscovered after being
+    /// removed comes back already carrying its correction rather than waiting
+    /// for the next sweep. Returns whether anything changed.
+    fn apply_override_to(&mut self, mac: &str) -> bool {
+        let Some(ov) = self.overrides.get(mac) else {
+            return false;
+        };
+        let Some(device) = self.devices.get_mut(mac) else {
+            return false;
+        };
+
+        let mut changed = false;
+        if let Some(dt) = &ov.device_type
+            && device.device_type.as_ref() != Some(dt)
+        {
+            device.device_type = Some(dt.clone());
+            changed = true;
+        }
+        if let Some(v) = &ov.vendor
+            && device.vendor.as_ref() != Some(v)
+        {
+            device.vendor = Some(v.clone());
+            changed = true;
+        }
+        if device.product_label.as_deref() != ov.label.as_deref() {
+            device.product_label = ov.label.clone();
+            changed = true;
+        }
+
+        if changed {
+            self.dirty_devices.lock().unwrap().insert(mac.to_string());
+        }
         changed
     }
 
@@ -473,7 +664,8 @@ impl DeviceTracker {
             let mut stmt = conn
                 .prepare(
                     "SELECT mac_address, ip_address, ipv6_address, ipv6_addresses, hostname,
-                    system_description, services, vendor, device_type, first_seen, last_seen
+                    system_description, services, vendor, device_type, first_seen, last_seen,
+                    fingerprint, fingerprint_label, fingerprint_confidence
              FROM devices;",
                 )
                 .map_err(std::io::Error::other)?;
@@ -491,6 +683,9 @@ impl DeviceTracker {
                     let device_type: Option<String> = row.get(8)?;
                     let first_seen_str: String = row.get(9)?;
                     let last_seen_str: String = row.get(10)?;
+                    let fingerprint: Option<String> = row.get(11)?;
+                    let fingerprint_label: Option<String> = row.get(12)?;
+                    let fingerprint_confidence: Option<i64> = row.get(13)?;
 
                     let ip_address: IpAddr = ip_address_str
                         .parse()
@@ -530,6 +725,13 @@ impl DeviceTracker {
                         services,
                         vendor: vendor.map(Vendor::from),
                         device_type: device_type.map(DeviceType::from),
+                        fingerprint,
+                        fingerprint_label,
+                        fingerprint_confidence: fingerprint_confidence
+                            .map(|value| value.clamp(0, 99) as u8),
+                        // Filled in by `apply_overrides`; the override table
+                        // owns it, so it is not a column on `devices`.
+                        product_label: None,
                         first_seen,
                         last_seen,
                     })
@@ -542,10 +744,308 @@ impl DeviceTracker {
             }
         }
 
+        self.load_overrides_from_db()?;
+        self.load_attributes_from_db()?;
+        self.reset_stale_fingerprints();
+        self.prune_stale_attributes();
         self.drop_mac_echo_hostnames();
         self.resolve_ip_conflicts();
+        self.apply_overrides();
 
         Ok(())
+    }
+
+    /// Reads the stored manual classifications back into memory.
+    fn load_overrides_from_db(&mut self) -> std::io::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT mac_address, device_type, vendor, label, reviewed_at,
+                        prior_device_type, prior_vendor
+                 FROM device_overrides;",
+            )
+            .map_err(std::io::Error::other)?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                ))
+            })
+            .map_err(std::io::Error::other)?;
+
+        let mut loaded = Vec::new();
+        for (mac, device_type, vendor, label, reviewed_at, prior_type, prior_vendor) in
+            rows.flatten()
+        {
+            loaded.push((
+                normalize_device_identifier(&mac),
+                DeviceOverride {
+                    device_type: device_type.as_deref().map(DeviceType::from),
+                    vendor: vendor.as_deref().map(Vendor::from),
+                    label,
+                    reviewed_at,
+                    prior_device_type: prior_type.as_deref().map(DeviceType::from),
+                    prior_vendor: prior_vendor.as_deref().map(Vendor::from),
+                },
+            ));
+        }
+        drop(stmt);
+        drop(conn);
+
+        for (mac, entry) in loaded {
+            self.overrides.insert(mac, entry);
+        }
+        Ok(())
+    }
+
+    /// Writes one manual classification through to the database.
+    ///
+    /// Written immediately rather than batched: a person clicking Save expects
+    /// the correction to survive a restart, even one that happens right after.
+    fn persist_override(&self, mac: &str) -> std::io::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        match self.overrides.get(mac) {
+            Some(entry) => conn
+                .execute(
+                    "INSERT INTO device_overrides
+                        (mac_address, device_type, vendor, label, reviewed_at,
+                         prior_device_type, prior_vendor)
+                     VALUES (?, ?, ?, ?, ?, ?, ?)
+                     ON CONFLICT(mac_address) DO UPDATE SET
+                        device_type = excluded.device_type,
+                        vendor      = excluded.vendor,
+                        label       = excluded.label,
+                        reviewed_at = excluded.reviewed_at,
+                        prior_device_type = excluded.prior_device_type,
+                        prior_vendor      = excluded.prior_vendor;",
+                    params![
+                        mac,
+                        entry.device_type.as_ref().map(DeviceType::as_str),
+                        entry.vendor.as_ref().map(Vendor::as_str),
+                        entry.label,
+                        entry.reviewed_at,
+                        entry.prior_device_type.as_ref().map(DeviceType::as_str),
+                        entry.prior_vendor.as_ref().map(Vendor::as_str),
+                    ],
+                )
+                .map(|_| ())
+                .map_err(std::io::Error::other),
+            None => conn
+                .execute(
+                    "DELETE FROM device_overrides WHERE mac_address = ?;",
+                    params![mac],
+                )
+                .map(|_| ())
+                .map_err(std::io::Error::other),
+        }
+    }
+
+    /// Records a person's verdict on one device and saves it.
+    ///
+    /// `label` is the product name. An empty or absent label leaves the device
+    /// unreviewed, so a correction can be made without claiming to have
+    /// identified the exact model. Returns `false` if the MAC is not tracked.
+    pub fn set_classification(
+        &mut self,
+        mac: &str,
+        device_type: Option<DeviceType>,
+        vendor: Option<Vendor>,
+        label: Option<String>,
+    ) -> std::io::Result<bool> {
+        let key = normalize_device_identifier(mac);
+        if !self.devices.contains_key(&key) {
+            return Ok(false);
+        }
+
+        let label = label
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty());
+
+        // Capture the heuristics' answer the first time this device is pinned,
+        // so a later reset has something true to go back to. On a second edit
+        // the original guess is already stored and must not be overwritten
+        // with the value the person typed a moment ago.
+        let guessed = self
+            .devices
+            .get(&key)
+            .map(|device| (device.device_type.clone(), device.vendor.clone()));
+        let is_new = !self.overrides.contains_key(&key);
+
+        let entry = self.overrides.entry(key.clone()).or_default();
+        if is_new && let Some((prior_type, prior_vendor)) = guessed {
+            entry.prior_device_type = prior_type;
+            entry.prior_vendor = prior_vendor;
+        }
+        entry.device_type = device_type;
+        entry.vendor = vendor;
+        entry.reviewed_at = label
+            .is_some()
+            .then(|| crate::device::format_timestamp(SystemTime::now()));
+        entry.label = label;
+
+        // An override holding nothing is not an override; drop it so the
+        // heuristics take the device back.
+        if entry.pins_nothing() {
+            self.overrides.remove(&key);
+        }
+
+        self.persist_override(&key)?;
+        self.apply_overrides();
+        self.refresh_fingerprint(&key);
+        self.save_to_db()?;
+        Ok(true)
+    }
+
+    /// Removes a person's verdict, handing the device back to the heuristics.
+    ///
+    /// Returns `false` if there was nothing to remove.
+    pub fn clear_classification(&mut self, mac: &str) -> std::io::Result<bool> {
+        let key = normalize_device_identifier(mac);
+        let Some(removed) = self.overrides.remove(&key) else {
+            return Ok(false);
+        };
+        self.persist_override(&key)?;
+
+        // Put the remembered guess back. `reclassify_all` only fills fields in
+        // and cannot re-derive a classification that came from a DHCP packet,
+        // so without this the device would be left blank rather than restored.
+        if let Some(device) = self.devices.get_mut(&key) {
+            device.device_type = removed.prior_device_type;
+            device.vendor = removed.prior_vendor;
+            device.product_label = None;
+        }
+        self.reclassify_all();
+        self.refresh_fingerprint(&key);
+        self.dirty_devices.lock().unwrap().insert(key.clone());
+        self.save_to_db()?;
+        Ok(true)
+    }
+
+    /// Returns the manual classification for one device, if any.
+    pub fn classification_for(&self, mac: &str) -> Option<&DeviceOverride> {
+        self.overrides.get(&normalize_device_identifier(mac))
+    }
+
+    /// Reads the stored attribute tokens back into memory.
+    fn load_attributes_from_db(&mut self) -> std::io::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT mac_address, token, first_seen, last_seen FROM device_attributes;")
+            .map_err(std::io::Error::other)?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                let mac: String = row.get(0)?;
+                let token: String = row.get(1)?;
+                let first_seen: String = row.get(2)?;
+                let last_seen: String = row.get(3)?;
+                Ok((mac, token, first_seen, last_seen))
+            })
+            .map_err(std::io::Error::other)?;
+
+        for (mac, token, first_seen, last_seen) in rows.flatten() {
+            let first_seen =
+                crate::device::parse_timestamp(&first_seen).unwrap_or_else(SystemTime::now);
+            let last_seen =
+                crate::device::parse_timestamp(&last_seen).unwrap_or_else(SystemTime::now);
+            self.attributes
+                .entry(mac)
+                .or_default()
+                .restore(&token, first_seen, last_seen);
+        }
+
+        Ok(())
+    }
+
+    /// Clears fingerprint state written by an older format version.
+    ///
+    /// A version bump changes the normalisation rules, which makes the stored
+    /// tokens wrong as well as the stored hashes. Both are dropped and rebuilt
+    /// from live traffic, so the operator never has to delete the database.
+    fn reset_stale_fingerprints(&mut self) {
+        let stale: Vec<String> = self
+            .devices
+            .iter()
+            .filter(|(_, device)| {
+                device
+                    .fingerprint
+                    .as_deref()
+                    .is_some_and(|value| !Fingerprint::is_current(value))
+            })
+            .map(|(mac, _)| mac.clone())
+            .collect();
+
+        if stale.is_empty() {
+            return;
+        }
+
+        for mac in &stale {
+            if let Some(device) = self.devices.get_mut(mac) {
+                device.fingerprint = None;
+                device.fingerprint_label = None;
+                device.fingerprint_confidence = None;
+            }
+            self.attributes.remove(mac);
+        }
+
+        {
+            let conn = self.conn.lock().unwrap();
+            for mac in &stale {
+                let _ = conn.execute(
+                    "DELETE FROM device_attributes WHERE mac_address = ?;",
+                    params![mac],
+                );
+            }
+        }
+
+        let mut dirty = self.dirty_devices.lock().unwrap();
+        dirty.extend(stale);
+    }
+
+    /// Drops tokens a still-active device has stopped advertising.
+    ///
+    /// The window is measured against the device's own `last_seen`, not the
+    /// wall clock, so a device that has been offline for a year keeps its whole
+    /// set frozen and loses nothing.
+    fn prune_stale_attributes(&mut self) {
+        let mut removed: Vec<(String, Vec<String>)> = Vec::new();
+
+        for (mac, log) in self.attributes.iter_mut() {
+            let Some(device) = self.devices.get(mac) else {
+                continue;
+            };
+            let stale = log.prune_stale(device.last_seen);
+            if !stale.is_empty() {
+                removed.push((mac.clone(), stale));
+            }
+        }
+
+        if removed.is_empty() {
+            return;
+        }
+
+        {
+            let conn = self.conn.lock().unwrap();
+            for (mac, tokens) in &removed {
+                for token in tokens {
+                    let _ = conn.execute(
+                        "DELETE FROM device_attributes WHERE mac_address = ? AND token = ?;",
+                        params![mac, token],
+                    );
+                }
+            }
+        }
+
+        for (mac, _) in &removed {
+            self.refresh_fingerprint(mac);
+        }
     }
 
     /// Returns the device a packet really came from, when the frame was sent by
@@ -720,7 +1220,7 @@ impl DeviceTracker {
             guard.clone()
         };
 
-        if dirty.is_empty() {
+        if dirty.is_empty() && self.dirty_attributes.lock().unwrap().is_empty() {
             return Ok(());
         }
 
@@ -734,8 +1234,9 @@ impl DeviceTracker {
                 .prepare(
                     "INSERT INTO devices (
                     mac_address, ip_address, ipv6_address, ipv6_addresses, hostname,
-                    system_description, services, vendor, device_type, first_seen, last_seen
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    system_description, services, vendor, device_type, first_seen, last_seen,
+                    fingerprint, fingerprint_label, fingerprint_confidence
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(mac_address) DO UPDATE SET
                     ip_address = excluded.ip_address,
                     ipv6_address = excluded.ipv6_address,
@@ -745,6 +1246,9 @@ impl DeviceTracker {
                     services = excluded.services,
                     vendor = excluded.vendor,
                     device_type = excluded.device_type,
+                    fingerprint = excluded.fingerprint,
+                    fingerprint_label = excluded.fingerprint_label,
+                    fingerprint_confidence = excluded.fingerprint_confidence,
                     last_seen = excluded.last_seen;",
                 )
                 .map_err(std::io::Error::other)?;
@@ -775,11 +1279,50 @@ impl DeviceTracker {
                         device.device_type.as_ref().map(DeviceType::as_str),
                         first_seen,
                         last_seen,
+                        device.fingerprint,
+                        device.fingerprint_label,
+                        device.fingerprint_confidence.map(i64::from),
                     ])
                     .map_err(|e| {
                         std::io::Error::other(format!(
                             "Failed to insert device {}: {}",
                             device.mac_address, e
+                        ))
+                    })?;
+                }
+            }
+        }
+
+        let dirty_attributes: HashSet<String> = {
+            let guard = self.dirty_attributes.lock().unwrap();
+            guard.clone()
+        };
+
+        {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT INTO device_attributes (mac_address, token, first_seen, last_seen)
+                     VALUES (?, ?, ?, ?)
+                     ON CONFLICT(mac_address, token) DO UPDATE SET
+                        last_seen = excluded.last_seen;",
+                )
+                .map_err(std::io::Error::other)?;
+
+            for mac in &dirty_attributes {
+                let Some(log) = self.attributes.get(mac) else {
+                    continue;
+                };
+                for (token, times) in log.entries() {
+                    stmt.execute(params![
+                        mac,
+                        token,
+                        crate::device::format_timestamp(times.first_seen),
+                        crate::device::format_timestamp(times.last_seen),
+                    ])
+                    .map_err(|e| {
+                        std::io::Error::other(format!(
+                            "Failed to insert attribute for {}: {}",
+                            mac, e
                         ))
                     })?;
                 }
@@ -795,8 +1338,388 @@ impl DeviceTracker {
                 guard.remove(mac);
             }
         }
+        {
+            let mut guard = self.dirty_attributes.lock().unwrap();
+            for mac in &dirty_attributes {
+                guard.remove(mac);
+            }
+        }
 
         Ok(())
+    }
+
+    /// Records observed attribute tokens for `mac` and refreshes its fingerprint.
+    ///
+    /// `collect` receives the device's log and the current time. It returns the
+    /// number of tokens that were new, so a packet that only repeats what is
+    /// already known does no work beyond refreshing `last_seen`.
+    fn record_attributes<F>(&mut self, mac: &str, collect: F)
+    where
+        F: FnOnce(&mut AttributeLog, SystemTime),
+    {
+        let key = normalize_device_identifier(mac);
+        if !self.devices.contains_key(&key) {
+            return;
+        }
+
+        let before = {
+            let log = self.attributes.entry(key.clone()).or_default();
+            let before = log.set().fingerprint();
+            collect(log, SystemTime::now());
+            before
+        };
+
+        let after = self.attributes[&key].set().fingerprint();
+        {
+            let mut dirty = self.dirty_attributes.lock().unwrap();
+            dirty.insert(key.clone());
+        }
+        if before != after {
+            self.refresh_fingerprint(&key);
+        }
+
+        // A person's verdict outlives the device row, so a device rediscovered
+        // after being removed must not spend a sweep wearing the guess again.
+        self.apply_override_to(&key);
+    }
+
+    /// Recomputes the stored fingerprint for one device and re-runs the match.
+    fn refresh_fingerprint(&mut self, mac: &str) {
+        let Some(log) = self.attributes.get(mac) else {
+            return;
+        };
+        let set = log.set().clone();
+        if set.is_empty() {
+            if let Some(device) = self.devices.get_mut(mac) {
+                device.fingerprint = None;
+                device.fingerprint_label = None;
+                device.fingerprint_confidence = None;
+            }
+            return;
+        }
+
+        let Some(device) = self.devices.get(mac) else {
+            return;
+        };
+        let ripe = log.is_ripe_at(device.first_seen, SystemTime::now());
+        let oui_vendor = self
+            .oui_registry
+            .as_ref()
+            .and_then(|registry| registry.lookup(mac))
+            .map(Vendor::from);
+
+        let hit = self
+            .fingerprint_catalogue
+            .as_ref()
+            .and_then(|catalogue| catalogue.match_tokens(&set, ripe, oui_vendor.as_ref()));
+
+        let fingerprint = set.fingerprint().to_string();
+        let Some(device) = self.devices.get_mut(mac) else {
+            return;
+        };
+        device.fingerprint = Some(fingerprint);
+        device.fingerprint_label = hit.as_ref().map(|hit| hit.label.clone());
+        device.fingerprint_confidence = hit.as_ref().map(|hit| hit.confidence);
+
+        if let Some(hit) = hit {
+            Self::apply_fingerprint_match(device, &hit);
+        }
+
+        {
+            let mut dirty = self.dirty_devices.lock().unwrap();
+            dirty.insert(mac.to_string());
+        }
+
+        // Overrides always win, including over a perfect fingerprint match.
+        self.apply_overrides();
+    }
+
+    /// Applies a match to a device, following the precedence rules (§7).
+    ///
+    /// At confidence 70 and above the fingerprint replaces the heuristic guess.
+    /// Between 40 and 69 it only fills fields still unset, so a weaker signal
+    /// can add information but never contradict one. Below 40 nothing is
+    /// applied; the tokens stay recorded either way.
+    fn apply_fingerprint_match(device: &mut DeviceInfo, hit: &FingerprintMatch) {
+        const TRUSTED: u8 = 70;
+        const USABLE: u8 = 40;
+
+        if hit.confidence >= TRUSTED {
+            if hit.device_type.is_some() {
+                device.device_type = hit.device_type.clone();
+            }
+            if hit.vendor.is_some() {
+                device.vendor = hit.vendor.clone();
+            }
+        } else if hit.confidence >= USABLE {
+            if device.device_type.is_none() {
+                device.device_type = hit.device_type.clone();
+            }
+            if device.vendor.is_none() {
+                device.vendor = hit.vendor.clone();
+            }
+        }
+    }
+
+    /// Re-runs the match for every device that has recorded attributes.
+    ///
+    /// Called when a catalogue is loaded, so profiles apply to devices that
+    /// were captured before the file existed.
+    fn reapply_all_fingerprints(&mut self) {
+        let macs: Vec<String> = self.attributes.keys().cloned().collect();
+        for mac in macs {
+            self.refresh_fingerprint(&mac);
+        }
+    }
+
+    /// Records the DHCPv4 attributes carried by `packet`.
+    pub fn record_dhcpv4_attributes(&mut self, packet: &Dhcpv4Packet) {
+        let mac = packet.client_mac_string();
+        self.record_attributes(&mac, |log, now| {
+            crate::fingerprint::collect_dhcpv4_attributes(packet, log, now);
+        });
+    }
+
+    /// Records the DHCPv6 attributes carried by `options`.
+    pub fn record_dhcpv6_attributes(&mut self, mac: &str, options: &[Dhcpv6Option]) {
+        self.record_attributes(mac, |log, now| {
+            crate::fingerprint::collect_dhcpv6_attributes(options, log, now);
+        });
+    }
+
+    /// Records the mDNS attributes carried by `records`.
+    ///
+    /// Takes records rather than a packet so the caller passes only what it has
+    /// already attributed to this device. A reflected or relayed frame must
+    /// never reach a fingerprint.
+    #[cfg(feature = "mdns")]
+    pub fn record_mdns_attributes(&mut self, mac: &str, records: &[MdnsRecord]) {
+        self.record_attributes(mac, |log, now| {
+            crate::fingerprint::collect_mdns_attributes(records, log, now);
+        });
+    }
+
+    /// Records the SSDP, UPnP or WSD attributes carried by `packet`.
+    #[cfg(feature = "ssdp")]
+    pub fn record_ssdp_attributes(&mut self, mac: &str, packet: &SsdpPacket) {
+        self.record_attributes(mac, |log, now| {
+            crate::fingerprint::collect_ssdp_attributes(packet, log, now);
+        });
+    }
+
+    /// Builds the shared catalogue from every device a person has reviewed.
+    ///
+    /// This is the automated replacement for editing a dump by hand. A device
+    /// is exported only when both are true:
+    ///
+    /// - it is **ripe** (§6), so a half-collected set cannot be published, and
+    /// - it is **reviewed**, meaning a person typed a product name for it.
+    ///
+    /// The result carries no MAC, no IP and no hostname, so unlike a dump it is
+    /// safe to commit. Rows are sorted, so two exports of an unchanged network
+    /// produce byte-identical files.
+    pub fn export_fingerprint_catalogue(&self) -> String {
+        use std::fmt::Write;
+
+        let now = SystemTime::now();
+        let mut rows: Vec<String> = Vec::new();
+
+        for (mac, log) in &self.attributes {
+            let Some(device) = self.devices.get(mac) else {
+                continue;
+            };
+            let Some(review) = self.overrides.get(mac) else {
+                continue;
+            };
+            if !review.is_reviewed() {
+                continue;
+            }
+            if !log.is_ripe_at(device.first_seen, now) || log.set().is_capped() {
+                continue;
+            }
+
+            let field = |value: Option<&str>| match value {
+                Some(text) if !text.trim().is_empty() => text.replace(['\t', '\r', '\n'], " "),
+                _ => Self::UNSET_FIELD.to_string(),
+            };
+            let tokens: Vec<&str> = log.set().tokens().collect();
+            rows.push(format!(
+                "{:016x}\t{}\t{}\t{}\t{}\t{}\tn=1,oui=1",
+                log.set().fingerprint().core,
+                field(device.device_type.as_ref().map(DeviceType::as_str)),
+                field(device.vendor.as_ref().map(Vendor::as_str)),
+                field(review.label.as_deref()),
+                Self::UNSET_FIELD,
+                tokens.join(",")
+            ));
+        }
+
+        rows.sort_unstable();
+
+        let summary = self.export_summary();
+        let mut out = String::new();
+        let _ = writeln!(
+            out,
+            "# LANwatch fingerprint export. Every row was reviewed by a person."
+        );
+        // A machine-readable tally, so an empty export can explain itself.
+        let _ = writeln!(
+            out,
+            "# summary devices={} reviewed={} ripe={} exported={}",
+            summary.with_attributes, summary.reviewed, summary.ripe, summary.exported
+        );
+        let _ = writeln!(
+            out,
+            "# It carries no MAC, IP or hostname, so it is safe to share."
+        );
+        let _ = writeln!(
+            out,
+            "# Merge with: make fingerprints-merge FILE=<this file>"
+        );
+        let _ = writeln!(
+            out,
+            "# core_hash\tdevice_type\tvendor\tlabel\tflags\ttokens\tmeta"
+        );
+        for row in &rows {
+            let _ = writeln!(out, "{}", row);
+        }
+        out
+    }
+
+    /// How many devices [`DeviceTracker::export_fingerprint_catalogue`] would write.
+    pub fn reviewed_ripe_count(&self) -> usize {
+        self.export_summary().exported
+    }
+
+    /// Counts each condition the export requires, separately.
+    ///
+    /// An empty export has two possible causes, and "nothing to export" does
+    /// not say which. These counts do: a person can see whether they have not
+    /// reviewed anything yet, or whether the devices they reviewed have not
+    /// settled.
+    pub fn export_summary(&self) -> ExportSummary {
+        let now = SystemTime::now();
+        let mut summary = ExportSummary {
+            with_attributes: self.attributes.len(),
+            ..ExportSummary::default()
+        };
+
+        for (mac, log) in &self.attributes {
+            let reviewed = self
+                .overrides
+                .get(mac)
+                .is_some_and(DeviceOverride::is_reviewed);
+            let ripe = self
+                .devices
+                .get(mac)
+                .is_some_and(|device| log.is_ripe_at(device.first_seen, now))
+                && !log.set().is_capped();
+
+            if reviewed {
+                summary.reviewed += 1;
+            }
+            if ripe {
+                summary.ripe += 1;
+            }
+            if reviewed && ripe {
+                summary.exported += 1;
+            }
+        }
+
+        summary
+    }
+
+    /// The catalogue's marker for a field a human has not filled in.
+    const UNSET_FIELD: &str = "-";
+
+    /// Writes every ripe device's attribute set as catalogue lines (§12).
+    ///
+    /// The output is a labelling worksheet, not a finished catalogue. The
+    /// `device_type` and `vendor` fields carry LANwatch's own classification,
+    /// so the task is review rather than transcription. The `label` field is
+    /// left as `-` on purpose: it holds the product name, which no heuristic
+    /// can produce, and an unfilled `label` is what marks a row as unreviewed.
+    /// `scripts/merge-fingerprints.py` skips those rows, so a guess can only
+    /// reach the shared catalogue once a person has looked at it. Each row is
+    /// preceded by a comment naming the device.
+    ///
+    /// That comment carries a MAC, an IP and a hostname, which is why a dump is
+    /// private. `scripts/merge-fingerprints.py` strips every comment before the
+    /// rows reach the shared catalogue.
+    ///
+    /// Unripe devices are skipped: a half-collected set must never reach the
+    /// repository. Returns the number of rows written.
+    pub fn dump_fingerprints<P: AsRef<Path>>(&self, path: P) -> std::io::Result<usize> {
+        use std::io::Write;
+
+        let now = SystemTime::now();
+        let mut rows: Vec<(String, String)> = Vec::new();
+
+        for (mac, log) in &self.attributes {
+            let Some(device) = self.devices.get(mac) else {
+                continue;
+            };
+            if !log.is_ripe_at(device.first_seen, now) || log.set().is_capped() {
+                continue;
+            }
+
+            let tokens: Vec<&str> = log.set().tokens().collect();
+            let comment = format!(
+                "# {}  {}  {}",
+                mac,
+                device.ip_address,
+                device.hostname.as_deref().unwrap_or("-"),
+            );
+
+            // A tab would split the field and a newline would split the row,
+            // so a vendor read from an OUI file cannot be trusted verbatim.
+            let field = |value: Option<&str>| match value {
+                Some(text) if !text.trim().is_empty() => text.replace(['\t', '\r', '\n'], " "),
+                _ => Self::UNSET_FIELD.to_string(),
+            };
+            let row = format!(
+                "{:016x}\t{}\t{}\t{}\t{}\t{}\tn=1,oui=1",
+                log.set().fingerprint().core,
+                field(device.device_type.as_ref().map(DeviceType::as_str)),
+                field(device.vendor.as_ref().map(Vendor::as_str)),
+                Self::UNSET_FIELD,
+                Self::UNSET_FIELD,
+                tokens.join(",")
+            );
+            rows.push((comment, row));
+        }
+
+        // Sorted so two dumps of the same network produce the same file.
+        rows.sort_unstable();
+
+        let mut file = std::fs::File::create(path)?;
+        writeln!(
+            file,
+            "# LANwatch fingerprint dump. device_type and vendor hold LANwatch's own"
+        )?;
+        writeln!(
+            file,
+            "# guess. Correct what is wrong, then fill in label with the product name."
+        )?;
+        writeln!(
+            file,
+            "# A row whose label is still '-' is treated as unreviewed and is skipped."
+        )?;
+        writeln!(file, "# Then run: make fingerprints-merge FILE=<this file>")?;
+        writeln!(
+            file,
+            "# Do NOT commit this file: the comment lines carry MAC and IP addresses."
+        )?;
+        writeln!(
+            file,
+            "# core_hash\tdevice_type\tvendor\tlabel\tflags\ttokens\tmeta"
+        )?;
+        for (comment, row) in &rows {
+            writeln!(file, "{}", comment)?;
+            writeln!(file, "{}", row)?;
+        }
+
+        Ok(rows.len())
     }
 
     /// Enable or disable automatic writes on each update.
@@ -807,6 +1730,16 @@ impl DeviceTracker {
     /// Explicitly flushes the current in-memory device state to the database file.
     pub fn flush_to_db(&self) -> std::io::Result<()> {
         self.save_to_db()
+    }
+
+    /// Reports whether anything is waiting to be written to the database.
+    ///
+    /// A repeated announcement changes no device field but still records
+    /// attribute tokens, so a caller that batches writes cannot decide when to
+    /// flush from a count of changed devices alone. It must ask.
+    pub fn has_pending_writes(&self) -> bool {
+        !self.dirty_devices.lock().unwrap().is_empty()
+            || !self.dirty_attributes.lock().unwrap().is_empty()
     }
 
     /// Returns a vector of all tracked devices pre-sorted by `last_seen` descending.
@@ -926,6 +1859,13 @@ impl DeviceTracker {
                     let _ = self.save_to_db();
                 }
             }
+        }
+
+        // Attributes are recorded after classification so a fingerprint match
+        // sees the heuristics' result and can decide whether to override it.
+        self.record_dhcpv4_attributes(packet);
+        if self.auto_save {
+            let _ = self.save_to_db();
         }
 
         changed
@@ -1086,6 +2026,11 @@ impl DeviceTracker {
                     let _ = self.save_to_db();
                 }
             }
+        }
+
+        self.record_dhcpv6_attributes(&mac, &packet.options);
+        if self.auto_save {
+            let _ = self.save_to_db();
         }
 
         changed
@@ -1587,7 +2532,15 @@ impl DeviceTracker {
             .unwrap()
             .insert(target_mac.to_string());
 
-        if updated > 0 && self.auto_save {
+        // An aggregate packet describes several devices, and only its address
+        // records were attributed above. Address records carry no service
+        // information, so there is nothing here to fingerprint either.
+        if !aggregate {
+            let records: Vec<MdnsRecord> = packet.attribution_records().cloned().collect();
+            self.record_mdns_attributes(&target_mac, &records);
+        }
+
+        if self.auto_save {
             let _ = self.save_to_db();
         }
 
@@ -2128,9 +3081,11 @@ impl DeviceTracker {
         // Mark dirty *before* flushing: `save_to_db` only writes the macs in
         // `dirty_devices`, so flushing first persists the previous backlog and
         // leaves this update on disk only if some later call happens to flush.
-        self.dirty_devices.lock().unwrap().insert(mac);
+        self.dirty_devices.lock().unwrap().insert(mac.clone());
 
-        if updated > 0 && self.auto_save {
+        self.record_ssdp_attributes(&mac, packet);
+
+        if self.auto_save {
             let _ = self.save_to_db();
         }
 
@@ -2849,6 +3804,47 @@ impl DeviceTracker {
             })?;
 
         Ok(true)
+    }
+
+    /// Erases every trace of one device: sightings, tokens and corrections.
+    ///
+    /// [`DeviceTracker::remove_device`] deliberately keeps the manual
+    /// classification and the collected attribute tokens, so a device that
+    /// reappears seconds later is still labelled. This is the deliberate
+    /// opposite: it forgets the device entirely, including what a person said
+    /// about it. Only useful for a device that has left the network for good.
+    ///
+    /// Returns `false` if the MAC was not known in any of the three tables, so
+    /// a typed MAC that matched nothing can be reported rather than silently
+    /// succeeding.
+    pub fn forget_device(&mut self, mac: &str) -> std::io::Result<bool> {
+        let key = normalize_device_identifier(mac);
+
+        // Removing the device first keeps `remove_device`'s ip_index handling
+        // in one place. It reports whether the device itself was tracked; the
+        // other two tables are checked separately, because tokens or a
+        // correction can outlive the sighting that created them.
+        let had_device = self.remove_device(&key)?;
+        let had_attributes = self.attributes.remove(&key).is_some();
+        let had_override = self.overrides.remove(&key).is_some();
+
+        self.dirty_attributes.lock().unwrap().remove(&key);
+
+        let conn = self.conn.lock().unwrap();
+        let attribute_rows = conn
+            .execute(
+                "DELETE FROM device_attributes WHERE mac_address = ?;",
+                params![key],
+            )
+            .map_err(|e| std::io::Error::other(format!("Failed to delete attributes: {}", e)))?;
+        let override_rows = conn
+            .execute(
+                "DELETE FROM device_overrides WHERE mac_address = ?;",
+                params![key],
+            )
+            .map_err(|e| std::io::Error::other(format!("Failed to delete override: {}", e)))?;
+
+        Ok(had_device || had_attributes || had_override || attribute_rows > 0 || override_rows > 0)
     }
 
     /// Removes every tracked device from memory and the database.

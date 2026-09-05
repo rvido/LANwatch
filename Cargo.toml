@@ -11,6 +11,11 @@ homepage = "https://github.com/rvido/lanwatch"
 keywords = ["network", "discovery", "dhcp", "mdns", "device-tracking"]
 categories = ["network-programming", "parsing"]
 
+# The smoke example drives the REST API, so it cannot build without it.
+[[example]]
+name = "api_smoke"
+required-features = ["http-api"]
+
 [features]
 # Keep default minimal; enable API explicitly to avoid pulling serde_json/tiny_http.
 default = []

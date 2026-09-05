@@ -37,6 +37,11 @@ jobs:
     - name: Run clippy lints
       run: cargo clippy --all-features -- -D warnings
 
+    # The dashboard is one inline script with no build step, so a typo in a
+    # function name is otherwise only found by clicking the button that calls it.
+    - name: Check the bundled dashboard
+      run: node scripts/check-dashboard.js src/dashboard.html
+
     - name: Generate code coverage
       run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
 

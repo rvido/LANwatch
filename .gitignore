@@ -7,3 +7,6 @@ Cargo.lock
 .vscode/
 .github/*.md
 .github/*/*.md
+# Fingerprint dumps carry MAC and IP addresses in their comment lines.
+/fingerprint-dump*.txt
+/dump.txt

@@ -327,6 +327,98 @@
             opacity: 1;
         }
 
+        .identify-box {
+            gap: 0.75rem;
+        }
+        .identify-hint {
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            line-height: 1.4;
+            margin: 0;
+        }
+        .identify-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 0.75rem;
+            width: 100%;
+        }
+        .identify-field {
+            display: flex;
+            flex-direction: column;
+            gap: 0.3rem;
+            min-width: 0;
+        }
+        .identify-field-wide {
+            grid-column: 1 / -1;
+        }
+        .identify-field > span {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted);
+        }
+        .identify-field input {
+            width: 100%;
+            box-sizing: border-box;
+            padding: 0.5rem 0.65rem;
+            border-radius: 8px;
+            border: 1px solid var(--border, rgba(255,255,255,0.15));
+            background: rgba(127, 127, 127, 0.08);
+            color: inherit;
+            font: inherit;
+            font-size: 0.9rem;
+        }
+        .identify-field input:focus {
+            outline: 2px solid var(--accent, #4f8cff);
+            outline-offset: 1px;
+        }
+        .identify-actions {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+        }
+        .identify-btn {
+            padding: 0.45rem 0.9rem;
+            border-radius: 8px;
+            border: 1px solid var(--border, rgba(255,255,255,0.15));
+            background: transparent;
+            color: inherit;
+            font: inherit;
+            font-size: 0.85rem;
+            cursor: pointer;
+        }
+        .identify-btn:hover {
+            background: rgba(127, 127, 127, 0.12);
+        }
+        .identify-btn.primary {
+            border-color: transparent;
+            background: var(--accent, #4f8cff);
+            color: #fff;
+            font-weight: 600;
+        }
+        .identify-btn[disabled] {
+            opacity: 0.55;
+            cursor: default;
+        }
+        .identify-status {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+        .identify-status.ok { color: #3fbf6f; }
+        .identify-status.bad { color: #e2564d; }
+        .reviewed-badge {
+            display: inline-block;
+            margin-left: 0.5rem;
+            padding: 0.1rem 0.45rem;
+            border-radius: 999px;
+            font-size: 0.7rem;
+            font-weight: 700;
+            background: rgba(63, 191, 111, 0.18);
+            color: #3fbf6f;
+            vertical-align: middle;
+        }
+
         .modal-content {
             background: var(--surface);
             border: 1px solid var(--border);
@@ -405,6 +497,30 @@
             font-size: 0.95rem;
             font-weight: 600;
             word-break: break-all;
+        }
+
+        .confidence-badge {
+            display: inline-block;
+            margin-left: 0.5rem;
+            padding: 0.1rem 0.45rem;
+            border-radius: 999px;
+            font-size: 0.7rem;
+            font-weight: 700;
+            vertical-align: middle;
+        }
+
+        /* A trusted match. */
+        .confidence-badge.strong {
+            background: rgba(34, 197, 94, 0.15);
+            color: #4ade80;
+            border: 1px solid rgba(34, 197, 94, 0.35);
+        }
+
+        /* Below 70 the match only fills gaps, so it must not look like a fact. */
+        .confidence-badge.weak {
+            background: rgba(255, 255, 255, 0.06);
+            color: var(--text-muted);
+            border: 1px solid var(--border);
         }
 
         .json-preview {
@@ -553,6 +669,14 @@
             </svg>
             <input type="text" class="search-input" id="search" placeholder="Search devices by IP, MAC, Name, Category...">
         </div>
+        <button class="flush-btn" id="export-btn" onclick="exportFingerprints()" title="Download the reviewed devices as a fingerprint catalogue" style="background: transparent;">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="7 10 12 15 17 10"></polyline>
+                <line x1="12" y1="15" x2="12" y2="3"></line>
+            </svg>
+            Export Fingerprints
+        </button>
         <button class="flush-btn" id="flush-btn" onclick="flushAllDevices()" title="Remove all devices">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <polyline points="3 6 5 6 21 6"></polyline>
@@ -609,6 +733,11 @@
                     <span class="detail-label">System Description</span>
                     <span class="detail-value" id="modal-desc" style="font-style: italic;">No description available</span>
                 </div>
+                <div class="detail-item" style="grid-column: span 2;" id="modal-fingerprint-box">
+                    <span class="detail-label">Fingerprint</span>
+                    <span class="detail-value" id="modal-fingerprint-label">Unrecognised</span>
+                    <span class="detail-value" id="modal-fingerprint-hash" style="font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; color: var(--text-muted); font-weight: 400;"></span>
+                </div>
                 <div class="detail-item" style="grid-column: span 2;" id="modal-services-box">
                     <span class="detail-label">Discovered Services</span>
                     <span class="detail-value" id="modal-services" style="font-family: 'JetBrains Mono', monospace; font-size: 0.85rem;">None</span>
@@ -616,6 +745,33 @@
                 <div>
                     <span class="detail-label" style="margin-bottom: 0.5rem; display: block;">Raw JSON Endpoint Data</span>
                     <pre class="json-preview" id="modal-json"></pre>
+                </div>
+                <div class="detail-item identify-box" style="grid-column: span 2;" id="modal-identify-box">
+                    <span class="detail-label">Identify this device</span>
+                    <p class="identify-hint">
+                        Correct the type and vendor if they are wrong. The product name is what marks
+                        this device as reviewed, and only reviewed devices are exported.
+                    </p>
+                    <div class="identify-grid">
+                        <label class="identify-field">
+                            <span>Device type</span>
+                            <input id="identify-type" list="device-type-options" placeholder="Leave empty to use the guess" autocomplete="off">
+                            <datalist id="device-type-options"></datalist>
+                        </label>
+                        <label class="identify-field">
+                            <span>Vendor</span>
+                            <input id="identify-vendor" placeholder="Leave empty to use the guess" autocomplete="off">
+                        </label>
+                        <label class="identify-field identify-field-wide">
+                            <span>Product name</span>
+                            <input id="identify-label" placeholder="e.g. Chromecast with Google TV" autocomplete="off">
+                        </label>
+                    </div>
+                    <div class="identify-actions">
+                        <button class="identify-btn primary" id="identify-save" onclick="saveClassification()">Save</button>
+                        <button class="identify-btn" id="identify-reset" onclick="clearClassification()">Reset to guess</button>
+                        <span class="identify-status" id="identify-status"></span>
+                    </div>
                 </div>
                 <button class="remove-device-btn" id="modal-remove-btn" onclick="removeDeviceFromModal()">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -787,13 +943,233 @@
             }
         }
 
+        // The one place a device's display name is decided. Every caller uses
+        // this, so the list, the modal and the remove dialog cannot disagree.
         function deviceDisplayName(device) {
             if (!device) return 'this device';
             if (device.hostname) return device.hostname;
             if (device.vendor === 'Private MAC Address') {
-                return `Private Device (${device.mac_address.slice(-8)})`.toUpperCase();
+                // A randomised MAC names no manufacturer, so "Private MAC
+                // Address" is a statement about the address, not a device name.
+                // The device type is what actually identifies it; fall back to
+                // the generic label only when there is no type either.
+                const suffix = (device.mac_address || '').slice(-8).toUpperCase();
+                const label = device.device_type || 'Private Device';
+                return suffix ? `${label} (${suffix})` : label;
             }
-            return device.vendor || device.mac_address;
+            return device.vendor || device.mac_address || 'Unknown Device';
+        }
+
+        // The type list comes from the server so the picker can never offer a
+        // name the backend would turn into a free-text "Other".
+        let deviceTypeNames = [];
+
+        async function loadDeviceTypes() {
+            try {
+                const response = await fetch('/device-types');
+                const result = await response.json();
+                if (!result.success || !Array.isArray(result.data)) return;
+                deviceTypeNames = result.data;
+                const list = document.getElementById('device-type-options');
+                list.innerHTML = '';
+                deviceTypeNames.forEach(name => {
+                    const option = document.createElement('option');
+                    option.value = name;
+                    list.appendChild(option);
+                });
+            } catch (error) {
+                console.error('Error loading device types:', error);
+            }
+        }
+
+        function setIdentifyStatus(message, kind) {
+            const status = document.getElementById('identify-status');
+            status.textContent = message || '';
+            status.className = 'identify-status' + (kind ? ' ' + kind : '');
+        }
+
+        function fillIdentifyPanel(device) {
+            document.getElementById('identify-type').value = device.device_type || '';
+            document.getElementById('identify-vendor').value = device.vendor || '';
+            document.getElementById('identify-label').value = device.product_label || '';
+            setIdentifyStatus(device.product_label ? 'Reviewed' : '', device.product_label ? 'ok' : null);
+        }
+
+        function setIdentifyBusy(busy) {
+            document.getElementById('identify-save').disabled = busy;
+            document.getElementById('identify-reset').disabled = busy;
+        }
+
+        // Replaces the stored device in place so the list, the stats and the
+        // modal all show the server's answer, not a guess about what it did.
+        function absorbDevice(device) {
+            const index = devicesData.findIndex(d => d.mac_address === device.mac_address);
+            if (index >= 0) {
+                devicesData[index] = device;
+            } else {
+                devicesData.push(device);
+            }
+            renderStats();
+            renderDevices();
+        }
+
+        // A body that is not JSON must not look like a network failure, so the
+        // parse is separated from the request.
+        async function readJson(response) {
+            try {
+                return await response.json();
+            } catch (error) {
+                console.error('Response was not JSON:', error);
+                return null;
+            }
+        }
+
+        // Always says something a person can act on. Without the status code, a
+        // server that answered is indistinguishable from one that did not.
+        function failureReason(response, result) {
+            if (result && result.error) return result.error;
+            return `Server said ${response.status}.`;
+        }
+
+        // Redraws after a successful review. Kept apart from the request so a
+        // rendering error is never reported as a failed save.
+        function redrawAfterReview(device, message) {
+            try {
+                absorbDevice(device);
+                showDeviceDetails(device);
+            } catch (error) {
+                console.error('Saved, but the page could not be redrawn:', error);
+            }
+            // Set last: `showDeviceDetails` refills the panel and clears this.
+            setIdentifyStatus(message, 'ok');
+        }
+
+        async function saveClassification() {
+            if (!currentModalMac) return;
+            const body = {
+                device_type: document.getElementById('identify-type').value,
+                vendor: document.getElementById('identify-vendor').value,
+                label: document.getElementById('identify-label').value
+            };
+
+            setIdentifyBusy(true);
+            setIdentifyStatus('Saving...');
+            let device = null;
+            try {
+                const response = await fetch(`/devices/${encodeURIComponent(currentModalMac)}/classification`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+                const result = await readJson(response);
+                if (!response.ok || !result || !result.success) {
+                    setIdentifyStatus(failureReason(response, result), 'bad');
+                    return;
+                }
+                device = Array.isArray(result.data) ? result.data[0] : result.data;
+            } catch (error) {
+                console.error('Error saving classification:', error);
+                setIdentifyStatus('Could not reach LANwatch.', 'bad');
+                return;
+            } finally {
+                setIdentifyBusy(false);
+            }
+
+            // The save is done. Redrawing is a separate job, so a failure here
+            // is a display bug -- reporting it as a failed save would be a lie.
+            redrawAfterReview(device, device.product_label ? 'Saved and reviewed' : 'Saved');
+        }
+
+        async function clearClassification() {
+            if (!currentModalMac) return;
+            setIdentifyBusy(true);
+            setIdentifyStatus('Clearing...');
+            let device = null;
+            try {
+                const response = await fetch(`/devices/${encodeURIComponent(currentModalMac)}/classification`, {
+                    method: 'DELETE'
+                });
+                if (response.status === 404) {
+                    setIdentifyStatus('Nothing to reset.', null);
+                    return;
+                }
+                const result = await readJson(response);
+                if (!response.ok || !result || !result.success) {
+                    setIdentifyStatus(failureReason(response, result), 'bad');
+                    return;
+                }
+                device = Array.isArray(result.data) ? result.data[0] : result.data;
+            } catch (error) {
+                console.error('Error clearing classification:', error);
+                setIdentifyStatus('Could not reach LANwatch.', 'bad');
+                return;
+            } finally {
+                setIdentifyBusy(false);
+            }
+
+            redrawAfterReview(device, 'Back to the guess');
+        }
+
+        // An export needs a device to be BOTH reviewed and settled. Saying which
+        // of the two is missing is the difference between a dead end and an
+        // instruction, so the file carries a tally and this reads it back.
+        function explainEmptyExport(text) {
+            const line = text.split('\n').find(l => l.startsWith('# summary '));
+            if (!line) return 'Nothing to export yet.';
+
+            const counts = {};
+            line.slice('# summary '.length).split(/\s+/).forEach(pair => {
+                const [key, value] = pair.split('=');
+                counts[key] = Number(value);
+            });
+
+            if (!counts.devices) {
+                return 'No device has advertised anything yet.\n\n' +
+                    'Attributes come from mDNS, SSDP and DHCP. Start LANwatch with ' +
+                    '--mdns and --ssdp, then let it run.';
+            }
+            if (!counts.reviewed) {
+                return `No device has a product name yet.\n\n` +
+                    `${counts.devices} device(s) are collecting attributes, and ${counts.ripe} ` +
+                    `have settled.\n\nOpen a device, fill in Product Name under ` +
+                    `"Identify this device", and save. That is what marks it reviewed.`;
+            }
+            if (!counts.ripe) {
+                return `You reviewed ${counts.reviewed} device(s), but none has settled yet.\n\n` +
+                    `A device needs 4 or more attributes, 2 minutes of age, and 1 minute ` +
+                    `with no new attribute. Try again in a few minutes.`;
+            }
+            return `You reviewed ${counts.reviewed} device(s) and ${counts.ripe} have settled, ` +
+                `but no single device is both.\n\nReview one of the settled devices, or wait ` +
+                `for the ones you reviewed to settle.`;
+        }
+
+        async function exportFingerprints() {
+            try {
+                const response = await fetch('/fingerprints/export');
+                if (!response.ok) {
+                    alert('Could not build the export.');
+                    return;
+                }
+                const text = await response.text();
+                const rows = text.split('\n').filter(line => line && !line.startsWith('#')).length;
+                if (rows === 0) {
+                    alert(explainEmptyExport(text));
+                    return;
+                }
+                const blob = new Blob([text], { type: 'text/plain' });
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = 'lanwatch-fingerprints.txt';
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                URL.revokeObjectURL(url);
+            } catch (error) {
+                console.error('Error exporting fingerprints:', error);
+                alert('Could not build the export.');
+            }
         }
 
         async function removeDevice(mac, displayName) {
@@ -918,10 +1294,7 @@
             }
 
             filtered.forEach(d => {
-                let name = d.hostname || d.vendor || "Unknown Device";
-                if (!d.hostname && d.vendor === "Private MAC Address") {
-                    name = `Private Device (${d.mac_address.slice(-8)})`.toUpperCase();
-                }
+                const name = deviceDisplayName(d);
                 const type = d.device_type || "Generic Device";
                 const mac = d.mac_address;
                 const vendor = d.vendor || "Unknown Vendor";
@@ -1003,7 +1376,7 @@
                         </div>
                     </div>
                     <div class="device-info">
-                        <span class="device-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
+                        <span class="device-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>${d.product_label ? `<span class="reviewed-badge" title="Reviewed: ${escapeHtml(d.product_label)}">&check;</span>` : ''}
                         <span class="device-vendor">${escapeHtml(vendor)}</span>
                     </div>
                     <div class="device-meta">
@@ -1030,11 +1403,14 @@
         function showDeviceDetails(device) {
             currentModalMac = device.mac_address;
             document.getElementById('modal-icon-box').innerHTML = getIconForType(device.device_type);
-            let title = device.hostname || device.vendor || "Unknown Device";
-            if (!device.hostname && device.vendor === "Private MAC Address") {
-                title = `Private Device (${device.mac_address.slice(-8)})`.toUpperCase();
+            const titleEl = document.getElementById('modal-title');
+            titleEl.textContent = deviceDisplayName(device);
+            if (device.product_label) {
+                const badge = document.createElement('span');
+                badge.className = 'reviewed-badge';
+                badge.textContent = device.product_label;
+                titleEl.appendChild(badge);
             }
-            document.getElementById('modal-title').textContent = title;
             document.getElementById('modal-subtitle').textContent = `${device.device_type || 'Generic Device'} / ${device.vendor || 'Unknown Vendor'}`;
             const ipListContainer = document.getElementById('modal-ip-list');
             ipListContainer.innerHTML = '';
@@ -1115,6 +1491,23 @@
             const desc = device.system_description || "No description available";
             document.getElementById('modal-desc').textContent = desc;
 
+            const fpBox = document.getElementById('modal-fingerprint-box');
+            if (device.fingerprint) {
+                fpBox.style.display = 'flex';
+                const confidence = device.fingerprint_confidence;
+                let label = escapeHtml(device.fingerprint_label || 'Unrecognised');
+                if (confidence !== null && confidence !== undefined) {
+                    // Below 70 a match only fills gaps it did not contradict,
+                    // so the badge is grey and never reads as a fact.
+                    const cls = confidence >= 70 ? 'strong' : 'weak';
+                    label += `<span class="confidence-badge ${cls}">${confidence}%</span>`;
+                }
+                document.getElementById('modal-fingerprint-label').innerHTML = label;
+                document.getElementById('modal-fingerprint-hash').textContent = device.fingerprint;
+            } else {
+                fpBox.style.display = 'none';
+            }
+
             const servicesBox = document.getElementById('modal-services-box');
             if (device.services && device.services.length > 0) {
                 servicesBox.style.display = 'flex';
@@ -1122,6 +1515,8 @@
             } else {
                 servicesBox.style.display = 'none';
             }
+
+            fillIdentifyPanel(device);
 
             document.getElementById('modal-json').textContent = JSON.stringify(device, null, 2);
             
@@ -1202,6 +1597,7 @@
             renderDevices();
         });
 
+        loadDeviceTypes();
         fetchDevices();
         setInterval(fetchDevices, 4000);
     </script>

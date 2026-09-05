@@ -3,7 +3,7 @@
 CARGO = cargo
 RUSTDOCFLAGS = -D missing-docs
 
-.PHONY: all build build-minimal release release-aarch64 release-aarch64-static test doc clean fmt fmt-check clippy check help examples
+.PHONY: all build build-minimal release release-aarch64 release-aarch64-static test doc clean fmt fmt-check clippy check check-dashboard help examples fingerprints-merge
 
 all: build test doc clippy
 
@@ -55,13 +55,22 @@ fmt-check: fmt
 clippy:
 	$(CARGO) clippy --all-targets --all-features -- -D warnings
 
+## check-dashboard: Verify the bundled dashboard calls no undefined function
+check-dashboard:
+	@node scripts/check-dashboard.js src/dashboard.html
+
 ## check: Check codebase quickly
-check: fmt-check clippy
+check: fmt-check clippy check-dashboard
 	$(CARGO) check --all-features
 
 ## examples: Build all example binaries with all features enabled
 examples:
 	$(CARGO) build --examples --all-features
+
+## fingerprints-merge: Merge a labelled fingerprint dump (FILE=<dump>) into lanwatch-fingerprints.txt
+fingerprints-merge:
+	@test -n "$(FILE)" || { echo "Usage: make fingerprints-merge FILE=<dump file>"; exit 1; }
+	python3 scripts/merge-fingerprints.py "$(FILE)" lanwatch-fingerprints.txt
 
 ## help: Show this help message
 help:

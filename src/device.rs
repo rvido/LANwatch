@@ -63,6 +63,26 @@ pub struct DeviceInfo {
     pub vendor: Option<Vendor>,
     /// Device type based on mDNS services (e.g., "Chromecast", "Apple TV", "Printer")
     pub device_type: Option<DeviceType>,
+    /// Attribute fingerprint, e.g. `lwfp1:7f3a91c2d4e5b608:1a2b3c4d5e6f7081:34`.
+    ///
+    /// Present once the device has advertised at least one attribute. See
+    /// `docs/fingerprint-design.md`.
+    #[serde(default)]
+    pub fingerprint: Option<String>,
+    /// Name of the matched catalogue profile, if the fingerprint matched one.
+    #[serde(default)]
+    pub fingerprint_label: Option<String>,
+    /// Confidence of that match, 0 to 99. Never 100: a fingerprint is evidence,
+    /// not proof.
+    #[serde(default)]
+    pub fingerprint_confidence: Option<u8>,
+    /// The product name a person typed for this device, e.g. "Pixel 10 Pro".
+    ///
+    /// Its presence means a human has confirmed the device's identity. Owned by
+    /// the `device_overrides` table, not by this record, so it is not written
+    /// to the `devices` table or to CSV.
+    #[serde(default)]
+    pub product_label: Option<String>,
     /// First seen timestamp (ISO 8601 format)
     #[serde(
         serialize_with = "serialize_system_time",
@@ -99,6 +119,10 @@ impl DeviceInfo {
             services: Vec::new(),
             vendor: None,
             device_type: None,
+            fingerprint: None,
+            fingerprint_label: None,
+            fingerprint_confidence: None,
+            product_label: None,
             first_seen: timestamp,
             last_seen: timestamp,
         }
@@ -413,6 +437,12 @@ impl DeviceInfo {
             services,
             vendor,
             device_type,
+            // The CSV format keeps its existing field order and semantics, so
+            // fingerprints are carried by the database and the JSON API only.
+            fingerprint: None,
+            fingerprint_label: None,
+            fingerprint_confidence: None,
+            product_label: None,
             first_seen,
             last_seen,
         })

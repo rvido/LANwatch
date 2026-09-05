@@ -11,6 +11,8 @@ A Rust library and CLI tool for network device discovery and tracking via DHCP, 
 
 ![LANwatch System Architecture](assets/lanwatch_architecture.jpg)
 
+Release history: [CHANGELOG.md](CHANGELOG.md).
+
 ## Features
 
 - **DHCPv4 Support**: Capture and parse DHCP DISCOVER, OFFER, REQUEST, ACK, NAK, RELEASE, and INFORM messages
@@ -25,6 +27,8 @@ A Rust library and CLI tool for network device discovery and tracking via DHCP, 
 - **mDNS TXT Record Parsing**: Extracts model, md, and ty metadata from DNS-SD records to identify specific hardware devices (Apple TV, Chromecast, Sonos speakers, and printer models)
 - **Device Classification**: Expanded classification engine mapping hostnames, mDNS TXT metadata, and service fingerprints to specific device types and vendors (Roku, Sonos, Apple TV, Google Chromecast, ESP32 IoT, Raspberry Pi, Synology NAS, Playstation, Xbox, Nintendo, smart plugs, printers, etc.)
 - **Manual Classification Overrides**: Pin a device's type (and optionally vendor) by MAC address via `--override` or an overrides file, for devices with no reliable passive signature. Overrides always win over heuristics and persist across live updates.
+- **Device Attribute Fingerprinting**: Identifies a device by the *set of attributes it advertises* rather than the name it sends, so a device with a randomised MAC and no hostname is still recognisable. Attribute keys are collected from mDNS, SSDP and DHCP; values are discarded, so no firmware version, serial number or user-chosen name enters a fingerprint. Matched against a shareable catalogue (`lanwatch-fingerprints.txt`). See [Device Attribute Fingerprinting](#device-attribute-fingerprinting).
+- **Dashboard Device Review**: Correct a device's type and vendor and give it a product name directly in the web dashboard. Corrections are stored in the database, survive a restart, and always beat heuristic classification. One click then exports every reviewed device as a catalogue file that carries no MAC, IP or hostname.
 - **Smart Home & IoT Discovery**: Extracts model and vendor metadata from HomeKit (HAP) and Matter service advertisements (Google, Apple, Amazon, Eve, Signify/Philips Hue, Aqara, IKEA, Nanoleaf, Tuya, Somfy, TP-Link, Lutron, Yale, Belkin, Bosch, etc.)
 - **Specialized IoT & Constrained Protocols**: Captures and parses CoAP (Constrained Application Protocol) on UDP port 5683, KNXnet/IP building automation traffic on UDP port 3671, and MQTT/MQTT-SN on TCP/UDP port 1883 to dynamically identify sensors, smart lights, smart plugs, and home automation systems
 - **Media Server & Player Discovery**: Parses Plex GDM (Good Day Mate) XML/HTTP-like discovery broadcasts on UDP ports 32410, 32412, and 32414 to locate and identify Plex Media Servers and Players
@@ -67,6 +71,27 @@ cargo build --release --all-features
 
 LANwatch is pre-1.0, so minor versions may break API compatibility. Only
 library consumers are affected; the CLI and its flags are unchanged.
+
+### 0.15 → next
+
+**No action is required.** The three fingerprint columns and the two new tables
+(`device_attributes`, `device_overrides`) are created on an existing database at
+startup. There is no migration step and no database wipe.
+
+Two things are worth knowing:
+
+- **Attribute tokens start from zero.** They are only recorded while a build
+  with this feature is capturing, so a device seen for months has no tokens
+  until the new binary runs. A device needs 4 tokens, 2 minutes of age and
+  1 minute of quiet before it is usable, and DHCP alone yields only 3 tokens —
+  run with `--mdns` and `--ssdp` (or `--mdns-query` / `--ssdp-query`) or most
+  devices will never ripen.
+- **The API now accepts writes and has no authentication.** If your listener is
+  reachable beyond a trusted network, add `--api-readonly`.
+
+Library consumers: `DeviceInfo` gained four fields (`fingerprint`,
+`fingerprint_label`, `fingerprint_confidence`, `product_label`), so struct
+literals need updating. CSV field order and semantics are unchanged.
 
 ### 0.14 → 0.15
 
@@ -158,6 +183,17 @@ sudo cargo run -- en0 --override 'c0:84:7d:11:22:33=Security System'
 # Load per-device classification overrides from a file
 sudo cargo run -- en0 --overrides overrides.txt
 
+# Load a device attribute fingerprint catalogue
+sudo cargo run --all-features -- en0 --fingerprints lanwatch-fingerprints.txt
+
+# Write the observed attribute sets to a labelling worksheet, then exit
+# (reads the database only; no interface and no root needed)
+cargo run -- --dump-fingerprints dump.txt
+
+# Erase one device completely: sightings, attribute tokens and your correction
+# (stop the service first, or a live capture writes the device straight back)
+cargo run -- -o devices.db --forget aa:bb:cc:dd:ee:ff
+
 # Combine all options
 sudo cargo run --all-features -- en0 -o devices.db --api 0.0.0.0:8080 --mdns-query --ssdp-query -u oui.txt
 
@@ -182,6 +218,26 @@ The tool saves detected devices to an embedded **SQLite** database file. The sch
 - **vendor**: Detected vendor based on OUI registry, hostnames, or hardware descriptors
 - **services**: Semicolon-separated list of mDNS services (requires `mdns` feature)
 - **system_description**: Detailed hardware or system description parsed from link-layer protocols (e.g., LLDP system descriptions or CDP software versions)
+- **fingerprint**: Attribute fingerprint of the device, e.g. `lwfp1:7f3a91c2d4e5b608:1a2b3c4d5e6f7081:34` (see [Device Attribute Fingerprinting](#device-attribute-fingerprinting))
+- **fingerprint_label**: Name of the matched catalogue profile, if any
+- **fingerprint_confidence**: Confidence of that match, 0-99. Never 100: a fingerprint is evidence, not proof
+- **fingerprint_flags**: Comma-separated flags; currently only `capped` for a device that advertised more attributes than the per-device cap
+
+A second table, **device_attributes**, holds the raw attribute tokens per device (`mac_address`, `token`, `first_seen`, `last_seen`). The token set is stored, not only the hash, because a hash alone can never answer "how close is this?".
+
+A third table, **device_overrides**, holds the manual classifications entered from the dashboard (`mac_address`, `device_type`, `vendor`, `label`, `reviewed_at`, plus the heuristic guess each override replaced, so "reset to guess" can restore it). It lives in its own table rather than as columns on `devices`, so a correction survives a device being removed and rediscovered.
+
+Removing a device and forgetting one are different actions:
+
+| Action | Clears | Keeps |
+|---|---|---|
+| **Remove Device** (dashboard, `DELETE /devices/{mac}`) | the `devices` row | your correction and the collected tokens |
+| **Reset to guess** (dashboard, `DELETE /devices/{mac}/classification`) | your correction | the sighting and the tokens |
+| `lanwatch --forget <MAC>` | all three | nothing |
+
+Discovery is keyed on MAC alone, so a device still on the LAN reappears within seconds of a removal. Keeping the correction means one careless click cannot destroy review work; the device comes back already labelled. `--forget` is the deliberate opposite, for a device that has left the network for good and whose rows no dashboard can reach any more. Stop the service before running it, or a live capture may still hold the device in memory and write it straight back.
+
+The fingerprint columns and both new tables are added to an existing database automatically on startup. No migration step and no database wipe is needed.
 
 Database writes are executed in transactions using single-row transactional upserts, eliminating write-amplification and improving write efficiency to O(1) performance. Reads are concurrent and lock-free thanks to WAL mode.
 
@@ -315,6 +371,104 @@ The MAC address is matched case-insensitively and accepts common separators. The
 be a canonical type name (e.g. `Security System`, `Smart Doorbell`, `Security Camera`, `Printer`); an
 unrecognized name is preserved verbatim as a custom label. The optional third field pins the vendor.
 
+### Device Attribute Fingerprinting
+
+Some devices ship a large, generic list of mDNS/SSDP attributes that the vendor never cleaned up.
+Classifying those by service name alone produces confident nonsense: a sprinkler controller reported
+as a Chromecast, a doorbell as an audio device. Fingerprinting answers a different question -- *what
+set of attributes does this device advertise?* -- and can therefore recognise a model it has never
+seen a name for.
+
+Full design: [`docs/fingerprint-design.md`](docs/fingerprint-design.md).
+
+**What is collected.** Attribute **keys**, never values. mDNS service types and TXT keys, SSDP
+`ST`/`NT` targets and header names, DHCPv4 option 55/60/43, DHCPv6 option 15/16. TXT values carry
+firmware versions, serial numbers and user-typed names, so they are discarded. A dumped catalogue is
+safe to share.
+
+Each attribute becomes one short token with a namespace prefix:
+
+```
+m:_googlecast._tcp                  mDNS service type
+t:_googlecast._tcp/md               mDNS TXT key, scoped to its service
+s:urn:schemas-upnp-org:device:mediarenderer:1     SSDP ST/NT
+h:server                            SSDP header name
+d:55=1-3-6-15-119-252               DHCPv4 option 55, ORDER PRESERVED
+v:msft                              vendor class, version suffix stripped
+e:311                               DHCPv6 IANA enterprise number
+```
+
+**Two hashes.** `core` covers the protocol identity and survives a firmware update; `full` adds TXT
+keys and header names and is tighter. The stored string is
+`lwfp1:<core>:<full>:<token count>`, hashed with FNV-1a 64-bit. The `lwfp1` prefix is the format
+version; a rules change bumps it and old state is reset automatically at load.
+
+**Matching.** An exact `full` match scores 95, an exact `core` match 85, and a fuzzy match uses
+Jaccard similarity over core tokens (accepted only at 0.60 and above). A profile flagged `generic`
+loses 25 points and **never sets a device type** -- it only supplies an honest label such as
+`Generic UPnP MediaRenderer`. Confidence is capped at 99, never 100.
+
+Precedence: a manual override always wins, then a match at 70 or above, then the existing
+heuristics, then a match between 40 and 69 which only fills fields still unset. Below 40 nothing is
+applied, though the tokens are still recorded.
+
+**Building the catalogue.** `lanwatch-fingerprints.txt` ships empty on purpose: with no profile the
+existing heuristics run unchanged, so a fingerprint only ever adds information. Fill it from your own
+network:
+
+The normal way is through the dashboard. Nothing is typed into a file by hand:
+
+```bash
+# 1. Capture normally for a few days so the attribute sets can settle
+sudo lanwatch eth0 --mdns --ssdp --api-default
+
+# 2. Open http://127.0.0.1:8080, click a device, and use "Identify this device".
+#    Correct the type and vendor if they are wrong, then give it a product name.
+#    A reviewed device gets a check mark in the list.
+
+# 3. Click "Export Fingerprints". The downloaded file carries no MAC, IP or
+#    hostname, so unlike a dump it is safe to share.
+
+# 4. Merge into the shared catalogue
+make fingerprints-merge FILE=~/Downloads/lanwatch-fingerprints.txt
+```
+
+The product name is what marks a device as reviewed, and only reviewed **and**
+ripe devices are exported. Corrections are stored in the `device_overrides`
+table, so they survive a restart and keep beating heuristic classification.
+
+There is also an offline path, for a capture host with no dashboard. It writes a
+private worksheet that must be edited by hand and never committed:
+
+```bash
+lanwatch -o devices.db --dump-fingerprints dump.txt
+$EDITOR dump.txt          # fill in `label`; type and vendor are pre-filled
+make fingerprints-merge FILE=dump.txt
+```
+
+The catalogue is tab separated with seven fields:
+
+```
+# core_hash  device_type   vendor  label                       flags    tokens          meta
+7f3a...c1  Media Player  Google  Chromecast (3rd gen)      -        m:_googlecast...  n=4,oui=1
+0000...00  -             -       Generic UPnP MediaRenderer generic  s:urn:...         n=31,oui=9
+```
+
+`meta` records how many units a hash was seen on (`n=`) and how many **distinct OUI vendors** those
+units had (`oui=`). That second number is the automatic `generic` detector: one hash appearing under
+three or more unrelated vendors cannot be one product, so it is a copied default profile and is
+flagged as such.
+
+The worksheet pre-fills `device_type` and `vendor` from LANwatch's heuristics, but never `label`.
+That is deliberate. A catalogue match at confidence 70 or above **overrides** the heuristic, so a
+guess copied straight back in would become permanent and start confirming itself. The empty `label`
+is the review mark: `make fingerprints-merge` skips every row that still has `-` there, so nothing
+reaches the shared catalogue until a person has named the product.
+
+> **Never commit a dump.** Its comment lines carry MAC and IP addresses so you know what you are
+> labelling. `make fingerprints-merge` strips every comment, and refuses the whole file outright if
+> an address reaches a data line. `/fingerprint-dump*.txt` and `/dump.txt` are in `.gitignore`.
+
 ### HTTP API
 
 > **Note:** The HTTP API requires the `http-api` feature, which is enabled by default.
@@ -332,7 +486,14 @@ When started with `--api` or `--api-default`, the tool exposes a REST API for qu
 | `/devices/count` | GET | Get device count |
 | `/devices/{mac}` | DELETE | Remove a single device by MAC address |
 | `/devices` | DELETE | Remove all tracked devices (flush) |
+| `/devices/{mac}/classification` | PUT | Pin the device type, vendor and product name |
+| `/devices/{mac}/classification` | DELETE | Drop the pin and restore the heuristic guess |
+| `/device-types` | GET | Every canonical device type name, for a picker |
+| `/fingerprints/export` | GET | The reviewed devices as a shareable catalogue file |
 | `/health` | GET | Health check endpoint |
+
+> **The API has no authentication.** Start with `--api-readonly` to refuse every write
+> (`PUT`, and both `DELETE` routes) whenever the listener is reachable beyond a trusted network.
 
 > **Note:** Removal only clears current state (in-memory and the database row). Discovery
 > is passive and keyed solely by MAC address, so a device still active on the LAN will simply
@@ -355,6 +516,17 @@ curl http://localhost:3000/health
 
 # Remove a single device
 curl -X DELETE http://localhost:3000/devices/AA:BB:CC:DD:EE:FF
+
+# Pin a device's identity (this is what the dashboard's Identify panel calls)
+curl -X PUT http://localhost:3000/devices/AA:BB:CC:DD:EE:FF/classification \
+  -H 'Content-Type: application/json' \
+  -d '{"device_type":"Printer","vendor":"Brother","label":"Brother HL-L2350DW"}'
+
+# Drop the pin and go back to the heuristic guess
+curl -X DELETE http://localhost:3000/devices/AA:BB:CC:DD:EE:FF/classification
+
+# Download the reviewed devices as a shareable fingerprint catalogue
+curl -O http://localhost:3000/fingerprints/export
 
 # Remove all devices
 curl -X DELETE http://localhost:3000/devices
@@ -696,6 +868,14 @@ A `Makefile` is provided to simplify common development, testing, linting, and d
 *   **Lint the codebase with Clippy (warnings treated as errors):**
     ```bash
     make clippy
+    ```
+*   **Verify the bundled dashboard calls no undefined function:**
+    ```bash
+    make check-dashboard
+    ```
+*   **Merge a reviewed fingerprint export into the shared catalogue:**
+    ```bash
+    make fingerprints-merge FILE=lanwatch-fingerprints.txt
     ```
 *   **Format the codebase:**
     ```bash

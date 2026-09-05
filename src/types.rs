@@ -793,6 +793,109 @@ pub enum DeviceType {
     Other(String),
 }
 
+/// Every canonical device type name, sorted, for a picker to offer.
+///
+/// `DeviceType` also accepts any other string as `DeviceType::Other`, so this
+/// is a menu, not a closed set. `Unknown` is left out on purpose: it is the
+/// absence of an answer, and a person choosing from a list should clear the
+/// field instead. `test_every_offered_device_type_name_round_trips` proves each
+/// entry survives `From<&str>` and comes back out of `as_str` unchanged.
+pub const DEVICE_TYPE_NAMES: &[&str] = &[
+    "Air Conditioner",
+    "Air Purifier",
+    "AirPlay Device",
+    "Android Phone",
+    "Android TV",
+    "Apple Device",
+    "Apple TV",
+    "Apple iPad",
+    "Apple iPhone",
+    "Audio Device",
+    "Bridge",
+    "CI Server",
+    "Chromecast",
+    "Contact Sensor",
+    "Cooler",
+    "DVR",
+    "Dehumidifier",
+    "Desktop",
+    "Door",
+    "Door Lock",
+    "Fan",
+    "Faucet",
+    "File Server",
+    "Fire TV",
+    "Game Console",
+    "Gaming Console",
+    "Gaming Device",
+    "Gaming PC",
+    "Garage Door",
+    "Heater",
+    "Home Automation",
+    "HomeKit Accessory",
+    "HomeKit Device",
+    "Humidifier",
+    "Humidity Sensor",
+    "IP Camera",
+    "IP Phone",
+    "IoT Beacon",
+    "IoT Device",
+    "Laptop",
+    "Lightbulb",
+    "Lock",
+    "Mac",
+    "Matter Smart Device",
+    "Media Player",
+    "Media Renderer",
+    "Media Server",
+    "Media Streamer",
+    "Microcontroller",
+    "Mobile",
+    "Mobile Device",
+    "NAS",
+    "NVIDIA Shield",
+    "Network Device",
+    "Network Equipment",
+    "Occupancy Sensor",
+    "Outlet",
+    "PC/Computer",
+    "PC/Windows",
+    "Pixel Phone",
+    "Printer",
+    "Raspberry Pi",
+    "Router",
+    "Router/Switch",
+    "Scanner",
+    "Security Camera",
+    "Security System",
+    "Sensor",
+    "Server",
+    "Set Top Box",
+    "Shower System",
+    "Single-board Computer",
+    "Smart Cleaning Device",
+    "Smart Doorbell",
+    "Smart Home Device",
+    "Smart Home Hub",
+    "Smart Light",
+    "Smart Plug",
+    "Smart Speaker",
+    "Smart Watering Device",
+    "Speaker",
+    "Spotify Connect Device",
+    "Sprinkler",
+    "Storage (NAS)",
+    "Switch",
+    "TV",
+    "Target Controller",
+    "Television",
+    "Thermostat",
+    "Video Doorbell",
+    "Window",
+    "Window Covering",
+    "e-Reader",
+];
+
 impl DeviceType {
     /// Returns the canonical display string for this device type.
     pub fn as_str(&self) -> &str {
@@ -897,6 +1000,11 @@ impl DeviceType {
 
     /// Returns `true` if this is a generic/inferred category that should readily be
     /// upgraded to a more specific type learned from active discovery (mDNS/SSDP/LLDP/CDP).
+    /// Every canonical name a picker can offer. See [`DEVICE_TYPE_NAMES`].
+    pub fn all_names() -> &'static [&'static str] {
+        DEVICE_TYPE_NAMES
+    }
+
     pub fn is_generic(&self) -> bool {
         matches!(
             self,

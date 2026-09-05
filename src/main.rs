@@ -5,10 +5,10 @@
 // See LICENSE file for details.
 
 #[cfg(feature = "http-api")]
-use lanwatch::start_api_server;
+use lanwatch::start_api_server_with_options;
 use lanwatch::{
-    DeviceTracker, DeviceType, DhcpEvent, DhcpSniffer, Dhcpv6Option, IEEE_OUI_URL, OuiRegistry,
-    download_ieee_oui, list_interfaces,
+    DeviceTracker, DeviceType, DhcpEvent, DhcpSniffer, Dhcpv6Option, FingerprintCatalogue,
+    IEEE_OUI_URL, OuiRegistry, download_ieee_oui, list_interfaces,
 };
 #[cfg(feature = "mdns")]
 use lanwatch::{MdnsQuerier, MdnsRecordData, MdnsServiceRegistry};
@@ -26,6 +26,9 @@ const DEFAULT_DB_PATH: &str = "devices.db";
 #[cfg(feature = "http-api")]
 const DEFAULT_API_ADDR: &str = "127.0.0.1:8080";
 const DEFAULT_OUI_DOWNLOAD_PATH: &str = "ieee-oui.txt";
+
+/// Default profile catalogue, loaded when `--fingerprints` is not given.
+const DEFAULT_FINGERPRINT_PATH: &str = "lanwatch-fingerprints.txt";
 // Tuned defaults for bursty LAN discovery traffic (mDNS/SSDP).
 // Aim: absorb short bursts while keeping DB/API state latency low.
 const EVENT_CHANNEL_CAPACITY: usize = 4096;
@@ -45,6 +48,21 @@ fn main() {
     }
 
     let config = parse_args(&args);
+
+    // Dumping reads what is already in the database, so it needs no interface
+    // and no capture session. Run a normal capture for a few days first.
+    if let Some(ref dump_path) = config.dump_fingerprints {
+        handle_dump_fingerprints(&config.db_path, dump_path);
+        return;
+    }
+
+    // Forgetting is the deliberate opposite of removing a device in the
+    // dashboard: it also drops the manual classification and the collected
+    // attribute tokens, so nothing about the device comes back.
+    if let Some(ref mac) = config.forget_mac {
+        handle_forget(&config.db_path, mac);
+        return;
+    }
 
     println!(
         "Sniffing DHCP (v4 & v6) traffic on: {}",
@@ -97,6 +115,39 @@ fn main() {
 
         println!("OUI database: {} vendor entries", oui_registry.len());
         tracker.set_oui_registry(oui_registry);
+    }
+
+    // Load the fingerprint profile catalogue, like the OUI and mDNS registries.
+    // Without one the existing heuristics run unchanged, so this only ever adds
+    // information.
+    {
+        let path = config.fingerprints_file.clone().or_else(|| {
+            std::path::Path::new(DEFAULT_FINGERPRINT_PATH)
+                .exists()
+                .then(|| DEFAULT_FINGERPRINT_PATH.to_string())
+        });
+        if let Some(path) = path {
+            let mut catalogue = FingerprintCatalogue::new();
+            match catalogue.load_from_file(&path) {
+                Ok((count, skips)) => {
+                    println!("Loaded {} fingerprint profile(s) from {}", count, path);
+                    if !skips.is_empty() {
+                        eprintln!(
+                            "Warning: skipped {} line(s) in {}: {} bad field count, \
+                             {} hash mismatch, {} too long, {} no tokens",
+                            skips.total(),
+                            path,
+                            skips.bad_field_count,
+                            skips.hash_mismatch,
+                            skips.too_long,
+                            skips.no_tokens
+                        );
+                    }
+                    tracker.set_fingerprint_catalogue(catalogue);
+                }
+                Err(e) => eprintln!("Warning: Failed to load fingerprint file {}: {}", path, e),
+            }
+        }
     }
 
     // Load mDNS service registry if mdns is enabled
@@ -170,8 +221,13 @@ fn main() {
     #[cfg(feature = "http-api")]
     if let Some(addr) = &config.api_addr {
         let tracker_clone = Arc::clone(&tracker);
-        match start_api_server(addr, tracker_clone) {
-            Ok(_) => println!("API server started on http://{}", addr),
+        match start_api_server_with_options(addr, tracker_clone, config.api_read_only) {
+            Ok(_) => {
+                println!("API server started on http://{}", addr);
+                if config.api_read_only {
+                    println!("API is read-only: edits and deletes are refused.");
+                }
+            }
             Err(e) => eprintln!("Warning: Failed to start API server: {}", e),
         }
     }
@@ -374,8 +430,12 @@ fn start_dhcp_worker(
                 Err(RecvTimeoutError::Disconnected) => break,
             }
 
+            // A repeated announcement changes no device field, so
+            // `pending_updates` stays at zero, but it can still record a new
+            // attribute token. Ask the tracker what is waiting instead of
+            // inferring it from the counter, or those tokens are never written.
             if pending_updates >= DB_FLUSH_BATCH_SIZE
-                || (pending_updates > 0 && last_flush.elapsed() >= flush_interval)
+                || (last_flush.elapsed() >= flush_interval && tracker_has_pending(&tracker))
             {
                 flush_tracker(&tracker, pending_updates);
                 pending_updates = 0;
@@ -383,7 +443,7 @@ fn start_dhcp_worker(
             }
         }
 
-        if pending_updates > 0 {
+        if tracker_has_pending(&tracker) {
             flush_tracker(&tracker, pending_updates);
         }
     })
@@ -644,8 +704,12 @@ fn start_network_worker(
                 Err(RecvTimeoutError::Disconnected) => break,
             }
 
+            // A repeated announcement changes no device field, so
+            // `pending_updates` stays at zero, but it can still record a new
+            // attribute token. Ask the tracker what is waiting instead of
+            // inferring it from the counter, or those tokens are never written.
             if pending_updates >= DB_FLUSH_BATCH_SIZE
-                || (pending_updates > 0 && last_flush.elapsed() >= flush_interval)
+                || (last_flush.elapsed() >= flush_interval && tracker_has_pending(&tracker))
             {
                 flush_tracker(&tracker, pending_updates);
                 pending_updates = 0;
@@ -653,10 +717,20 @@ fn start_network_worker(
             }
         }
 
-        if pending_updates > 0 {
+        if tracker_has_pending(&tracker) {
             flush_tracker(&tracker, pending_updates);
         }
     })
+}
+
+/// Reports whether the tracker has anything waiting to be written.
+///
+/// Returns `false` when the lock is poisoned; the flush itself reports that.
+fn tracker_has_pending(tracker: &Arc<RwLock<DeviceTracker>>) -> bool {
+    match tracker.read() {
+        Ok(tracker) => tracker.has_pending_writes(),
+        Err(_) => false,
+    }
 }
 
 fn flush_tracker(tracker: &Arc<RwLock<DeviceTracker>>, pending_updates: usize) {
@@ -1093,6 +1167,8 @@ struct Config {
     db_path: String,
     #[cfg(feature = "http-api")]
     api_addr: Option<String>,
+    #[cfg(feature = "http-api")]
+    api_read_only: bool,
     #[cfg(feature = "mdns")]
     enable_mdns: bool,
     #[cfg(feature = "mdns")]
@@ -1108,6 +1184,11 @@ struct Config {
     override_specs: Vec<String>,
     /// Path to a file of per-device classification overrides.
     overrides_file: Option<String>,
+    /// Path to a fingerprint profile catalogue.
+    fingerprints_file: Option<String>,
+    /// Where to write an attribute dump before exiting.
+    dump_fingerprints: Option<String>,
+    forget_mac: Option<String>,
 }
 
 fn parse_args(args: &[String]) -> Config {
@@ -1115,6 +1196,8 @@ fn parse_args(args: &[String]) -> Config {
     let mut db_path = DEFAULT_DB_PATH.to_string();
     #[cfg(feature = "http-api")]
     let mut api_addr: Option<String> = None;
+    #[cfg(feature = "http-api")]
+    let mut api_read_only = false;
     #[cfg(feature = "mdns")]
     let mut enable_mdns = false;
     #[cfg(feature = "mdns")]
@@ -1128,6 +1211,9 @@ fn parse_args(args: &[String]) -> Config {
     let mut oui_file: Option<String> = None;
     let mut override_specs: Vec<String> = Vec::new();
     let mut overrides_file: Option<String> = None;
+    let mut fingerprints_file: Option<String> = None;
+    let mut dump_fingerprints: Option<String> = None;
+    let mut forget_mac: Option<String> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -1154,6 +1240,11 @@ fn parse_args(args: &[String]) -> Config {
             #[cfg(feature = "http-api")]
             "--api-default" => {
                 api_addr = Some(DEFAULT_API_ADDR.to_string());
+                i += 1;
+            }
+            #[cfg(feature = "http-api")]
+            "--api-readonly" | "--api-read-only" => {
+                api_read_only = true;
                 i += 1;
             }
             #[cfg(feature = "mdns")]
@@ -1227,6 +1318,33 @@ fn parse_args(args: &[String]) -> Config {
                     std::process::exit(1);
                 }
             }
+            "--fingerprints" => {
+                if i + 1 < args.len() {
+                    fingerprints_file = Some(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    eprintln!("Error: --fingerprints requires a file path");
+                    std::process::exit(1);
+                }
+            }
+            "--dump-fingerprints" => {
+                if i + 1 < args.len() {
+                    dump_fingerprints = Some(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    eprintln!("Error: --dump-fingerprints requires a file path");
+                    std::process::exit(1);
+                }
+            }
+            "--forget" => {
+                if i + 1 < args.len() {
+                    forget_mac = Some(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    eprintln!("Error: --forget requires a MAC address");
+                    std::process::exit(1);
+                }
+            }
             "-h" | "--help" => {
                 print_usage();
                 std::process::exit(0);
@@ -1243,20 +1361,28 @@ fn parse_args(args: &[String]) -> Config {
         }
     }
 
-    let interface_name = interface_name.unwrap_or_else(|| {
-        print_usage();
-        println!("\nAvailable interfaces:");
-        for iface in list_interfaces() {
-            println!("  - {}", iface);
+    // Dumping reads the database and never opens a socket, so it is the one
+    // mode that does not need an interface.
+    let interface_name = match interface_name {
+        Some(name) => name,
+        None if dump_fingerprints.is_some() || forget_mac.is_some() => String::new(),
+        None => {
+            print_usage();
+            println!("\nAvailable interfaces:");
+            for iface in list_interfaces() {
+                println!("  - {}", iface);
+            }
+            std::process::exit(1);
         }
-        std::process::exit(1);
-    });
+    };
 
     Config {
         interface_name,
         db_path,
         #[cfg(feature = "http-api")]
         api_addr,
+        #[cfg(feature = "http-api")]
+        api_read_only,
         #[cfg(feature = "mdns")]
         enable_mdns,
         #[cfg(feature = "mdns")]
@@ -1268,6 +1394,9 @@ fn parse_args(args: &[String]) -> Config {
         #[cfg(feature = "ssdp")]
         ssdp_query,
         oui_file,
+        fingerprints_file,
+        dump_fingerprints,
+        forget_mac,
         override_specs,
         overrides_file,
     }
@@ -1294,10 +1423,21 @@ fn print_usage() {
         "  --override <MAC=Type>  Pin a device's type (e.g. c0:84:7d:b8:58:5e=\"Security System\"); repeatable"
     );
     println!("  --overrides <FILE>     Load per-device overrides (lines: MAC,DeviceType[,Vendor])");
+    println!(
+        "  --fingerprints <FILE>  Load an attribute fingerprint catalogue (default: {})",
+        DEFAULT_FINGERPRINT_PATH
+    );
+    println!(
+        "  --dump-fingerprints <FILE>  Write observed attribute sets from the database, then exit"
+    );
+    println!(
+        "  --forget <MAC>         Erase one device's sightings, attributes and correction, then exit"
+    );
     #[cfg(feature = "http-api")]
     {
         println!("  -a, --api <ADDR:PORT>  Start HTTP API server (e.g., 127.0.0.1:8080)");
         println!("  --api-default          Start HTTP API on default address (127.0.0.1:8080)");
+        println!("  --api-readonly         Refuse every API write (edits, deletes)");
     }
     #[cfg(feature = "mdns")]
     {
@@ -1359,6 +1499,70 @@ fn print_usage() {
 }
 
 /// Handle --download-oui command
+/// Writes the attribute sets already in the database to a labelling worksheet.
+///
+/// This reads the database and exits. Run a normal capture for a few days
+/// first, so the sets have time to ripen.
+/// Erases one device's sightings, attribute tokens and manual classification.
+///
+/// Refuses to run against a database another process is writing, because the
+/// running service holds the device in memory and would write it straight back.
+fn handle_forget(db_path: &str, mac: &str) {
+    let mut tracker = match DeviceTracker::new(db_path) {
+        Ok(tracker) => tracker,
+        Err(e) => {
+            eprintln!("Error opening {}: {}", db_path, e);
+            std::process::exit(1);
+        }
+    };
+
+    match tracker.forget_device(mac) {
+        Ok(true) => {
+            println!("Forgot {}: sightings, attributes and any correction.", mac);
+            println!("Stop the LANwatch service first, or a running capture may");
+            println!("still hold this device in memory and write it back.");
+        }
+        Ok(false) => {
+            println!("Nothing stored for {}. Check the MAC address.", mac);
+        }
+        Err(e) => {
+            eprintln!("Error forgetting {}: {}", mac, e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn handle_dump_fingerprints(db_path: &str, dump_path: &str) {
+    let tracker = match DeviceTracker::new(db_path) {
+        Ok(tracker) => tracker,
+        Err(e) => {
+            eprintln!("Error opening {}: {}", db_path, e);
+            std::process::exit(1);
+        }
+    };
+
+    match tracker.dump_fingerprints(dump_path) {
+        Ok(0) => {
+            println!("No device has a ripe attribute set yet. Nothing written.");
+            println!("Capture for longer, then run this again.");
+        }
+        Ok(count) => {
+            println!("Wrote {} attribute set(s) to {}", count, dump_path);
+            println!("device_type and vendor hold LANwatch's guess. Correct what is");
+            println!("wrong, fill in label with the product name, then run:");
+            println!("  make fingerprints-merge FILE={}", dump_path);
+            println!(
+                "Do NOT commit {}: it carries MAC and IP addresses.",
+                dump_path
+            );
+        }
+        Err(e) => {
+            eprintln!("Error writing {}: {}", dump_path, e);
+            std::process::exit(1);
+        }
+    }
+}
+
 fn handle_download_oui(args: &[String]) {
     // Find the output path (argument after --download-oui, if any)
     let mut output_path = DEFAULT_OUI_DOWNLOAD_PATH;

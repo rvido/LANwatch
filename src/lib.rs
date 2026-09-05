@@ -9,6 +9,8 @@
 pub mod classifier;
 /// Device information, parsing and serialization logic.
 pub mod device;
+/// Device attribute fingerprinting.
+pub mod fingerprint;
 /// IEEE OUI database parsing and querying.
 pub mod oui;
 /// Packet parsing implementations.
@@ -31,6 +33,10 @@ pub mod api;
 // Re-export public interface
 pub use classifier::*;
 pub use device::{DeviceInfo, DisplaySafe, display_safe, format_timestamp, parse_timestamp};
+pub use fingerprint::{
+    CatalogueSkips, Fingerprint, FingerprintCatalogue, FingerprintMatch, FingerprintProfile,
+    TokenNamespace, TokenSet, fnv1a64, is_ripe,
+};
 pub use oui::{IEEE_OUI_URL, OuiRegistry, download_ieee_oui};
 pub use parser::*;
 pub use sniffer::*;
@@ -41,7 +47,7 @@ pub use types::*;
 pub use mdns_registry::{MdnsServiceInfo, MdnsServiceRegistry};
 
 #[cfg(feature = "http-api")]
-pub use api::{ApiServer, start_api_server};
+pub use api::{ApiServer, start_api_server, start_api_server_with_options};
 
 // Include the unit tests
 #[cfg(test)]

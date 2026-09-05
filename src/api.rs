@@ -5,7 +5,8 @@
 
 #![cfg(feature = "http-api")]
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::io::Read;
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -13,6 +14,7 @@ use tiny_http::{Response, Server};
 
 use crate::device::DeviceInfo;
 use crate::tracker::DeviceTracker;
+use crate::types::{DeviceType, Vendor};
 
 /// Cache representation for sorted device lists to reduce database locking under high traffic.
 struct SortedDevicesCache {
@@ -26,6 +28,25 @@ pub struct ApiServer {
     server: Arc<Server>,
     tracker: Arc<RwLock<DeviceTracker>>,
     cache: Arc<Mutex<Option<SortedDevicesCache>>>,
+    /// When set, every route that changes state answers 403 instead.
+    ///
+    /// The API has no authentication, so a LANwatch reachable beyond a trusted
+    /// network should not accept writes.
+    read_only: bool,
+}
+
+/// Body of `PUT /devices/<mac>/classification`.
+///
+/// Every field is optional. An absent or empty field clears that part of the
+/// override, so the heuristics take it back.
+#[derive(Deserialize, Default)]
+pub(crate) struct ClassificationRequest {
+    #[serde(default)]
+    pub(crate) device_type: Option<String>,
+    #[serde(default)]
+    pub(crate) vendor: Option<String>,
+    #[serde(default)]
+    pub(crate) label: Option<String>,
 }
 
 /// API response structure
@@ -55,7 +76,13 @@ impl ApiServer {
             server: Arc::new(server),
             tracker,
             cache: Arc::new(Mutex::new(None)),
+            read_only: false,
         })
+    }
+
+    /// Refuses every state-changing route with 403.
+    pub fn set_read_only(&mut self, enabled: bool) {
+        self.read_only = enabled;
     }
 
     /// Starts the API server request handling loop using a thread pool.
@@ -92,8 +119,8 @@ impl ApiServer {
             let self_clone = self.clone();
 
             let handle = thread::spawn(move || {
-                for request in server.incoming_requests() {
-                    let response = self_clone.handle_request(&request);
+                for mut request in server.incoming_requests() {
+                    let response = self_clone.handle_request(&mut request);
                     let _ = request.respond(response);
                 }
             });
@@ -124,11 +151,14 @@ impl ApiServer {
     }
 
     /// Handle incoming HTTP requests
-    fn handle_request(&self, request: &tiny_http::Request) -> Response<std::io::Cursor<Vec<u8>>> {
-        let path = request.url();
-        let method = request.method();
+    fn handle_request(
+        &self,
+        request: &mut tiny_http::Request,
+    ) -> Response<std::io::Cursor<Vec<u8>>> {
+        let path = request.url().to_string();
+        let method = request.method().as_str().to_string();
 
-        match (method.as_str(), path) {
+        match (method.as_str(), path.as_str()) {
             ("GET", "/devices/count") | ("GET", "/device/count") => self.handle_device_count(),
             ("GET", "/health") => self.handle_health(),
             ("GET", "/") => self.handle_root(),
@@ -141,6 +171,16 @@ impl ApiServer {
             {
                 let (limit, offset) = Self::parse_query_params(p);
                 self.handle_devices_paginated(limit, offset)
+            }
+            ("GET", "/device-types") => self.handle_device_types(),
+            ("GET", "/fingerprints/export") => self.handle_export_fingerprints(),
+            ("PUT", p) | ("POST", p) if Self::classification_mac(p).is_some() => {
+                let mac = Self::classification_mac(p).unwrap_or_default();
+                self.handle_set_classification(&mac, request)
+            }
+            ("DELETE", p) if Self::classification_mac(p).is_some() => {
+                let mac = Self::classification_mac(p).unwrap_or_default();
+                self.handle_clear_classification(&mac)
             }
             ("GET", p) if p.starts_with("/devices/") || p.starts_with("/device/") => {
                 let prefix_len = if p.starts_with("/devices/") { 9 } else { 8 };
@@ -353,6 +393,165 @@ impl ApiServer {
     ///
     /// This only removes current state: since discovery is passive, a device
     /// still active on the LAN will reappear the next time it's observed.
+    /// Extracts the MAC from `/devices/<mac>/classification`, if that is the shape.
+    ///
+    /// Returns `None` for any other path, which is what keeps this route from
+    /// colliding with the plain `/devices/<mac>` ones.
+    fn classification_mac(path: &str) -> Option<String> {
+        let path = path.split('?').next().unwrap_or(path);
+        let rest = path
+            .strip_prefix("/devices/")
+            .or_else(|| path.strip_prefix("/device/"))?;
+        let mac = rest.strip_suffix("/classification")?;
+        if mac.is_empty() || mac.contains('/') {
+            return None;
+        }
+        Some(Self::percent_decode(mac))
+    }
+
+    /// Reads a request body, capped so a bad client cannot exhaust memory.
+    fn read_body(request: &mut tiny_http::Request) -> std::io::Result<String> {
+        const MAX_BODY: u64 = 8 * 1024;
+        let mut body = String::new();
+        request
+            .as_reader()
+            .take(MAX_BODY)
+            .read_to_string(&mut body)?;
+        Ok(body)
+    }
+
+    /// Answers 403 when the server was started read-only.
+    fn refuse_write(&self) -> Option<Response<std::io::Cursor<Vec<u8>>>> {
+        self.read_only.then(|| {
+            Self::json(
+                403,
+                serde_json::to_string(&ApiError {
+                    success: false,
+                    error: "This API is read-only".to_string(),
+                })
+                .unwrap_or_default(),
+            )
+        })
+    }
+
+    /// `GET /device-types` -- every name the type field accepts.
+    ///
+    /// The dashboard builds its dropdown from this, so the list cannot drift
+    /// out of step with the enum.
+    fn handle_device_types(&self) -> Response<std::io::Cursor<Vec<u8>>> {
+        let names = DeviceType::all_names();
+        Self::json_ok(&ApiResponse {
+            success: true,
+            count: names.len(),
+            data: names,
+        })
+    }
+
+    /// `PUT /devices/<mac>/classification` -- record a person's verdict.
+    fn handle_set_classification(
+        &self,
+        mac: &str,
+        request: &mut tiny_http::Request,
+    ) -> Response<std::io::Cursor<Vec<u8>>> {
+        if let Some(refusal) = self.refuse_write() {
+            return refusal;
+        }
+
+        let body = match Self::read_body(request) {
+            Ok(body) => body,
+            Err(_) => return self.handle_bad_request("Could not read the request body"),
+        };
+        let parsed: ClassificationRequest = match serde_json::from_str(&body) {
+            Ok(parsed) => parsed,
+            Err(_) => return self.handle_bad_request("Body must be a JSON object"),
+        };
+
+        // An empty string means "clear this field", the same as omitting it.
+        let text = |value: Option<String>| {
+            value
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+        let device_type = text(parsed.device_type).map(|v| DeviceType::from(v.as_str()));
+        let vendor = text(parsed.vendor).map(|v| Vendor::from(v.as_str()));
+        let label = text(parsed.label);
+
+        let mut tracker = match self.tracker.write() {
+            Ok(tracker) => tracker,
+            Err(_) => return self.handle_error("Failed to acquire tracker lock"),
+        };
+
+        match tracker.set_classification(mac, device_type, vendor, label) {
+            Ok(true) => {
+                drop(tracker);
+                self.invalidate_cache();
+                self.handle_device_by_mac(mac)
+            }
+            Ok(false) => self.handle_not_found(),
+            Err(_) => self.handle_error("Failed to save the classification"),
+        }
+    }
+
+    /// `DELETE /devices/<mac>/classification` -- hand the device back to the heuristics.
+    fn handle_clear_classification(&self, mac: &str) -> Response<std::io::Cursor<Vec<u8>>> {
+        if let Some(refusal) = self.refuse_write() {
+            return refusal;
+        }
+
+        let mut tracker = match self.tracker.write() {
+            Ok(tracker) => tracker,
+            Err(_) => return self.handle_error("Failed to acquire tracker lock"),
+        };
+
+        match tracker.clear_classification(mac) {
+            Ok(true) => {
+                drop(tracker);
+                self.invalidate_cache();
+                self.handle_device_by_mac(mac)
+            }
+            Ok(false) => self.handle_not_found(),
+            Err(_) => self.handle_error("Failed to clear the classification"),
+        }
+    }
+
+    /// `GET /fingerprints/export` -- the shared catalogue, as a downloadable file.
+    ///
+    /// Plain text rather than JSON, because the result is pasted straight into
+    /// `make fingerprints-merge`. It carries no MAC, IP or hostname.
+    fn handle_export_fingerprints(&self) -> Response<std::io::Cursor<Vec<u8>>> {
+        let tracker = match self.tracker.read() {
+            Ok(tracker) => tracker,
+            Err(_) => return self.handle_error("Failed to acquire tracker lock"),
+        };
+        let body = tracker.export_fingerprint_catalogue();
+        drop(tracker);
+
+        let content_type =
+            tiny_http::Header::from_bytes("Content-Type", "text/plain; charset=utf-8")
+                .expect("static header is always valid");
+        let disposition = tiny_http::Header::from_bytes(
+            "Content-Disposition",
+            "attachment; filename=\"lanwatch-fingerprints.txt\"",
+        )
+        .expect("static header is always valid");
+        Response::from_string(body)
+            .with_status_code(200)
+            .with_header(content_type)
+            .with_header(disposition)
+    }
+
+    /// A 400 with a reason, for a body this server could not use.
+    fn handle_bad_request(&self, message: &str) -> Response<std::io::Cursor<Vec<u8>>> {
+        Self::json(
+            400,
+            serde_json::to_string(&ApiError {
+                success: false,
+                error: message.to_string(),
+            })
+            .unwrap_or_default(),
+        )
+    }
+
     fn handle_delete_device(&self, mac: &str) -> Response<std::io::Cursor<Vec<u8>>> {
         let removed = match self.tracker.write() {
             Ok(mut tracker) => tracker.remove_device(mac),
@@ -466,7 +665,20 @@ pub fn start_api_server(
     addr: &str,
     tracker: Arc<RwLock<DeviceTracker>>,
 ) -> std::io::Result<thread::JoinHandle<()>> {
-    let server = ApiServer::new(addr, tracker)?;
+    start_api_server_with_options(addr, tracker, false)
+}
+
+/// Starts the API server, optionally refusing every write.
+///
+/// The API has no authentication. Read-only is the safe choice whenever the
+/// listener is reachable from more than a trusted network.
+pub fn start_api_server_with_options(
+    addr: &str,
+    tracker: Arc<RwLock<DeviceTracker>>,
+    read_only: bool,
+) -> std::io::Result<thread::JoinHandle<()>> {
+    let mut server = ApiServer::new(addr, tracker)?;
+    server.set_read_only(read_only);
     Ok(thread::spawn(move || {
         server.run();
     }))
@@ -484,6 +696,182 @@ mod tests {
             &response[pos + 4..]
         } else {
             response
+        }
+    }
+
+    /// Sends one request and returns the whole response, headers included.
+    fn http(addr: &str, request: &str) -> String {
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    }
+
+    /// A server on a free port, plus its address. The thread ends with the test.
+    fn serve(tracker: Arc<RwLock<DeviceTracker>>, read_only: bool) -> String {
+        let mut api_server = ApiServer::new("127.0.0.1:0", tracker).unwrap();
+        api_server.set_read_only(read_only);
+        let addr = api_server.server.server_addr().to_string();
+        std::thread::spawn(move || {
+            for mut request in api_server.server.incoming_requests() {
+                let response = api_server.handle_request(&mut request);
+                let _ = request.respond(response);
+            }
+        });
+        addr
+    }
+
+    fn review_test_tracker(name: &str) -> (String, Arc<RwLock<DeviceTracker>>) {
+        let path = format!("/tmp/lanwatch_test_{}.db", name);
+        for suffix in ["", "-journal", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", path, suffix));
+        }
+        let tracker = DeviceTracker::new(&path).unwrap();
+        let tracker = Arc::new(RwLock::new(tracker));
+        {
+            let mut guard = tracker.write().unwrap();
+            let mut device = DeviceInfo::new(
+                "aa:bb:cc:11:22:33".to_string(),
+                "192.168.1.101".parse().unwrap(),
+                Some("review-target".to_string()),
+            );
+            device.device_type = Some(crate::types::DeviceType::Laptop);
+            let mac = device.mac_address.clone();
+            guard.devices.insert(mac.clone(), device);
+            guard.dirty_devices.lock().unwrap().insert(mac);
+            guard.save_to_db().unwrap();
+        }
+        (path, tracker)
+    }
+
+    #[test]
+    fn test_the_classification_routes_round_trip() {
+        let (path, tracker) = review_test_tracker("classify");
+        let addr = serve(Arc::clone(&tracker), false);
+
+        // The picker's list must arrive before anything can be chosen from it.
+        let types = http(
+            &addr,
+            "GET /device-types HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        );
+        assert!(get_http_body(&types).contains("\"Printer\""));
+
+        let body = r#"{"device_type":"Printer","vendor":"Brother","label":"Brother HL-L2350DW"}"#;
+        let saved = http(
+            &addr,
+            &format!(
+                "PUT /devices/aa:bb:cc:11:22:33/classification HTTP/1.1\r\nHost: localhost\r\n\
+                 Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            ),
+        );
+        assert!(saved.starts_with("HTTP/1.1 200"), "{}", saved);
+        assert!(get_http_body(&saved).contains("Brother HL-L2350DW"));
+        assert_eq!(
+            tracker
+                .read()
+                .unwrap()
+                .get_device("aa:bb:cc:11:22:33")
+                .unwrap()
+                .device_type,
+            Some(crate::types::DeviceType::Printer)
+        );
+
+        // Resetting must give back the Laptop the heuristics had chosen.
+        let cleared = http(
+            &addr,
+            "DELETE /devices/aa:bb:cc:11:22:33/classification HTTP/1.1\r\nHost: localhost\r\n\
+             Connection: close\r\n\r\n",
+        );
+        assert!(cleared.starts_with("HTTP/1.1 200"), "{}", cleared);
+        assert_eq!(
+            tracker
+                .read()
+                .unwrap()
+                .get_device("aa:bb:cc:11:22:33")
+                .unwrap()
+                .device_type,
+            Some(crate::types::DeviceType::Laptop)
+        );
+
+        // Nothing left to reset.
+        let again = http(
+            &addr,
+            "DELETE /devices/aa:bb:cc:11:22:33/classification HTTP/1.1\r\nHost: localhost\r\n\
+             Connection: close\r\n\r\n",
+        );
+        assert!(again.starts_with("HTTP/1.1 404"), "{}", again);
+
+        for suffix in ["", "-journal", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", path, suffix));
+        }
+    }
+
+    #[test]
+    fn test_a_read_only_api_refuses_every_write() {
+        let (path, tracker) = review_test_tracker("readonly");
+        let addr = serve(Arc::clone(&tracker), true);
+
+        let body = r#"{"label":"Anything"}"#;
+        let refused = http(
+            &addr,
+            &format!(
+                "PUT /devices/aa:bb:cc:11:22:33/classification HTTP/1.1\r\nHost: localhost\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            ),
+        );
+        assert!(refused.starts_with("HTTP/1.1 403"), "{}", refused);
+
+        let deleted = http(
+            &addr,
+            "DELETE /devices/aa:bb:cc:11:22:33/classification HTTP/1.1\r\nHost: localhost\r\n\
+             Connection: close\r\n\r\n",
+        );
+        assert!(deleted.starts_with("HTTP/1.1 403"), "{}", deleted);
+
+        // Reading still works, which is the whole point of the mode.
+        let read = http(
+            &addr,
+            "GET /devices/count HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        );
+        assert!(read.starts_with("HTTP/1.1 200"), "{}", read);
+
+        assert!(
+            tracker
+                .read()
+                .unwrap()
+                .classification_for("aa:bb:cc:11:22:33")
+                .is_none()
+        );
+
+        for suffix in ["", "-journal", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", path, suffix));
+        }
+    }
+
+    #[test]
+    fn test_the_export_route_serves_a_downloadable_file() {
+        let (path, tracker) = review_test_tracker("export_route");
+        let addr = serve(Arc::clone(&tracker), false);
+
+        let response = http(
+            &addr,
+            "GET /fingerprints/export HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        );
+        assert!(response.starts_with("HTTP/1.1 200"), "{}", response);
+        assert!(response.contains("lanwatch-fingerprints.txt"));
+        // No device is reviewed, so the file is header only -- and never
+        // carries the MAC of the device that exists.
+        let body = get_http_body(&response);
+        assert!(body.contains("# core_hash"));
+        assert!(!body.contains("aa:bb:cc:11:22:33"));
+
+        for suffix in ["", "-journal", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", path, suffix));
         }
     }
 
@@ -520,8 +908,8 @@ mod tests {
         // Run the server loop in a separate thread so it doesn't block the test
         let server_clone = api_server.clone();
         let _server_handle = std::thread::spawn(move || {
-            for request in server_clone.server.incoming_requests() {
-                let response = server_clone.handle_request(&request);
+            for mut request in server_clone.server.incoming_requests() {
+                let response = server_clone.handle_request(&mut request);
                 let _ = request.respond(response);
             }
         });
