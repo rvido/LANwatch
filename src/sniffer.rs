@@ -463,7 +463,7 @@ impl DhcpSniffer {
         let interface = find_interface(interface_name)
             .ok_or_else(|| DhcpError::InterfaceNotFound(interface_name.to_string()))?;
 
-        let (_, rx) = match datalink::channel(&interface, Default::default()) {
+        let (_, rx) = match datalink::channel(&interface, crate::capture_filter::channel_config()) {
             Ok(Ethernet(tx, rx)) => (tx, rx),
             Ok(_) => return Err(DhcpError::UnsupportedChannelType),
             Err(e) => return Err(DhcpError::ChannelCreationFailed(e.to_string())),
@@ -544,7 +544,7 @@ impl NetworkSniffer {
         let interface = find_interface(interface_name)
             .ok_or_else(|| DhcpError::InterfaceNotFound(interface_name.to_string()))?;
 
-        let (_, rx) = match datalink::channel(&interface, Default::default()) {
+        let (_, rx) = match datalink::channel(&interface, crate::capture_filter::channel_config()) {
             Ok(Ethernet(tx, rx)) => (tx, rx),
             Ok(_) => return Err(DhcpError::UnsupportedChannelType),
             Err(e) => return Err(DhcpError::ChannelCreationFailed(e.to_string())),

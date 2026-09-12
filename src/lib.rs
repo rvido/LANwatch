@@ -5,6 +5,8 @@
 //
 // LANwatch - Network device discovery and tracking
 
+/// Kernel-side capture filter for the sniffers.
+pub mod capture_filter;
 /// Device classifier logic.
 pub mod classifier;
 /// Device information, parsing and serialization logic.

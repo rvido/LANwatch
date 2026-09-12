@@ -24,6 +24,10 @@ mdns = []
 ssdp = []
 
 [dependencies]
+# The capture filter is attached with a raw setsockopt(SO_ATTACH_FILTER); see
+# src/capture_filter.rs. pnet already links libc, but a direct use needs a
+# direct dependency.
+libc = "0.2"
 pnet_datalink = "0.35"
 pnet_packet = "0.35"
 rusqlite = { version = "0.40", features = ["bundled"] }
