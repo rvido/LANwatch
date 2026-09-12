@@ -39,7 +39,8 @@ Release history: [CHANGELOG.md](CHANGELOG.md).
 - **Library API**: Use as a library in your own Rust projects
 - **CLI Tool**: Run as a standalone command-line tool
 - **Type-Safe**: Strongly typed enums for message types, operations, and options
-- **Cross-Platform**: Works on macOS, Linux, and other Unix-like systems
+- **Kernel-Side Capture Filter**: On Linux, the capture socket carries a BPF filter, so the kernel discards bulk traffic (TCP 80/443, QUIC, DNS) before it is ever copied to LANwatch. On a busy router this is the difference between touching every frame on the segment and touching only discovery traffic. Everything the parsers accept still arrives, and if the filter cannot be attached, capture falls back to an unfiltered socket rather than stopping.
+- **Cross-Platform**: Works on macOS, Linux, and other Unix-like systems. The capture filter above is Linux-only; other platforms capture unfiltered, exactly as before.
 
 ## Installation
 
@@ -48,10 +49,10 @@ Add to your `Cargo.toml`. The `http-api` feature is opt-in to keep binary size s
 ```toml
 [dependencies]
 # Smallest binary footprint, core DHCP & MAC tracking only
-lanwatch = "0.16"
+lanwatch = "0.17"
 
 # With HTTP API server and active discovery protocols
-lanwatch = { version = "0.16", features = ["http-api", "mdns", "ssdp"] }
+lanwatch = { version = "0.17", features = ["http-api", "mdns", "ssdp"] }
 ```
 
 Or clone and build from source. Release builds are automatically optimized for size (`opt-level = "z"`, `strip = true`, `panic = "abort"`):
@@ -71,6 +72,26 @@ cargo build --release --all-features
 
 LANwatch is pre-1.0, so minor versions may break API compatibility. Only
 library consumers are affected; the CLI and its flags are unchanged.
+
+### 0.16 → 0.17
+
+**No action is required.** Nothing in the CLI, the API, the database or the
+library surface changed.
+
+On Linux the capture socket now carries a BPF filter, so the kernel drops
+traffic that no parser reads before it is copied. Discovery results are
+unchanged: everything the parsers accept still reaches them. If a future build
+adds a protocol on a new port, `FILTER_EXPRESSION` in `src/capture_filter.rs`
+must be regenerated, and the test suite fails until it is.
+
+Two things are worth knowing:
+
+- **A packet sniffer attached to the same socket sees only discovery traffic.**
+  If you were reading LANwatch's socket for anything else, it is no longer a
+  full tap.
+- **The filter is an optimisation, never a requirement.** On a non-Linux system,
+  or if the socket cannot be prepared, LANwatch prints a warning and captures
+  unfiltered exactly as it did before.
 
 ### 0.15 → 0.16
 

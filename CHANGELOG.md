@@ -8,6 +8,37 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Entries before v0.11.0 are summarised from the commit history; only the releases
 that changed behaviour are listed.
 
+## [0.17.0] - 2026-09-11
+
+### Changed
+
+- **The capture socket now carries a kernel-side BPF filter on Linux.** An
+  unfiltered `AF_PACKET` socket hands every frame on the segment to user space,
+  and the sniffer then discards all but the few discovery protocols it parses.
+  On a link carrying real traffic that copy is the dominant cost: a flamegraph
+  taken on a Raspberry Pi CM4 router attributed 28% of all process CPU to the
+  `recvfrom` inside the sniffer, and a further 4% to parsing frames that were
+  then thrown away.
+  - The filter keeps ARP, LLDP, LLC/SNAP for CDP, every ICMPv6 message for NDP,
+    the discovery UDP ports, and the two TCP ports whose responders identify a
+    device (RTSP 554, MQTT 1883). It drops TCP 80 and 443, QUIC on UDP 443, and
+    plain DNS.
+  - **Discovery behaviour is unchanged.** What survives the filter is a superset
+    of what the parsers accept; only the work needed to reach them falls.
+  - The filter is attached before the socket is bound, so no unfiltered frame is
+    ever queued. `SO_ATTACH_FILTER` is Linux-only: on every other platform, and
+    if the socket cannot be prepared, capture falls back to an unfiltered socket
+    with a warning. A filter is an optimisation, and losing one must never stop
+    discovery.
+  - `FILTER_EXPRESSION` in `src/capture_filter.rs` is the source of truth, and
+    the compiled program is regenerated from it with `tcpdump -dd`. A test
+    drives the compiled program over a crafted frame for every port constant the
+    parsers match, using a small classic-BPF interpreter so that no test needs a
+    privileged socket. Adding a protocol without regenerating the filter fails
+    the test suite instead of silently going undiscovered.
+  - VLAN-tagged frames are not matched, which costs nothing today:
+    `process_ethernet_frame_extended` does not look past an 802.1Q tag either.
+
 ## [0.16.0] - 2026-09-04
 
 ### Added
@@ -173,7 +204,8 @@ that changed behaviour are listed.
 - Table-driven matching for the mDNS and SSDP heuristics.
 - Feature-gated `MODEL_RULES` to prevent `dead_code` warnings.
 
-[Unreleased]: https://github.com/rvido/lanwatch/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/rvido/lanwatch/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/rvido/lanwatch/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/rvido/lanwatch/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/rvido/lanwatch/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/rvido/lanwatch/compare/v0.13.0...v0.14.0
