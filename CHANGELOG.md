@@ -8,6 +8,20 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Entries before v0.11.0 are summarised from the commit history; only the releases
 that changed behaviour are listed.
 
+## [0.17.1] - 2026-09-14
+
+### Fixed
+
+- **Capture stopped when run under a profiler.** The sniffer waits for frames
+  with `poll(2)`, which Linux never restarts after a signal handler runs. A
+  profiler's `SIGPROF` timer therefore reached `next_packet()` as `EINTR`, each
+  one counted as a capture error, and after 100 in a row capture gave up. An
+  interrupted read now returns `Ok(None)` and the next read tries again. Every
+  other read failure is still an error.
+  - The error does not say which signal interrupted the read, and finding out
+    would mean replacing the profiler's own handler. Every `EINTR` is treated
+    the same way, which is safe because nothing was lost.
+
 ## [0.17.0] - 2026-09-11
 
 ### Changed
@@ -204,7 +218,8 @@ that changed behaviour are listed.
 - Table-driven matching for the mDNS and SSDP heuristics.
 - Feature-gated `MODEL_RULES` to prevent `dead_code` warnings.
 
-[Unreleased]: https://github.com/rvido/lanwatch/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/rvido/lanwatch/compare/v0.17.1...HEAD
+[0.17.1]: https://github.com/rvido/lanwatch/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/rvido/lanwatch/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/rvido/lanwatch/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/rvido/lanwatch/compare/v0.14.0...v0.15.0
