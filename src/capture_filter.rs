@@ -368,6 +368,8 @@ mod tests {
     /// [`FILTER_EXPRESSION`] fails here.
     #[test]
     fn filter_accepts_every_parsed_port() {
+        // Only the mdns and ssdp blocks below extend the list.
+        #[cfg_attr(not(any(feature = "mdns", feature = "ssdp")), allow(unused_mut))]
         let mut udp_ports = vec![
             crate::types::DHCPV4_SERVER_PORT,
             crate::types::DHCPV4_CLIENT_PORT,

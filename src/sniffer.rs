@@ -13,6 +13,7 @@ use pnet_packet::udp::UdpPacket;
 
 #[cfg(any(feature = "mdns", feature = "ssdp"))]
 use pnet_packet::arp::{ArpOperations, ArpPacket};
+use std::io;
 #[cfg(any(feature = "mdns", feature = "ssdp"))]
 use std::net::IpAddr;
 
@@ -43,6 +44,24 @@ use crate::parser::ssdp::{
 /// without a ceiling the loop becomes a hot spin writing to stderr with no way
 /// out.
 const MAX_CONSECUTIVE_CAPTURE_ERRORS: usize = 100;
+
+/// Maps a failed capture read to the value `next_packet` returns.
+///
+/// `poll(2)` is never restarted after a signal handler runs, so a profiler's
+/// `SIGPROF` timer reaches here as `EINTR`. Nothing was lost and the next read
+/// simply tries again, so it is not a capture failure. Counting it as one would
+/// make a profiled run give up after `MAX_CONSECUTIVE_CAPTURE_ERRORS`.
+///
+/// The error does not say which signal interrupted the read, and finding out
+/// would mean replacing the profiler's own `SIGPROF` handler. Every `EINTR` is
+/// therefore treated the same way.
+fn capture_read_result<T>(error: io::Error) -> Result<Option<T>, DhcpError> {
+    if error.kind() == io::ErrorKind::Interrupted {
+        Ok(None)
+    } else {
+        Err(DhcpError::ParseError(error.to_string()))
+    }
+}
 
 /// A `Vec<String>` containing the names (e.g., "eth0", "en0", "wlan0").
 ///
@@ -484,7 +503,7 @@ impl DhcpSniffer {
     pub fn next_packet(&mut self) -> Result<Option<DhcpEvent>, DhcpError> {
         match self.rx.next() {
             Ok(packet) => Ok(process_ethernet_frame(packet)),
-            Err(e) => Err(DhcpError::ParseError(e.to_string())),
+            Err(e) => capture_read_result(e),
         }
     }
 
@@ -565,7 +584,7 @@ impl NetworkSniffer {
     pub fn next_packet(&mut self) -> Result<Option<NetworkEvent>, DhcpError> {
         match self.rx.next() {
             Ok(packet) => Ok(process_ethernet_frame_extended(packet)),
-            Err(e) => Err(DhcpError::ParseError(e.to_string())),
+            Err(e) => capture_read_result(e),
         }
     }
 
@@ -605,5 +624,28 @@ impl NetworkSniffer {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_an_interrupted_read_is_not_a_capture_error() {
+        let interrupted = io::Error::from(io::ErrorKind::Interrupted);
+        assert!(matches!(
+            capture_read_result::<DhcpEvent>(interrupted),
+            Ok(None)
+        ));
+    }
+
+    #[test]
+    fn test_a_real_read_failure_is_still_an_error() {
+        let failed = io::Error::from(io::ErrorKind::PermissionDenied);
+        assert!(matches!(
+            capture_read_result::<DhcpEvent>(failed),
+            Err(DhcpError::ParseError(_))
+        ));
     }
 }
