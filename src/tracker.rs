@@ -3,7 +3,7 @@
 //
 // LANwatch - Network device discovery and tracking
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
 use std::sync::Mutex;
@@ -223,7 +223,8 @@ pub struct DeviceTracker {
     /// Observed attribute tokens per device, keyed on normalized MAC.
     pub(crate) attributes: HashMap<String, AttributeLog>,
     /// MACs whose attribute tokens changed since the last flush.
-    pub(crate) dirty_attributes: Mutex<HashSet<String>>,
+    /// Per device, the attribute tokens whose stored row is missing or out of date.
+    pub(crate) dirty_attributes: Mutex<HashMap<String, BTreeSet<String>>>,
     #[cfg(feature = "mdns")]
     pub(crate) service_registry: Option<MdnsServiceRegistry>,
     /// Track updated MAC addresses for incremental journal flushes
@@ -324,7 +325,7 @@ impl DeviceTracker {
             oui_registry: None,
             fingerprint_catalogue: None,
             attributes: HashMap::new(),
-            dirty_attributes: Mutex::new(HashSet::new()),
+            dirty_attributes: Mutex::new(HashMap::new()),
             #[cfg(feature = "mdns")]
             service_registry: None,
             dirty_devices: Mutex::new(HashSet::new()),
@@ -1293,7 +1294,7 @@ impl DeviceTracker {
             }
         }
 
-        let dirty_attributes: HashSet<String> = {
+        let dirty_attributes: HashMap<String, BTreeSet<String>> = {
             let guard = self.dirty_attributes.lock().unwrap();
             guard.clone()
         };
@@ -1308,11 +1309,15 @@ impl DeviceTracker {
                 )
                 .map_err(std::io::Error::other)?;
 
-            for mac in &dirty_attributes {
+            for (mac, tokens) in &dirty_attributes {
                 let Some(log) = self.attributes.get(mac) else {
                     continue;
                 };
-                for (token, times) in log.entries() {
+                for token in tokens {
+                    // A token pruned or evicted since it was queued has no row to write.
+                    let Some(times) = log.times_for(token) else {
+                        continue;
+                    };
                     stmt.execute(params![
                         mac,
                         token,
@@ -1340,8 +1345,13 @@ impl DeviceTracker {
         }
         {
             let mut guard = self.dirty_attributes.lock().unwrap();
-            for mac in &dirty_attributes {
-                guard.remove(mac);
+            for (mac, written) in &dirty_attributes {
+                if let Some(queued) = guard.get_mut(mac) {
+                    queued.retain(|token| !written.contains(token));
+                    if queued.is_empty() {
+                        guard.remove(mac);
+                    }
+                }
             }
         }
 
@@ -1350,9 +1360,11 @@ impl DeviceTracker {
 
     /// Records observed attribute tokens for `mac` and refreshes its fingerprint.
     ///
-    /// `collect` receives the device's log and the current time. It returns the
-    /// number of tokens that were new, so a packet that only repeats what is
-    /// already known does no work beyond refreshing `last_seen`.
+    /// `collect` receives the device's log and the current time. Only tokens
+    /// that are new, or whose `last_seen` has drifted past
+    /// [`TOKEN_LAST_SEEN_WRITE_SECS`](crate::fingerprint::TOKEN_LAST_SEEN_WRITE_SECS),
+    /// are queued for the database, so a packet that only repeats what is
+    /// already known writes nothing.
     fn record_attributes<F>(&mut self, mac: &str, collect: F)
     where
         F: FnOnce(&mut AttributeLog, SystemTime),
@@ -1362,17 +1374,17 @@ impl DeviceTracker {
             return;
         }
 
-        let before = {
+        let (before, unsaved) = {
             let log = self.attributes.entry(key.clone()).or_default();
             let before = log.set().fingerprint();
             collect(log, SystemTime::now());
-            before
+            (before, log.take_unsaved())
         };
 
         let after = self.attributes[&key].set().fingerprint();
-        {
+        if !unsaved.is_empty() {
             let mut dirty = self.dirty_attributes.lock().unwrap();
-            dirty.insert(key.clone());
+            dirty.entry(key.clone()).or_default().extend(unsaved);
         }
         if before != after {
             self.refresh_fingerprint(&key);

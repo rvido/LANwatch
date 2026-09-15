@@ -45,6 +45,15 @@ pub const MAX_CATALOGUE_LINE: usize = 8192;
 /// Age, in days, after which a token that stopped being advertised is pruned.
 pub const TOKEN_STALE_DAYS: i64 = 30;
 
+/// How far, in seconds, a token's `last_seen` may run ahead of its stored row
+/// before the row is rewritten.
+///
+/// A settled device repeats the same announcements every few seconds. Stored
+/// `last_seen` is only read to prune tokens after [`TOKEN_STALE_DAYS`], so an
+/// hour of drift costs nothing, while rewriting on every repeat wears the SD
+/// card of a small always-on host.
+pub const TOKEN_LAST_SEEN_WRITE_SECS: u64 = 60 * 60;
+
 /// Fewest tokens a device needs before a non-exact match is allowed.
 pub const MIN_TOKENS_FOR_MATCH: usize = 4;
 
@@ -1023,6 +1032,10 @@ pub struct AttributeLog {
     set: TokenSet,
     times: BTreeMap<String, TokenTimes>,
     newest_at: Option<SystemTime>,
+    /// Tokens whose stored row is missing or out of date.
+    unsaved: BTreeSet<String>,
+    /// The `last_seen` each token's row was last queued for writing with.
+    queued_last_seen: BTreeMap<String, SystemTime>,
 }
 
 impl AttributeLog {
@@ -1041,16 +1054,24 @@ impl AttributeLog {
         };
         if let Some(times) = self.times.get_mut(&token) {
             times.last_seen = now;
+            let due = self.queued_last_seen.get(&token).is_none_or(|queued| {
+                now.duration_since(*queued)
+                    .map_or(true, |drift| drift.as_secs() >= TOKEN_LAST_SEEN_WRITE_SECS)
+            });
+            if due {
+                self.queue_write(token, now);
+            }
             return false;
         }
         self.set.insert(namespace, value);
         self.times.insert(
-            token,
+            token.clone(),
             TokenTimes {
                 first_seen: now,
                 last_seen: now,
             },
         );
+        self.queue_write(token, now);
         self.sync_with_set();
         self.newest_at = Some(now);
         true
@@ -1068,6 +1089,8 @@ impl AttributeLog {
                 last_seen,
             },
         );
+        // The row already holds these values, so nothing is queued.
+        self.queued_last_seen.insert(token.to_string(), last_seen);
         self.sync_with_set();
         self.newest_at = Some(match self.newest_at {
             Some(current) if current >= first_seen => current,
@@ -1085,6 +1108,34 @@ impl AttributeLog {
         }
         let set = &self.set;
         self.times.retain(|token, _| set.contains(token));
+        self.forget_write_state_for_dropped_tokens();
+    }
+
+    /// Marks `token` for writing, as it stood at `now`.
+    ///
+    /// Recording the queued `last_seen` here, rather than after the commit, lets
+    /// the tracker write from a shared reference. A failed write loses nothing:
+    /// the tracker keeps the token queued until a commit succeeds.
+    fn queue_write(&mut self, token: String, now: SystemTime) {
+        self.unsaved.insert(token.clone());
+        self.queued_last_seen.insert(token, now);
+    }
+
+    fn forget_write_state_for_dropped_tokens(&mut self) {
+        let times = &self.times;
+        self.unsaved.retain(|token| times.contains_key(token));
+        self.queued_last_seen
+            .retain(|token, _| times.contains_key(token));
+    }
+
+    /// Hands over the tokens whose stored row is missing or out of date.
+    pub fn take_unsaved(&mut self) -> BTreeSet<String> {
+        std::mem::take(&mut self.unsaved)
+    }
+
+    /// The timestamps held for one token.
+    pub fn times_for(&self, token: &str) -> Option<TokenTimes> {
+        self.times.get(token).copied()
     }
 
     /// The tokens and their hashes.
@@ -1138,6 +1189,7 @@ impl AttributeLog {
         for token in &stale {
             self.times.remove(token);
         }
+        self.forget_write_state_for_dropped_tokens();
         self.set = TokenSet::from_tokens(self.times.keys().cloned());
         self.newest_at = self.times.values().map(|times| times.first_seen).max();
         stale

@@ -6406,4 +6406,133 @@ mod tests {
 
         remove_db(&path);
     }
+
+    /// Counts every row the tracker inserts or updates in `device_attributes`.
+    ///
+    /// The triggers are `TEMP`, so they live on the tracker's own connection and
+    /// never reach the database file.
+    fn count_attribute_writes(tracker: &DeviceTracker) {
+        tracker
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TEMP TABLE attribute_writes (token TEXT);
+                 CREATE TEMP TRIGGER count_attribute_inserts
+                     AFTER INSERT ON main.device_attributes
+                     BEGIN INSERT INTO attribute_writes VALUES (NEW.token); END;
+                 CREATE TEMP TRIGGER count_attribute_updates
+                     AFTER UPDATE ON main.device_attributes
+                     BEGIN INSERT INTO attribute_writes VALUES (NEW.token); END;",
+            )
+            .unwrap();
+    }
+
+    fn attribute_writes(tracker: &DeviceTracker) -> Vec<String> {
+        let conn = tracker.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT token FROM attribute_writes ORDER BY token;")
+            .unwrap();
+        stmt.query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    #[test]
+    fn test_a_repeated_announcement_writes_no_attribute_rows() {
+        // A settled device repeats itself every few seconds. Rewriting its
+        // whole token set on every flush wears an SD card for a last_seen that
+        // only matters at the scale of TOKEN_STALE_DAYS.
+        let path = fingerprint_db_path("repeat_writes");
+        remove_db(&path);
+        let mac = [0x02, 0x11, 0x22, 0x33, 0x44, 0x55];
+
+        let mut tracker = DeviceTracker::new(&path).unwrap();
+        tracker.update_from_dhcpv4(&fingerprinted_dhcpv4_packet(mac));
+        tracker.flush_to_db().unwrap();
+
+        count_attribute_writes(&tracker);
+        for _ in 0..5 {
+            tracker.update_from_dhcpv4(&fingerprinted_dhcpv4_packet(mac));
+            tracker.flush_to_db().unwrap();
+        }
+
+        assert_eq!(attribute_writes(&tracker), Vec::<String>::new());
+        assert!(!tracker.has_pending_writes(), "a repeat must not keep the flush loop busy");
+
+        drop(tracker);
+        remove_db(&path);
+    }
+
+    #[test]
+    fn test_only_a_new_token_is_written() {
+        let path = fingerprint_db_path("new_token_write");
+        remove_db(&path);
+        let mac = [0x02, 0x11, 0x22, 0x33, 0x44, 0x56];
+
+        let mut tracker = DeviceTracker::new(&path).unwrap();
+        tracker.update_from_dhcpv4(&fingerprinted_dhcpv4_packet(mac));
+        tracker.flush_to_db().unwrap();
+
+        count_attribute_writes(&tracker);
+        let mut packet = fingerprinted_dhcpv4_packet(mac);
+        packet.vendor_class_id = Some("android-dhcp-14".to_string());
+        tracker.update_from_dhcpv4(&packet);
+        tracker.flush_to_db().unwrap();
+
+        assert_eq!(attribute_writes(&tracker), vec!["v:android-dhcp".to_string()]);
+
+        drop(tracker);
+        remove_db(&path);
+    }
+
+    #[test]
+    fn test_an_old_last_seen_is_refreshed_in_the_database() {
+        // Skipping repeats must not freeze last_seen, or a token the device
+        // still advertises would be pruned as stale after TOKEN_STALE_DAYS.
+        let path = fingerprint_db_path("refresh_last_seen");
+        remove_db(&path);
+        let mac = [0x02, 0x11, 0x22, 0x33, 0x44, 0x57];
+        let key = format_mac(mac);
+
+        {
+            let mut tracker = DeviceTracker::new(&path).unwrap();
+            tracker.update_from_dhcpv4(&fingerprinted_dhcpv4_packet(mac));
+            tracker.flush_to_db().unwrap();
+        }
+
+        let two_hours_ago = SystemTime::now() - std::time::Duration::from_secs(2 * 60 * 60);
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute(
+                "UPDATE device_attributes SET first_seen = ?1, last_seen = ?1;",
+                rusqlite::params![crate::device::format_timestamp(two_hours_ago)],
+            )
+            .unwrap();
+        }
+
+        let mut tracker = DeviceTracker::new(&path).unwrap();
+        count_attribute_writes(&tracker);
+        tracker.update_from_dhcpv4(&fingerprinted_dhcpv4_packet(mac));
+        tracker.flush_to_db().unwrap();
+        assert_eq!(attribute_writes(&tracker).len(), 3);
+        drop(tracker);
+
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let (first_seen, last_seen): (String, String) = conn
+            .query_row(
+                "SELECT MIN(first_seen), MIN(last_seen) FROM device_attributes WHERE mac_address = ?;",
+                rusqlite::params![key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let first_seen = crate::device::parse_timestamp(&first_seen).unwrap();
+        let last_seen = crate::device::parse_timestamp(&last_seen).unwrap();
+        assert!(first_seen <= two_hours_ago + std::time::Duration::from_secs(1));
+        assert!(last_seen > two_hours_ago + std::time::Duration::from_secs(60 * 60));
+
+        drop(conn);
+        remove_db(&path);
+    }
 }
