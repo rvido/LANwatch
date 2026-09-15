@@ -8,6 +8,21 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Entries before v0.11.0 are summarised from the commit history; only the releases
 that changed behaviour are listed.
 
+## [0.17.2] - 2026-09-14
+
+### Fixed
+
+- **Attribute tokens were rewritten on every repeated announcement.** Each
+  packet marked its device dirty, and the next flush rewrote the device's whole
+  token set. A settled device repeats itself every few seconds, so a printer
+  with about 150 tokens rewrote about 150 rows each time, for no new
+  information. On a small always-on host that is avoidable SD card wear.
+  - A token is now written only when it is new, or when its `last_seen` has
+    run more than `TOKEN_LAST_SEEN_WRITE_SECS` (1 hour) ahead of the stored row.
+    Stored `last_seen` only drives the 30-day stale prune, so the drift costs
+    nothing.
+  - A failed write keeps the tokens queued, so nothing is lost.
+
 ## [0.17.1] - 2026-09-14
 
 ### Fixed
@@ -218,7 +233,8 @@ that changed behaviour are listed.
 - Table-driven matching for the mDNS and SSDP heuristics.
 - Feature-gated `MODEL_RULES` to prevent `dead_code` warnings.
 
-[Unreleased]: https://github.com/rvido/lanwatch/compare/v0.17.1...HEAD
+[Unreleased]: https://github.com/rvido/lanwatch/compare/v0.17.2...HEAD
+[0.17.2]: https://github.com/rvido/lanwatch/compare/v0.17.1...v0.17.2
 [0.17.1]: https://github.com/rvido/lanwatch/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/rvido/lanwatch/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/rvido/lanwatch/compare/v0.15.0...v0.16.0
