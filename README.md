@@ -27,7 +27,9 @@ Release history: [CHANGELOG.md](CHANGELOG.md).
 - **mDNS TXT Record Parsing**: Extracts model, md, and ty metadata from DNS-SD records to identify specific hardware devices (Apple TV, Chromecast, Sonos speakers, and printer models)
 - **Device Classification**: Expanded classification engine mapping hostnames, mDNS TXT metadata, and service fingerprints to specific device types and vendors (Roku, Sonos, Apple TV, Google Chromecast, ESP32 IoT, Raspberry Pi, Synology NAS, Playstation, Xbox, Nintendo, smart plugs, printers, etc.)
 - **Manual Classification Overrides**: Pin a device's type (and optionally vendor) by MAC address via `--override` or an overrides file, for devices with no reliable passive signature. Overrides always win over heuristics and persist across live updates.
-- **Device Attribute Fingerprinting**: Identifies a device by the *set of attributes it advertises* rather than the name it sends, so a device with a randomised MAC and no hostname is still recognisable. Attribute keys are collected from mDNS, SSDP and DHCP; values are discarded, so no firmware version, serial number or user-chosen name enters a fingerprint. Matched against a shareable catalogue (`lanwatch-fingerprints.txt`). See [Device Attribute Fingerprinting](#device-attribute-fingerprinting).
+- **Device Attribute Fingerprinting**: Identifies a device by the *set of attributes it advertises* rather than the name it sends, so a device with a randomised MAC and no hostname is still recognisable. Attribute keys are collected from mDNS, SSDP and DHCP, plus the bare product names out of the SSDP `SERVER`/`USER-AGENT` headers. Versions, serial numbers and user-chosen names are discarded, so none of them enters a fingerprint. Matched against a shareable catalogue (`lanwatch-fingerprints.txt`). See [Device Attribute Fingerprinting](#device-attribute-fingerprinting).
+- **Agent Fingerprinting**: Reads the product names a device announces in its SSDP `SERVER` and `USER-AGENT` headers, so a responder's firmware stack (`openwrt`, `miniupnpd`, `portable-sdk-for-upnp-devices`) and a searching host's operating system or application become attributes in their own right. A multi-word product name stays one token, and versions and `(...)` comments are dropped. See [Device Attribute Fingerprinting](#device-attribute-fingerprinting).
+- **Repeating Active Discovery**: `--query-interval` re-sends the mDNS and SSDP probes on a timer, so a device that was asleep or off the LAN at startup is still found. See [Repeating the Active Probes](#repeating-the-active-probes---query-interval).
 - **Dashboard Device Review**: Correct a device's type and vendor and give it a product name directly in the web dashboard. Corrections are stored in the database, survive a restart, and always beat heuristic classification. One click then exports every reviewed device as a catalogue file that carries no MAC, IP or hostname.
 - **Smart Home & IoT Discovery**: Extracts model and vendor metadata from HomeKit (HAP) and Matter service advertisements (Google, Apple, Amazon, Eve, Signify/Philips Hue, Aqara, IKEA, Nanoleaf, Tuya, Somfy, TP-Link, Lutron, Yale, Belkin, Bosch, etc.)
 - **Specialized IoT & Constrained Protocols**: Captures and parses CoAP (Constrained Application Protocol) on UDP port 5683, KNXnet/IP building automation traffic on UDP port 3671, and MQTT/MQTT-SN on TCP/UDP port 1883 to dynamically identify sensors, smart lights, smart plugs, and home automation systems
@@ -49,10 +51,10 @@ Add to your `Cargo.toml`. The `http-api` feature is opt-in to keep binary size s
 ```toml
 [dependencies]
 # Smallest binary footprint, core DHCP & MAC tracking only
-lanwatch = "0.17"
+lanwatch = "0.18"
 
 # With HTTP API server and active discovery protocols
-lanwatch = { version = "0.17", features = ["http-api", "mdns", "ssdp"] }
+lanwatch = { version = "0.18", features = ["http-api", "mdns", "ssdp"] }
 ```
 
 Or clone and build from source. Release builds are automatically optimized for size (`opt-level = "z"`, `strip = true`, `panic = "abort"`):
@@ -72,6 +74,23 @@ cargo build --release --all-features
 
 LANwatch is pre-1.0, so minor versions may break API compatibility. Only
 library consumers are affected; the CLI and its flags are unchanged.
+
+### 0.17 → 0.18
+
+**No action is required, and no stored data is reset.** The new `a:` namespace
+adds tokens; it changes none that already exist, so a saved attribute set stays
+correct and simply grows as the device announces itself again.
+
+Three things are worth knowing:
+
+- **A device's `full` hash moves once it advertises an agent product.** `a:` is
+  not part of the `core` hash, so core matching against a catalogue built before
+  or after this release still works. `FINGERPRINT_VERSION` is deliberately
+  unchanged: bumping it would delete every stored token to add one namespace.
+- **`TokenNamespace` gained a variant.** An exhaustive `match` over it in library
+  code needs a new arm. Nothing else in the library surface changed.
+- **`--query-interval` is opt-in.** Without it, the active probes are sent once
+  at startup, exactly as before.
 
 ### 0.16 → 0.17
 
@@ -403,9 +422,9 @@ seen a name for.
 Full design: [`docs/fingerprint-design.md`](docs/fingerprint-design.md).
 
 **What is collected.** Attribute **keys**, never values. mDNS service types and TXT keys, SSDP
-`ST`/`NT` targets and header names, DHCPv4 option 55/60/43, DHCPv6 option 15/16. TXT values carry
-firmware versions, serial numbers and user-typed names, so they are discarded. A dumped catalogue is
-safe to share.
+`ST`/`NT` targets and header names, product names from the SSDP `SERVER`/`USER-AGENT` headers,
+DHCPv4 option 55/60/43, DHCPv6 option 15/16. TXT values carry firmware versions, serial numbers and
+user-typed names, so they are discarded. A dumped catalogue is safe to share.
 
 Each attribute becomes one short token with a namespace prefix:
 
@@ -414,15 +433,22 @@ m:_googlecast._tcp                  mDNS service type
 t:_googlecast._tcp/md               mDNS TXT key, scoped to its service
 s:urn:schemas-upnp-org:device:mediarenderer:1     SSDP ST/NT
 h:server                            SSDP header name
+a:sonos                             SERVER/USER-AGENT product, version stripped
 d:55=1-3-6-15-119-252               DHCPv4 option 55, ORDER PRESERVED
 v:msft                              vendor class, version suffix stripped
 e:311                               DHCPv6 IANA enterprise number
 ```
 
 **Two hashes.** `core` covers the protocol identity and survives a firmware update; `full` adds TXT
-keys and header names and is tighter. The stored string is
+keys, header names and agent products, and is tighter. Agent products stay out of `core` because a
+general purpose host advertises them only while an application is running, so opening a browser
+would otherwise move the host's `core` hash. The stored string is
 `lwfp1:<core>:<full>:<token count>`, hashed with FNV-1a 64-bit. The `lwfp1` prefix is the format
 version; a rules change bumps it and old state is reset automatically at load.
+
+**Where to see the tokens.** `/devices` carries only the packed hash. The tokens behind it are a
+separate route, `GET /devices/{mac}/attributes`, which the dashboard's device panel also shows under
+**Attributes**, grouped by namespace. Tokens that feed the stable `core` hash are marked.
 
 **Matching.** An exact `full` match scores 95, an exact `core` match 85, and a fuzzy match uses
 Jaccard similarity over core tokens (accepted only at 0.60 and above). A profile flagged `generic`
@@ -509,6 +535,7 @@ When started with `--api` or `--api-default`, the tool exposes a REST API for qu
 | `/devices` | DELETE | Remove all tracked devices (flush) |
 | `/devices/{mac}/classification` | PUT | Pin the device type, vendor and product name |
 | `/devices/{mac}/classification` | DELETE | Drop the pin and restore the heuristic guess |
+| `/devices/{mac}/attributes` | GET | The raw fingerprint tokens behind that device's hash |
 | `/device-types` | GET | Every canonical device type name, for a picker |
 | `/fingerprints/export` | GET | The reviewed devices as a shareable catalogue file |
 | `/health` | GET | Health check endpoint |
@@ -545,6 +572,13 @@ curl -X PUT http://localhost:3000/devices/AA:BB:CC:DD:EE:FF/classification \
 
 # Drop the pin and go back to the heuristic guess
 curl -X DELETE http://localhost:3000/devices/AA:BB:CC:DD:EE:FF/classification
+
+# See the attribute tokens one device advertises
+curl http://localhost:3000/devices/AA:BB:CC:DD:EE:FF/attributes | jq
+
+# Just the agent products (SSDP SERVER / USER-AGENT)
+curl -s http://localhost:3000/devices/AA:BB:CC:DD:EE:FF/attributes \
+  | jq '.data.attributes[] | select(.token | startswith("a:"))'
 
 # Download the reviewed devices as a shareable fingerprint catalogue
 curl -O http://localhost:3000/fingerprints/export
@@ -789,6 +823,25 @@ When the `ssdp` feature is enabled, the tool can capture SSDP (Simple Service Di
 - Printer and DIAL-enabled devices (Chromecast, etc.)
 
 The tool extracts vendor information and device types from SSDP server headers and service descriptors.
+
+### Repeating the Active Probes (`--query-interval`)
+
+`--mdns-query` and `--ssdp-query` send their probes **once**, at startup. A device that was asleep,
+off the LAN, or simply not listening in that first second is only found later if it announces itself
+on its own. Many devices never do.
+
+`--query-interval <DUR>` re-sends whichever active probes are enabled, on a timer. `DUR` accepts
+`90s`, `15m` or `2h`; a bare number means seconds. The minimum is 30 seconds, because active
+discovery puts multicast on the wire and a typo such as `1` must not turn LANwatch into a flood
+source.
+
+```bash
+# Ask again every 15 minutes for the whole run
+sudo lanwatch eth0 --mdns-query --ssdp-query --query-interval 15m --api-default
+```
+
+The flag does nothing on its own: with neither `--mdns-query` nor `--ssdp-query` it warns and is
+ignored. Passive capture is unaffected either way.
 
 ### ARP Sniffing (Layer 2 Passive Discovery)
 

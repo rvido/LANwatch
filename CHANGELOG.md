@@ -8,6 +8,74 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Entries before v0.11.0 are summarised from the commit history; only the releases
 that changed behaviour are listed.
 
+## [0.18.0] - 2026-09-25
+
+### Added
+
+- **Agent fingerprinting: the product names out of the SSDP `SERVER` and
+  `USER-AGENT` headers are now attributes.** Both headers were already parsed and
+  already reached the fingerprint collector, but only the header *name* was kept
+  (`h:server`); the value was discarded. That value is the closest thing a
+  passive observer gets to a browser or OS fingerprint, and it is what tells a
+  general purpose host apart from an appliance.
+  - New token namespace `a:`. A responder's firmware stack becomes `a:openwrt`,
+    `a:miniupnpd`; a searching host becomes `a:microsoft-windows` or
+    `a:portable-sdk-for-upnp-devices`.
+  - `a:` is **not** part of the `core` hash. A dedicated device advertises the
+    same `SERVER` header for its whole life, but a general purpose host
+    advertises an agent product only while an application is running, so a
+    browser being opened would otherwise move that host's stable hash.
+  - `FINGERPRINT_VERSION` is unchanged and no stored data is reset. The
+    namespace only adds tokens, so a saved set stays correct and grows from live
+    traffic; because `a:` is not core, an old `core` hash still matches a profile
+    built after this release.
+  - Versions are discarded and `(...)` comments are removed whole, so a
+    browser's `Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120` yields
+    `a:mozilla` and `a:chrome` and no punctuation. A `/` is what ends a product
+    name, so libupnp's `Portable SDK for UPnP devices/1.6.19` stays one token
+    instead of becoming five words of which one is `for`.
+  - `MAX_AGENT_PARTS` (16) bounds the parts read from one header value, so a
+    padded `SERVER` header cannot push a device to `capped` and switch matching
+    off for it.
+  - Privacy is unchanged in kind: `a:` is a bare product name, alongside the
+    existing `v:` and `u:` value namespaces. No version, serial number or
+    user-chosen name enters a token.
+
+- **`GET /devices/<mac>/attributes` returns a device's raw fingerprint tokens.**
+  `/devices` carried only the packed hash, which says *what* a device matched and
+  never *why*. Reading a token set previously meant opening the SQLite database
+  by hand.
+  - Each token is returned with its namespace name, whether it feeds the `core`
+    hash, and its `first_seen` / `last_seen`.
+  - A known device that has advertised nothing answers `200` with an empty list,
+    not `404`: "nothing yet" and "no such device" are different facts and must
+    not share a status code.
+  - Unlike `/fingerprints/export`, the route needs no review and no ripeness. It
+    is for looking, not for contributing.
+  - The dashboard's device panel shows the same set under **Attributes**, grouped
+    by namespace, with the core tokens marked.
+
+- **`--query-interval <DUR>` re-sends the active discovery probes on a timer.**
+  `--mdns-query` and `--ssdp-query` fired once, at startup, so a long-running
+  capture only ever reached the devices that were awake and listening in the
+  first second. Everything found later had to announce itself unprompted, and
+  many devices never do.
+  - `DUR` accepts `90s`, `15m` or `2h`; a bare number means seconds. Unreadable
+    input is refused rather than guessed at, because a silent fallback would put
+    multicast on the wire on an interval the operator did not choose.
+  - The minimum is 30 seconds, so a typo such as `1` cannot turn LANwatch into a
+    flood source on its own LAN.
+  - Opt-in and inert on its own: with neither `--mdns-query` nor `--ssdp-query`
+    it warns and does nothing. Passive capture is unaffected either way.
+
+### Changed
+
+- **`TokenNamespace` gained the `AgentProduct` variant and a `label()` method.**
+  An exhaustive `match` over the enum in library code needs a new arm. `label()`
+  gives each namespace a short human readable name, because a token carries only
+  a one letter prefix, which is right for storage and wrong for a person reading
+  the API or the dashboard.
+
 ## [0.17.2] - 2026-09-14
 
 ### Fixed
