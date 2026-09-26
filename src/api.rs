@@ -12,7 +12,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tiny_http::{Response, Server};
 
-use crate::device::DeviceInfo;
+use crate::device::{DeviceInfo, format_timestamp};
+use crate::fingerprint::TokenNamespace;
 use crate::tracker::DeviceTracker;
 use crate::types::{DeviceType, Vendor};
 
@@ -55,6 +56,34 @@ pub(crate) struct ApiResponse<T> {
     pub(crate) success: bool,
     pub(crate) count: usize,
     pub(crate) data: T,
+}
+
+/// One attribute token of a device, as `GET /devices/<mac>/attributes` returns it.
+#[derive(Serialize)]
+pub(crate) struct AttributeEntry {
+    /// The stored token, prefix included, e.g. `a:sonos`.
+    pub(crate) token: String,
+    /// Short name of the token's namespace, e.g. `Agent product`.
+    pub(crate) namespace: &'static str,
+    /// Whether this namespace feeds the stable `core` hash.
+    pub(crate) core: bool,
+    /// When the device first advertised this attribute.
+    pub(crate) first_seen: String,
+    /// When the device last advertised it.
+    pub(crate) last_seen: String,
+}
+
+/// A device's whole attribute set, with the facts needed to read it honestly.
+#[derive(Serialize)]
+pub(crate) struct AttributeSet {
+    /// The device this set belongs to.
+    pub(crate) mac_address: String,
+    /// The packed fingerprint string, once the device has one.
+    pub(crate) fingerprint: Option<String>,
+    /// Whether the set hit the per-device cap, which switches matching off.
+    pub(crate) capped: bool,
+    /// The tokens, sorted.
+    pub(crate) attributes: Vec<AttributeEntry>,
 }
 
 /// Error response structure
@@ -173,6 +202,10 @@ impl ApiServer {
                 self.handle_devices_paginated(limit, offset)
             }
             ("GET", "/device-types") => self.handle_device_types(),
+            ("GET", p) if Self::attributes_mac(p).is_some() => {
+                let mac = Self::attributes_mac(p).unwrap_or_default();
+                self.handle_device_attributes(&mac)
+            }
             ("GET", "/fingerprints/export") => self.handle_export_fingerprints(),
             ("PUT", p) | ("POST", p) if Self::classification_mac(p).is_some() => {
                 let mac = Self::classification_mac(p).unwrap_or_default();
@@ -409,6 +442,22 @@ impl ApiServer {
         Some(Self::percent_decode(mac))
     }
 
+    /// Extracts the MAC from `/devices/<mac>/attributes`, if that is the shape.
+    ///
+    /// Same rule as [`ApiServer::classification_mac`]: returning `None` for any
+    /// other path is what keeps this route from swallowing `/devices/<mac>`.
+    fn attributes_mac(path: &str) -> Option<String> {
+        let path = path.split('?').next().unwrap_or(path);
+        let rest = path
+            .strip_prefix("/devices/")
+            .or_else(|| path.strip_prefix("/device/"))?;
+        let mac = rest.strip_suffix("/attributes")?;
+        if mac.is_empty() || mac.contains('/') {
+            return None;
+        }
+        Some(Self::percent_decode(mac))
+    }
+
     /// Reads a request body, capped so a bad client cannot exhaust memory.
     fn read_body(request: &mut tiny_http::Request) -> std::io::Result<String> {
         const MAX_BODY: u64 = 8 * 1024;
@@ -518,6 +567,56 @@ impl ApiServer {
     ///
     /// Plain text rather than JSON, because the result is pasted straight into
     /// `make fingerprints-merge`. It carries no MAC, IP or hostname.
+    /// `GET /devices/<mac>/attributes` -- the raw fingerprint tokens.
+    ///
+    /// The `/devices` list carries only the packed hash, which says nothing
+    /// about *why* a device looks the way it does. This route answers that, and
+    /// it is the only way to read a token set without opening the database.
+    ///
+    /// A known device that has advertised nothing yet answers 200 with an empty
+    /// list, not 404: "no attributes yet" and "no such device" are different
+    /// facts and must not share a status code.
+    fn handle_device_attributes(&self, mac: &str) -> Response<std::io::Cursor<Vec<u8>>> {
+        let tracker = match self.tracker.read() {
+            Ok(tracker) => tracker,
+            Err(_) => return self.handle_error("Failed to acquire tracker lock"),
+        };
+
+        let Some(device) = tracker.get_device(mac) else {
+            drop(tracker);
+            return self.handle_not_found();
+        };
+        let fingerprint = device.fingerprint.clone();
+        let mac_address = device.mac_address.clone();
+
+        let log = tracker.attributes_for(mac);
+        let capped = log.is_some_and(|log| log.set().is_capped());
+        let attributes: Vec<AttributeEntry> = log
+            .into_iter()
+            .flat_map(|log| log.entries())
+            .map(|(token, times)| AttributeEntry {
+                namespace: TokenNamespace::of_token(token).map_or("Unknown", TokenNamespace::label),
+                core: TokenNamespace::of_token(token).is_some_and(TokenNamespace::is_core),
+                token: token.to_string(),
+                first_seen: format_timestamp(times.first_seen),
+                last_seen: format_timestamp(times.last_seen),
+            })
+            .collect();
+        drop(tracker);
+
+        let response = ApiResponse {
+            success: true,
+            count: attributes.len(),
+            data: AttributeSet {
+                mac_address,
+                fingerprint,
+                capped,
+                attributes,
+            },
+        };
+        Self::json_ok(&response)
+    }
+
     fn handle_export_fingerprints(&self) -> Response<std::io::Cursor<Vec<u8>>> {
         let tracker = match self.tracker.read() {
             Ok(tracker) => tracker,
@@ -690,6 +789,7 @@ mod tests {
     use crate::device::DeviceInfo;
     use std::io::{Read, Write};
     use std::net::TcpStream;
+    use std::time::SystemTime;
 
     fn get_http_body(response: &str) -> &str {
         if let Some(pos) = response.find("\r\n\r\n") {
@@ -847,6 +947,86 @@ mod tests {
                 .classification_for("aa:bb:cc:11:22:33")
                 .is_none()
         );
+
+        for suffix in ["", "-journal", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", path, suffix));
+        }
+    }
+
+    #[test]
+    fn test_the_attributes_route_is_told_apart_from_the_device_route() {
+        assert_eq!(
+            ApiServer::attributes_mac("/devices/aa:bb:cc:11:22:33/attributes"),
+            Some("aa:bb:cc:11:22:33".to_string())
+        );
+        assert_eq!(
+            ApiServer::attributes_mac("/device/aa%3Abb%3Acc%3A11%3A22%3A33/attributes"),
+            Some("aa:bb:cc:11:22:33".to_string())
+        );
+        // A plain device path, or the sibling route, must not be swallowed.
+        assert_eq!(
+            ApiServer::attributes_mac("/devices/aa:bb:cc:11:22:33"),
+            None
+        );
+        assert_eq!(
+            ApiServer::attributes_mac("/devices/aa:bb:cc:11:22:33/classification"),
+            None
+        );
+        assert_eq!(ApiServer::attributes_mac("/devices//attributes"), None);
+    }
+
+    #[test]
+    fn test_the_attributes_route_serves_the_tokens_behind_the_hash() {
+        let (path, tracker) = review_test_tracker("attributes");
+        {
+            let mut guard = tracker.write().unwrap();
+            let now = SystemTime::now();
+            // A second device, left with no attributes at all.
+            let bare = DeviceInfo::new(
+                "aa:bb:cc:44:55:66".to_string(),
+                "192.168.1.102".parse().unwrap(),
+                None,
+            );
+            guard.devices.insert(bare.mac_address.clone(), bare);
+            let log = guard
+                .attributes
+                .entry("aa:bb:cc:11:22:33".to_string())
+                .or_default();
+            log.record(TokenNamespace::AgentProduct, "sonos", now);
+            log.record(TokenNamespace::MdnsService, "_googlecast._tcp", now);
+        }
+        let addr = serve(Arc::clone(&tracker), false);
+
+        let response = http(
+            &addr,
+            "GET /devices/aa:bb:cc:11:22:33/attributes HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        );
+        let body = get_http_body(&response);
+        assert!(body.contains(r#""count":2"#), "{}", body);
+        assert!(body.contains(r#""namespace":"mDNS service""#), "{}", body);
+        // An agent product is reported, and reported as not core.
+        assert!(
+            body.contains(r#""token":"a:sonos","namespace":"Agent product","core":false"#),
+            "{}",
+            body
+        );
+        assert!(body.contains(r#""capped":false"#), "{}", body);
+
+        // A known device that has advertised nothing answers 200 with an empty
+        // list: "nothing yet" and "no such device" are different facts.
+        let bare = http(
+            &addr,
+            "GET /devices/aa:bb:cc:44:55:66/attributes HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        );
+        assert!(bare.starts_with("HTTP/1.1 200"), "{}", bare);
+        assert!(get_http_body(&bare).contains(r#""count":0"#), "{}", bare);
+
+        // An unknown device is a 404.
+        let missing = http(
+            &addr,
+            "GET /devices/99:99:99:99:99:99/attributes HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        );
+        assert!(missing.starts_with("HTTP/1.1 404"), "{}", missing);
 
         for suffix in ["", "-journal", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{}", path, suffix));

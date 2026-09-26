@@ -39,6 +39,14 @@ pub const MAX_TOKEN_LEN: usize = 128;
 /// Most tokens kept for one device.
 pub const MAX_TOKENS_PER_DEVICE: usize = 256;
 
+/// Most whitespace separated parts read from one agent header value.
+///
+/// A real `SERVER` or `USER-AGENT` header names at most a handful of products.
+/// The cap bounds both the work done per packet and the number of tokens a
+/// single header can add, so a padded header cannot push a device over
+/// [`MAX_TOKENS_PER_DEVICE`] and switch matching off for it.
+pub const MAX_AGENT_PARTS: usize = 16;
+
 /// Longest accepted catalogue line.
 pub const MAX_CATALOGUE_LINE: usize = 8192;
 
@@ -89,6 +97,8 @@ pub enum TokenNamespace {
     SsdpTarget,
     /// SSDP header name, e.g. `h:server`.
     SsdpHeader,
+    /// Product name from an SSDP `SERVER`/`USER-AGENT` header, e.g. `a:sonos`.
+    AgentProduct,
     /// DHCPv4 option 55 parameter request list, order preserved.
     DhcpOptionList,
     /// DHCPv4 option 60 / DHCPv6 option 16 vendor class.
@@ -109,6 +119,7 @@ impl TokenNamespace {
             TokenNamespace::MdnsTxtKey => "t:",
             TokenNamespace::SsdpTarget => "s:",
             TokenNamespace::SsdpHeader => "h:",
+            TokenNamespace::AgentProduct => "a:",
             TokenNamespace::DhcpOptionList => "d:",
             TokenNamespace::VendorClass => "v:",
             TokenNamespace::UserClass => "u:",
@@ -117,25 +128,49 @@ impl TokenNamespace {
         }
     }
 
+    /// A short human readable name for this namespace.
+    ///
+    /// The token itself carries only a one letter prefix, which is right for
+    /// storage and wrong for a person reading the API or the dashboard.
+    pub const fn label(self) -> &'static str {
+        match self {
+            TokenNamespace::MdnsService => "mDNS service",
+            TokenNamespace::MdnsTxtKey => "mDNS TXT key",
+            TokenNamespace::SsdpTarget => "SSDP target",
+            TokenNamespace::SsdpHeader => "SSDP header",
+            TokenNamespace::AgentProduct => "Agent product",
+            TokenNamespace::DhcpOptionList => "DHCP option list",
+            TokenNamespace::VendorClass => "Vendor class",
+            TokenNamespace::UserClass => "User class",
+            TokenNamespace::Enterprise => "Enterprise number",
+            TokenNamespace::Flag => "Flag",
+        }
+    }
+
     /// Whether this namespace contributes to the *core* hash.
     ///
     /// Core is "what protocols do I speak" and must survive a firmware update.
     /// TXT keys and SSDP header names are excluded because vendors add and
     /// remove them freely.
+    ///
+    /// Agent products are excluded for a different reason: a general purpose
+    /// host advertises them only while some application is running, so a
+    /// browser being opened would otherwise move the host's core hash.
     pub const fn is_core(self) -> bool {
         !matches!(
             self,
-            TokenNamespace::MdnsTxtKey | TokenNamespace::SsdpHeader
+            TokenNamespace::MdnsTxtKey | TokenNamespace::SsdpHeader | TokenNamespace::AgentProduct
         )
     }
 
     /// Recovers the namespace of an already built token.
     pub fn of_token(token: &str) -> Option<Self> {
-        const ALL: [TokenNamespace; 9] = [
+        const ALL: [TokenNamespace; 10] = [
             TokenNamespace::MdnsService,
             TokenNamespace::MdnsTxtKey,
             TokenNamespace::SsdpTarget,
             TokenNamespace::SsdpHeader,
+            TokenNamespace::AgentProduct,
             TokenNamespace::DhcpOptionList,
             TokenNamespace::VendorClass,
             TokenNamespace::UserClass,
@@ -611,6 +646,109 @@ pub fn collect_mdns_into<S: TokenSink>(records: &[MdnsRecord], sink: &mut S) {
     }
 }
 
+/// Headers whose value is an HTTP-style product list (rule 10).
+///
+/// `SERVER` comes from a responder and names its firmware stack. `USER-AGENT`
+/// comes from a searcher and names the operating system, and often the browser
+/// or application doing the search.
+#[cfg(feature = "ssdp")]
+const AGENT_HEADERS: [&str; 2] = ["server", "user-agent"];
+
+/// Removes `(...)` comments from an agent header value (rule 10).
+///
+/// A browser sends `Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120`. The
+/// comment is free text about the platform, and its punctuation would otherwise
+/// be dragged into the product names on either side of it.
+#[cfg(feature = "ssdp")]
+fn strip_agent_comments(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut depth = 0usize;
+    for ch in value.chars() {
+        match ch {
+            // The brackets become spaces so the products either side stay apart.
+            '(' => {
+                depth += 1;
+                out.push(' ');
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                out.push(' ');
+            }
+            _ if depth == 0 => out.push(ch),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Cleans one whitespace separated word of a product name (rule 10).
+///
+/// Returns `None` for a word that is not part of a product name. A word starts
+/// with a letter, which alone rejects a bare version such as `10.0`, and holds
+/// nothing but the characters a product name uses.
+#[cfg(feature = "ssdp")]
+fn agent_word(word: &str) -> Option<String> {
+    let word = normalize_ascii(word);
+    let word = word.trim();
+    if !word.starts_with(|c: char| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    if !word
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '!' | '+'))
+    {
+        return None;
+    }
+    Some(word.to_string())
+}
+
+/// Emits the gathered words as one product token, then clears them (rule 10).
+#[cfg(feature = "ssdp")]
+fn emit_agent_product<S: TokenSink>(words: &mut Vec<String>, sink: &mut S) {
+    if words.is_empty() {
+        return;
+    }
+    let joined = words.join("-");
+    words.clear();
+    let product = strip_version_suffix(&joined);
+    // One letter carries no signal and is far more likely to be a fragment.
+    if product.len() >= 2 {
+        sink.accept(TokenNamespace::AgentProduct, product);
+    }
+}
+
+/// Collects the product names out of one agent header value (rule 10).
+///
+/// A product name may be several words long: libupnp announces itself as
+/// `Portable SDK for UPnP devices/1.6.19`, which is one product, not five. The
+/// `/` is what ends a name, so words are gathered until one carries a version
+/// and only then joined into a token.
+#[cfg(feature = "ssdp")]
+fn collect_agent_products_into<S: TokenSink>(value: &str, sink: &mut S) {
+    let value = strip_agent_comments(value);
+    let mut words: Vec<String> = Vec::new();
+
+    for part in value.split_ascii_whitespace().take(MAX_AGENT_PARTS) {
+        match part.split_once('/') {
+            // `Product/Version` ends the name. The version is discarded, and
+            // the words gathered so far belong to this product.
+            Some((head, _)) => {
+                if let Some(word) = agent_word(head) {
+                    words.push(word);
+                }
+                emit_agent_product(&mut words, sink);
+            }
+            None => {
+                if let Some(word) = agent_word(part) {
+                    words.push(word);
+                }
+            }
+        }
+    }
+    // A trailing name with no version still names something, e.g. `Mac OS X`.
+    emit_agent_product(&mut words, sink);
+}
+
 /// Collects SSDP, UPnP and WSD attributes (§1).
 #[cfg(feature = "ssdp")]
 pub fn collect_ssdp_into<S: TokenSink>(packet: &SsdpPacket, sink: &mut S) {
@@ -623,6 +761,13 @@ pub fn collect_ssdp_into<S: TokenSink>(packet: &SsdpPacket, sink: &mut S) {
     for name in packet.headers.keys() {
         let normalized = normalize_ascii(name);
         sink.accept(TokenNamespace::SsdpHeader, normalized.trim());
+    }
+    // Header keys are lowercased when the packet is parsed, so these are hash
+    // lookups rather than a case-insensitive scan.
+    for name in AGENT_HEADERS {
+        if let Some(value) = packet.headers.get(name) {
+            collect_agent_products_into(value, sink);
+        }
     }
 }
 

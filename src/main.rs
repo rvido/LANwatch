@@ -36,6 +36,12 @@ const DB_FLUSH_BATCH_SIZE: usize = 32;
 const DB_FLUSH_INTERVAL_MS: u64 = 300;
 /// How often (in dropped events) to warn that the worker is falling behind.
 const DROPPED_EVENT_REPORT_INTERVAL: u64 = 1000;
+/// Shortest accepted `--query-interval`.
+///
+/// Active discovery puts multicast on the wire, so a typo such as `1` must not
+/// turn LANwatch into a flood source on the operator's own LAN.
+#[cfg(any(feature = "mdns", feature = "ssdp"))]
+const MIN_QUERY_INTERVAL: Duration = Duration::from_secs(30);
 
 fn main() {
     // Parse command line arguments
@@ -236,23 +242,38 @@ fn main() {
     #[cfg(feature = "mdns")]
     if config.enable_mdns && config.mdns_query {
         println!("Sending mDNS queries for service discovery...");
-        let interface_ip = lanwatch::get_interface_ipv4(&config.interface_name);
-        if let Ok(querier) = MdnsQuerier::new(interface_ip)
-            && let Err(e) = querier.query_common_services()
-        {
-            eprintln!("Warning: Failed to send mDNS queries: {}", e);
-        }
     }
 
     // Send active SSDP queries if enabled
     #[cfg(feature = "ssdp")]
     if config.enable_ssdp && config.ssdp_query {
         println!("Sending SSDP M-SEARCH discovery probes...");
-        let interface_ip = lanwatch::get_interface_ipv4(&config.interface_name);
-        if let Ok(querier) = SsdpQuerier::new(interface_ip)
-            && let Err(e) = querier.search_common_devices()
-        {
-            eprintln!("Warning: Failed to send SSDP queries: {}", e);
+    }
+
+    #[cfg(any(feature = "mdns", feature = "ssdp"))]
+    send_discovery_probes(&config);
+
+    // Repeat the probes on a timer when asked. One-shot probes only ever reach
+    // the devices that were awake and on the LAN in the first second, so a
+    // long-running capture needs to ask again.
+    #[cfg(any(feature = "mdns", feature = "ssdp"))]
+    if let Some(interval) = config.query_interval {
+        if config.active_probes_enabled() {
+            println!(
+                "Repeating active discovery probes every {}s",
+                interval.as_secs()
+            );
+            let probe_config = config.clone();
+            thread::spawn(move || {
+                loop {
+                    thread::sleep(interval);
+                    send_discovery_probes(&probe_config);
+                }
+            });
+        } else {
+            eprintln!(
+                "Warning: --query-interval does nothing without --mdns-query or --ssdp-query"
+            );
         }
     }
 
@@ -1162,6 +1183,10 @@ fn print_wsd_packet(packet: &lanwatch::WsdPacket, updated_count: usize, total: u
 }
 
 /// Configuration parsed from command line arguments
+///
+/// `Clone` because the repeat-probe thread needs its own copy; the fields are
+/// all small owned values, so a clone at startup costs nothing.
+#[derive(Clone)]
 struct Config {
     interface_name: String,
     db_path: String,
@@ -1179,6 +1204,9 @@ struct Config {
     enable_ssdp: bool,
     #[cfg(feature = "ssdp")]
     ssdp_query: bool,
+    /// How often to re-send the active probes. `None` means send them once.
+    #[cfg(any(feature = "mdns", feature = "ssdp"))]
+    query_interval: Option<Duration>,
     oui_file: Option<String>,
     /// Inline per-device classification overrides (`MAC=Type`).
     override_specs: Vec<String>,
@@ -1189,6 +1217,69 @@ struct Config {
     /// Where to write an attribute dump before exiting.
     dump_fingerprints: Option<String>,
     forget_mac: Option<String>,
+}
+
+impl Config {
+    /// Whether any active probe is switched on.
+    ///
+    /// A repeat interval with no probe enabled would spawn a thread that sends
+    /// nothing, so the caller checks this first.
+    #[cfg(any(feature = "mdns", feature = "ssdp"))]
+    fn active_probes_enabled(&self) -> bool {
+        let mut enabled = false;
+        #[cfg(feature = "mdns")]
+        {
+            enabled |= self.enable_mdns && self.mdns_query;
+        }
+        #[cfg(feature = "ssdp")]
+        {
+            enabled |= self.enable_ssdp && self.ssdp_query;
+        }
+        enabled
+    }
+}
+
+/// Parses a duration such as `90s`, `15m` or `2h`. A bare number means seconds.
+///
+/// Returns `None` for anything it cannot read, so the caller can refuse the
+/// argument rather than silently picking a value the operator did not ask for.
+#[cfg(any(feature = "mdns", feature = "ssdp"))]
+fn parse_duration(value: &str) -> Option<Duration> {
+    let value = value.trim();
+    // The suffix is matched as a byte, so slicing it off is always on a char
+    // boundary even when the rest of the string is not ASCII.
+    let (digits, multiplier) = match value.as_bytes().last()? {
+        b's' | b'S' => (&value[..value.len() - 1], 1),
+        b'm' | b'M' => (&value[..value.len() - 1], 60),
+        b'h' | b'H' => (&value[..value.len() - 1], 3600),
+        _ => (value, 1),
+    };
+    let amount: u64 = digits.trim().parse().ok()?;
+    amount.checked_mul(multiplier).map(Duration::from_secs)
+}
+
+/// Sends one round of active discovery probes.
+#[cfg(any(feature = "mdns", feature = "ssdp"))]
+fn send_discovery_probes(config: &Config) {
+    #[cfg(feature = "mdns")]
+    if config.enable_mdns && config.mdns_query {
+        let interface_ip = lanwatch::get_interface_ipv4(&config.interface_name);
+        if let Ok(querier) = MdnsQuerier::new(interface_ip)
+            && let Err(e) = querier.query_common_services()
+        {
+            eprintln!("Warning: Failed to send mDNS queries: {}", e);
+        }
+    }
+
+    #[cfg(feature = "ssdp")]
+    if config.enable_ssdp && config.ssdp_query {
+        let interface_ip = lanwatch::get_interface_ipv4(&config.interface_name);
+        if let Ok(querier) = SsdpQuerier::new(interface_ip)
+            && let Err(e) = querier.search_common_devices()
+        {
+            eprintln!("Warning: Failed to send SSDP queries: {}", e);
+        }
+    }
 }
 
 fn parse_args(args: &[String]) -> Config {
@@ -1208,6 +1299,8 @@ fn parse_args(args: &[String]) -> Config {
     let mut enable_ssdp = false;
     #[cfg(feature = "ssdp")]
     let mut ssdp_query = false;
+    #[cfg(any(feature = "mdns", feature = "ssdp"))]
+    let mut query_interval: Option<Duration> = None;
     let mut oui_file: Option<String> = None;
     let mut override_specs: Vec<String> = Vec::new();
     let mut overrides_file: Option<String> = None;
@@ -1290,6 +1383,41 @@ fn parse_args(args: &[String]) -> Config {
                     eprintln!("Error: --services requires a file path");
                     std::process::exit(1);
                 }
+            }
+            #[cfg(any(feature = "mdns", feature = "ssdp"))]
+            "--query-interval" => {
+                if i + 1 >= args.len() {
+                    eprintln!("Error: --query-interval requires a duration, e.g. 15m");
+                    std::process::exit(1);
+                }
+                match parse_duration(&args[i + 1]) {
+                    Some(interval) if interval >= MIN_QUERY_INTERVAL => {
+                        query_interval = Some(interval);
+                    }
+                    Some(_) => {
+                        eprintln!(
+                            "Error: --query-interval must be at least {}s",
+                            MIN_QUERY_INTERVAL.as_secs()
+                        );
+                        std::process::exit(1);
+                    }
+                    None => {
+                        eprintln!(
+                            "Error: --query-interval could not read '{}'. Use 90s, 15m or 2h.",
+                            args[i + 1]
+                        );
+                        std::process::exit(1);
+                    }
+                }
+                i += 2;
+            }
+            #[cfg(not(any(feature = "mdns", feature = "ssdp")))]
+            "--query-interval" => {
+                eprintln!(
+                    "Error: --query-interval requires a binary built with the 'mdns' or 'ssdp' feature."
+                );
+                eprintln!("Rebuild with: cargo build --release --features mdns,ssdp");
+                std::process::exit(1);
             }
             "-u" | "--oui" => {
                 if i + 1 < args.len() {
@@ -1393,6 +1521,8 @@ fn parse_args(args: &[String]) -> Config {
         enable_ssdp,
         #[cfg(feature = "ssdp")]
         ssdp_query,
+        #[cfg(any(feature = "mdns", feature = "ssdp"))]
+        query_interval,
         oui_file,
         fingerprints_file,
         dump_fingerprints,
@@ -1450,6 +1580,13 @@ fn print_usage() {
         println!("  -p, --ssdp             Enable SSDP/UPnP sniffing for device discovery");
         println!("  --ssdp-query           Enable SSDP and send active M-SEARCH discovery probes");
         println!("  --upnp                 Alias for --ssdp");
+    }
+    #[cfg(any(feature = "mdns", feature = "ssdp"))]
+    {
+        println!(
+            "  --query-interval <DUR> Re-send the active probes every DUR (90s, 15m, 2h; min {}s)",
+            MIN_QUERY_INTERVAL.as_secs()
+        );
     }
     println!("  -h, --help             Show this help message");
     println!();
@@ -1613,5 +1750,35 @@ fn handle_download_oui(args: &[String]) {
             eprintln!("You can manually download from: {}", IEEE_OUI_URL);
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg(any(feature = "mdns", feature = "ssdp"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_a_query_interval_reads_seconds_minutes_and_hours() {
+        assert_eq!(parse_duration("90"), Some(Duration::from_secs(90)));
+        assert_eq!(parse_duration("90s"), Some(Duration::from_secs(90)));
+        assert_eq!(parse_duration("15m"), Some(Duration::from_secs(900)));
+        assert_eq!(parse_duration("2h"), Some(Duration::from_secs(7200)));
+        // The suffix is accepted in either case, and stray space is trimmed.
+        assert_eq!(parse_duration(" 15M "), Some(Duration::from_secs(900)));
+    }
+
+    #[test]
+    fn test_an_unreadable_query_interval_is_refused() {
+        // Refused, never guessed at: a silent fallback would send probes on an
+        // interval the operator did not ask for.
+        assert_eq!(parse_duration(""), None);
+        assert_eq!(parse_duration("m"), None);
+        assert_eq!(parse_duration("soon"), None);
+        assert_eq!(parse_duration("-5m"), None);
+        assert_eq!(parse_duration("1.5h"), None);
+        // Overflow must not wrap round to a tiny interval.
+        assert_eq!(parse_duration("99999999999999999999h"), None);
+        assert_eq!(parse_duration(&format!("{}h", u64::MAX)), None);
     }
 }

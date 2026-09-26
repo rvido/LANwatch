@@ -17,6 +17,8 @@ mod tests {
         MAX_CATALOGUE_LINE, MAX_TOKEN_LEN, MAX_TOKENS_PER_DEVICE, MIN_TOKENS_FOR_MATCH,
         collect_dhcpv4_tokens, collect_dhcpv6_tokens,
     };
+    #[cfg(feature = "ssdp")]
+    use crate::fingerprint::{MAX_AGENT_PARTS, collect_ssdp_tokens};
     use crate::parser::dhcp::extract_mac_from_duid;
 
     /// Ethernet source MAC for synthetic DHCPv6 frames whose identity is
@@ -5387,6 +5389,158 @@ mod tests {
         core_only.insert(TokenNamespace::SsdpHeader, "server");
         assert!(catalogue.match_tokens(&core_only, false, None).is_none());
         assert!(catalogue.match_tokens(&core_only, true, None).is_some());
+    }
+
+    /// An SSDP packet carrying nothing but the headers under test.
+    #[cfg(feature = "ssdp")]
+    fn ssdp_packet_with_headers(pairs: &[(&str, &str)]) -> SsdpPacket {
+        let mut headers = HashMap::new();
+        for (name, value) in pairs {
+            headers.insert((*name).to_string(), (*value).to_string());
+        }
+        SsdpPacket {
+            source_mac: [0; 6],
+            source_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 7, 10)),
+            dest_ip: IpAddr::V4(Ipv4Addr::new(239, 255, 255, 250)),
+            message_type: SsdpMessageType::Notify,
+            start_line: "NOTIFY * HTTP/1.1".to_string(),
+            headers,
+        }
+    }
+
+    /// The tokens of one namespace, for a focused assertion.
+    #[cfg(feature = "ssdp")]
+    fn tokens_with_prefix(set: &TokenSet, prefix: &str) -> Vec<String> {
+        set.tokens()
+            .filter(|token| token.starts_with(prefix))
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_ssdp_server_header_names_the_firmware_stack() {
+        let packet =
+            ssdp_packet_with_headers(&[("server", "Linux/3.14.29 UPnP/1.0 Sonos/84.1-64200")]);
+        let mut set = TokenSet::new();
+        collect_ssdp_tokens(&packet, &mut set);
+
+        assert_eq!(
+            tokens_with_prefix(&set, "a:"),
+            ["a:linux", "a:sonos", "a:upnp"]
+        );
+        // The header name is still collected, under its own namespace.
+        assert!(set.contains("h:server"));
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_ssdp_user_agent_header_names_the_searching_host() {
+        let packet = ssdp_packet_with_headers(&[(
+            "user-agent",
+            "Microsoft-Windows/10.0 UPnP/1.0 Device-Plug-and-Play/1.0",
+        )]);
+        let mut set = TokenSet::new();
+        collect_ssdp_tokens(&packet, &mut set);
+
+        assert_eq!(
+            tokens_with_prefix(&set, "a:"),
+            ["a:device-plug-and-play", "a:microsoft-windows", "a:upnp"]
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_an_agent_header_drops_versions_and_punctuation() {
+        // A browser sends its full HTTP user agent, comment included. The
+        // comment is free text about the platform, so it is removed whole
+        // rather than being picked over word by word.
+        let packet = ssdp_packet_with_headers(&[(
+            "user-agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0",
+        )]);
+        let mut set = TokenSet::new();
+        collect_ssdp_tokens(&packet, &mut set);
+
+        let agents = tokens_with_prefix(&set, "a:");
+        assert!(agents.contains(&"a:mozilla".to_string()));
+        assert!(agents.contains(&"a:chrome".to_string()));
+        // No version, and nothing holding punctuation from the comment.
+        for token in &agents {
+            assert!(!token.contains(['(', ')', ';', '/']));
+            assert!(!token.contains("120"));
+            assert!(!token.contains("5.0"));
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_a_multi_word_product_name_stays_one_token() {
+        // libupnp announces itself like this. `Portable SDK for UPnP devices`
+        // is one product, not five words, and `for` is not an attribute.
+        let packet = ssdp_packet_with_headers(&[(
+            "server",
+            "Linux/3.8.13 UPnP/1.0 Portable SDK for UPnP devices/1.6.19",
+        )]);
+        let mut set = TokenSet::new();
+        collect_ssdp_tokens(&packet, &mut set);
+
+        assert_eq!(
+            tokens_with_prefix(&set, "a:"),
+            ["a:linux", "a:portable-sdk-for-upnp-devices", "a:upnp"]
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_a_trailing_name_with_no_version_is_still_kept() {
+        let packet =
+            ssdp_packet_with_headers(&[("user-agent", "Google Chrome/120.0.0.0 Mac OS X")]);
+        let mut set = TokenSet::new();
+        collect_ssdp_tokens(&packet, &mut set);
+
+        assert_eq!(
+            tokens_with_prefix(&set, "a:"),
+            ["a:google-chrome", "a:mac-os-x"]
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_a_padded_agent_header_cannot_flood_the_token_set() {
+        // A device is never matched once its set is capped, so a long header
+        // must not be able to push it there.
+        let names: Vec<String> = (0..MAX_AGENT_PARTS * 3)
+            .map(|index| {
+                format!(
+                    "p{}{}/1.0",
+                    (b'a' + (index / 26) as u8) as char,
+                    (b'a' + (index % 26) as u8) as char
+                )
+            })
+            .collect();
+        let packet = ssdp_packet_with_headers(&[("server", &names.join(" "))]);
+        let mut set = TokenSet::new();
+        collect_ssdp_tokens(&packet, &mut set);
+
+        assert_eq!(tokens_with_prefix(&set, "a:").len(), MAX_AGENT_PARTS);
+        assert!(!set.is_capped());
+    }
+
+    #[test]
+    fn test_an_agent_product_moves_the_full_hash_but_not_the_core_hash() {
+        // An application being opened must not move the host's core hash.
+        let mut base = TokenSet::new();
+        base.insert(TokenNamespace::MdnsService, "_googlecast._tcp");
+        let mut with_agent = base.clone();
+        assert!(with_agent.insert(TokenNamespace::AgentProduct, "chrome"));
+
+        assert_eq!(base.fingerprint().core, with_agent.fingerprint().core);
+        assert_ne!(base.fingerprint().full, with_agent.fingerprint().full);
+        assert_eq!(
+            TokenNamespace::of_token("a:chrome"),
+            Some(TokenNamespace::AgentProduct)
+        );
     }
 
     #[test]
