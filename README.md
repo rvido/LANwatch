@@ -538,6 +538,7 @@ When started with `--api` or `--api-default`, the tool exposes a REST API for qu
 | `/devices/{mac}/attributes` | GET | The raw fingerprint tokens behind that device's hash |
 | `/device-types` | GET | Every canonical device type name, for a picker |
 | `/fingerprints/export` | GET | The reviewed devices as a shareable catalogue file |
+| `/favicon.ico` | GET | The dashboard's tab icon (the same embedded PNG as `/logo.png`) |
 | `/health` | GET | Health check endpoint |
 
 > **The API has no authentication.** Start with `--api-readonly` to refuse every write
@@ -619,6 +620,7 @@ LANwatch features a premium web-based dashboard accessible directly at `http://l
 - **Scope-based IP Classification**: In the inspection drawer, addresses are clearly organized and labeled by scope (`IPv4`, `IPv6 Link-Local`, `IPv6 Unique Local`, `IPv6 Global`).
 - **Secure Context Clipboard Fallback**: Integrated copy-to-clipboard buttons for all IP and MAC addresses that work seamlessly in both secure contexts (HTTPS/localhost) and insecure contexts (HTTP/remote IP) with visual green success animations.
 - **Remove / Flush Devices**: Each device tile and the inspection drawer offer a "Remove Device" action, and a toolbar "Flush All" button clears the entire tracked list — both gated behind a confirmation prompt.
+- **App Icon**: The dashboard declares a tab icon and an `apple-touch-icon`, so a browser tab shows the LANwatch mark instead of its blank placeholder, and "Add to Home Screen" on a phone gets the same mark. The icon is the PNG already compiled into the binary and served from `/logo.png`, so it works on a host with no route to the internet. `/favicon.ico` answers with the same image, for clients that ask for it regardless of what the page declares.
 
 ![Device Inspection Info](assets/lanwatch_dashboard_device_info_blurred.jpg)
 

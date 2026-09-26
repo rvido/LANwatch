@@ -192,6 +192,11 @@ impl ApiServer {
             ("GET", "/health") => self.handle_health(),
             ("GET", "/") => self.handle_root(),
             ("GET", "/logo.png") => self.handle_logo(),
+            // A browser asks for /favicon.ico on its own, and some clients ask
+            // for it whatever the page's <link> says. Answering with the same
+            // embedded PNG keeps a 404 out of the log; the served Content-Type,
+            // not the path's extension, is what the browser decodes.
+            ("GET", "/favicon.ico") => self.handle_logo(),
             ("GET", p)
                 if p == "/devices"
                     || p.starts_with("/devices?")
@@ -722,6 +727,9 @@ impl ApiServer {
 
     /// Serves the LANwatch logo, compiled into the binary so the dashboard is
     /// fully self-contained with no external asset dependencies.
+    ///
+    /// Also answers `/favicon.ico`, so the dashboard has a tab icon and a
+    /// home-screen icon on a host with no route to the internet.
     fn handle_logo(&self) -> Response<std::io::Cursor<Vec<u8>>> {
         let bytes = include_bytes!("../assets/lanwatch_logo_icon.png").to_vec();
         Response::from_data(bytes)
@@ -1182,6 +1190,12 @@ mod tests {
             assert!(!body.contains("{{VERSION}}"));
             // The dashboard references the embedded logo endpoint.
             assert!(body.contains("/logo.png"));
+            // The tab and home-screen icon must be declared, or the browser
+            // shows its blank placeholder for the dashboard.
+            assert!(body.contains(
+                r#"<link rel="icon" type="image/png" sizes="128x128" href="/logo.png">"#
+            ));
+            assert!(body.contains(r#"<link rel="apple-touch-icon" href="/logo.png">"#));
         }
 
         // 7b. Test /logo.png (embedded binary asset)
@@ -1210,6 +1224,35 @@ mod tests {
             assert!(
                 body.windows(png_magic.len()).any(|w| w == png_magic),
                 "logo response body must contain PNG data"
+            );
+        }
+
+        // 7c. Test /favicon.ico, which a browser asks for on its own
+        {
+            let mut stream = TcpStream::connect(&bound_addr).unwrap();
+            stream
+                .write_all(
+                    b"GET /favicon.ico HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            // Read bytes, not a String: the body is a PNG and is not valid UTF-8.
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).unwrap();
+
+            let sep = b"\r\n\r\n";
+            let header_end = response
+                .windows(sep.len())
+                .position(|w| w == sep)
+                .expect("response must have a header/body separator");
+            let headers = String::from_utf8_lossy(&response[..header_end]);
+            assert!(headers.contains("200 OK"), "{}", headers);
+            assert!(headers.contains("Content-Type: image/png"), "{}", headers);
+
+            let body = &response[header_end + sep.len()..];
+            let png_magic = b"\x89PNG\r\n\x1a\n";
+            assert!(
+                body.windows(png_magic.len()).any(|w| w == png_magic),
+                "favicon response body must contain PNG data"
             );
         }
 
