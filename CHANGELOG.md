@@ -8,6 +8,20 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Entries before v0.11.0 are summarised from the commit history; only the releases
 that changed behaviour are listed.
 
+## [0.18.1] - 2026-09-25
+
+### Fixed
+
+- **The dashboard had no tab icon.** The page declared no `<link rel="icon">`, so
+  every browser tab showed its blank placeholder even though the binary already
+  carried a logo PNG and served it at `/logo.png`.
+  - `rel="icon"` and `rel="apple-touch-icon"` both point at that endpoint, and a
+    `theme-color` meta matches the dashboard background. Nothing is fetched from
+    the internet, so the icon works on an air-gapped host.
+  - `/favicon.ico` now answers with the same embedded PNG, for clients that ask
+    for that path regardless of what the page declares. The served
+    `Content-Type`, not the path's extension, is what the browser decodes.
+
 ## [0.18.0] - 2026-09-25
 
 ### Added
@@ -301,7 +315,9 @@ that changed behaviour are listed.
 - Table-driven matching for the mDNS and SSDP heuristics.
 - Feature-gated `MODEL_RULES` to prevent `dead_code` warnings.
 
-[Unreleased]: https://github.com/rvido/lanwatch/compare/v0.17.2...HEAD
+[Unreleased]: https://github.com/rvido/lanwatch/compare/v0.18.1...HEAD
+[0.18.1]: https://github.com/rvido/lanwatch/compare/v0.18.0...v0.18.1
+[0.18.0]: https://github.com/rvido/lanwatch/compare/v0.17.2...v0.18.0
 [0.17.2]: https://github.com/rvido/lanwatch/compare/v0.17.1...v0.17.2
 [0.17.1]: https://github.com/rvido/lanwatch/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/rvido/lanwatch/compare/v0.16.0...v0.17.0
