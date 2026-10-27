@@ -51,10 +51,10 @@ Add to your `Cargo.toml`. The `http-api` feature is opt-in to keep binary size s
 ```toml
 [dependencies]
 # Smallest binary footprint, core DHCP & MAC tracking only
-lanwatch = "0.18"
+lanwatch = "0.19"
 
 # With HTTP API server and active discovery protocols
-lanwatch = { version = "0.18", features = ["http-api", "mdns", "ssdp"] }
+lanwatch = { version = "0.19", features = ["http-api", "mdns", "ssdp"] }
 ```
 
 Or clone and build from source. Release builds are automatically optimized for size (`opt-level = "z"`, `strip = true`, `panic = "abort"`):
@@ -72,8 +72,29 @@ cargo build --release --all-features
 
 ## Upgrading
 
-LANwatch is pre-1.0, so minor versions may break API compatibility. Only
-library consumers are affected; the CLI and its flags are unchanged.
+LANwatch is pre-1.0, so minor versions may break API compatibility. Unless a
+section below says otherwise, only library consumers are affected; the CLI and
+its flags are unchanged.
+
+### 0.18 → 0.19
+
+**Action may be required if you open the dashboard by name.** The API now
+serves a request only when its `Host` header is an IP address, `localhost`, or
+a name you add with `--api-host`. This blocks DNS rebinding. If you open
+`http://raspberrypi.local:8080`, start LANwatch with
+`--api-host raspberrypi.local`, or the dashboard answers `403`. No stored data
+is reset.
+
+Two things are worth knowing:
+
+- **Classification writes need a JSON content type.** `PUT`/`POST
+  /devices/<mac>/classification` now answer `415` without
+  `Content-Type: application/json`. The bundled dashboard already sends it; a
+  script that calls the API may need the header added.
+- **A product name is now the device's display name.** In the dashboard, the
+  name you set beats the hostname the device announces. Library code is
+  unaffected: `start_api_server_with_hosts` and `ApiServer::add_allowed_host`
+  are new, and nothing existing changed.
 
 ### 0.17 → 0.18
 
