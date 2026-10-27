@@ -5,7 +5,7 @@
 // See LICENSE file for details.
 
 #[cfg(feature = "http-api")]
-use lanwatch::start_api_server_with_options;
+use lanwatch::start_api_server_with_hosts;
 use lanwatch::{
     DeviceTracker, DeviceType, DhcpEvent, DhcpSniffer, Dhcpv6Option, FingerprintCatalogue,
     IEEE_OUI_URL, OuiRegistry, download_ieee_oui, list_interfaces,
@@ -227,7 +227,12 @@ fn main() {
     #[cfg(feature = "http-api")]
     if let Some(addr) = &config.api_addr {
         let tracker_clone = Arc::clone(&tracker);
-        match start_api_server_with_options(addr, tracker_clone, config.api_read_only) {
+        match start_api_server_with_hosts(
+            addr,
+            tracker_clone,
+            config.api_read_only,
+            &config.api_hosts,
+        ) {
             Ok(_) => {
                 println!("API server started on http://{}", addr);
                 if config.api_read_only {
@@ -1194,6 +1199,8 @@ struct Config {
     api_addr: Option<String>,
     #[cfg(feature = "http-api")]
     api_read_only: bool,
+    #[cfg(feature = "http-api")]
+    api_hosts: Vec<String>,
     #[cfg(feature = "mdns")]
     enable_mdns: bool,
     #[cfg(feature = "mdns")]
@@ -1289,6 +1296,8 @@ fn parse_args(args: &[String]) -> Config {
     let mut api_addr: Option<String> = None;
     #[cfg(feature = "http-api")]
     let mut api_read_only = false;
+    #[cfg(feature = "http-api")]
+    let mut api_hosts: Vec<String> = Vec::new();
     #[cfg(feature = "mdns")]
     let mut enable_mdns = false;
     #[cfg(feature = "mdns")]
@@ -1339,6 +1348,16 @@ fn parse_args(args: &[String]) -> Config {
             "--api-readonly" | "--api-read-only" => {
                 api_read_only = true;
                 i += 1;
+            }
+            #[cfg(feature = "http-api")]
+            "--api-host" => {
+                if i + 1 < args.len() && !args[i + 1].starts_with('-') {
+                    api_hosts.push(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    eprintln!("Error: --api-host requires a host name");
+                    std::process::exit(1);
+                }
             }
             #[cfg(feature = "mdns")]
             "-m" | "--mdns" => {
@@ -1511,6 +1530,8 @@ fn parse_args(args: &[String]) -> Config {
         api_addr,
         #[cfg(feature = "http-api")]
         api_read_only,
+        #[cfg(feature = "http-api")]
+        api_hosts,
         #[cfg(feature = "mdns")]
         enable_mdns,
         #[cfg(feature = "mdns")]
@@ -1568,6 +1589,8 @@ fn print_usage() {
         println!("  -a, --api <ADDR:PORT>  Start HTTP API server (e.g., 127.0.0.1:8080)");
         println!("  --api-default          Start HTTP API on default address (127.0.0.1:8080)");
         println!("  --api-readonly         Refuse every API write (edits, deletes)");
+        println!("  --api-host <NAME>      Also serve requests for this host name (repeatable;");
+        println!("                         IP addresses and localhost are always served)");
     }
     #[cfg(feature = "mdns")]
     {

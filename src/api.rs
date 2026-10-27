@@ -34,6 +34,10 @@ pub struct ApiServer {
     /// The API has no authentication, so a LANwatch reachable beyond a trusted
     /// network should not accept writes.
     read_only: bool,
+    /// Host names, besides IP literals and `localhost`, a request may name.
+    ///
+    /// Stored lowercase without a trailing dot. See [`Self::host_allowed`].
+    allowed_hosts: Vec<String>,
 }
 
 /// Body of `PUT /devices/<mac>/classification`.
@@ -106,12 +110,52 @@ impl ApiServer {
             tracker,
             cache: Arc::new(Mutex::new(None)),
             read_only: false,
+            allowed_hosts: Vec::new(),
         })
     }
 
     /// Refuses every state-changing route with 403.
     pub fn set_read_only(&mut self, enabled: bool) {
         self.read_only = enabled;
+    }
+
+    /// Accepts one more host name in the `Host` header, e.g. `raspberrypi.local`.
+    pub fn add_allowed_host(&mut self, host: &str) {
+        let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+        if !host.is_empty() && !self.allowed_hosts.contains(&host) {
+            self.allowed_hosts.push(host);
+        }
+    }
+
+    /// Whether the request's `Host` header names this server.
+    ///
+    /// This is the guard against DNS rebinding: a hostile page re-points its
+    /// own name at `127.0.0.1`, and the browser then treats this API as the
+    /// page's own origin, free to read and delete. Its `Host` header still
+    /// carries the hostile name, so only IP literals, `localhost` and the names
+    /// added with [`Self::add_allowed_host`] are served. A request with no
+    /// `Host` at all (HTTP/1.0) is allowed; browsers always send one.
+    fn host_allowed(&self, request: &tiny_http::Request) -> bool {
+        let Some(header) = request.headers().iter().find(|h| h.field.equiv("Host")) else {
+            return true;
+        };
+        let value = header.value.as_str().trim();
+        // `[::1]:8080` -> `::1`; `name:8080` -> `name`. A bare IPv6 literal
+        // has more than one colon and no port to strip.
+        let host = if let Some(rest) = value.strip_prefix('[') {
+            match rest.split_once(']') {
+                Some((inside, _)) => inside,
+                None => return false,
+            }
+        } else if value.matches(':').count() > 1 {
+            value
+        } else {
+            value.split(':').next().unwrap_or(value)
+        };
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        host.parse::<std::net::IpAddr>().is_ok()
+            || host == "localhost"
+            || self.allowed_hosts.contains(&host)
     }
 
     /// Starts the API server request handling loop using a thread pool.
@@ -184,6 +228,18 @@ impl ApiServer {
         &self,
         request: &mut tiny_http::Request,
     ) -> Response<std::io::Cursor<Vec<u8>>> {
+        if !self.host_allowed(request) {
+            return Self::json(
+                403,
+                serde_json::to_string(&ApiError {
+                    success: false,
+                    error: "Host not allowed; start LANwatch with --api-host <NAME> to accept it"
+                        .to_string(),
+                })
+                .unwrap_or_default(),
+            );
+        }
+
         let path = request.url().to_string();
         let method = request.method().as_str().to_string();
 
@@ -474,6 +530,23 @@ impl ApiServer {
         Ok(body)
     }
 
+    /// Whether the request declares a JSON body.
+    ///
+    /// A page on any other site can send a cross-origin `POST` with a
+    /// `text/plain` body and no CORS preflight, so without this check it could
+    /// rewrite a device's classification. `application/json` forces a
+    /// preflight, and this server answers no `OPTIONS`, so the browser stops it.
+    fn is_json_request(request: &tiny_http::Request) -> bool {
+        request.headers().iter().any(|h| {
+            h.field.equiv("Content-Type")
+                && h.value
+                    .as_str()
+                    .split(';')
+                    .next()
+                    .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("application/json"))
+        })
+    }
+
     /// Answers 403 when the server was started read-only.
     fn refuse_write(&self) -> Option<Response<std::io::Cursor<Vec<u8>>>> {
         self.read_only.then(|| {
@@ -509,6 +582,16 @@ impl ApiServer {
     ) -> Response<std::io::Cursor<Vec<u8>>> {
         if let Some(refusal) = self.refuse_write() {
             return refusal;
+        }
+        if !Self::is_json_request(request) {
+            return Self::json(
+                415,
+                serde_json::to_string(&ApiError {
+                    success: false,
+                    error: "Content-Type must be application/json".to_string(),
+                })
+                .unwrap_or_default(),
+            );
         }
 
         let body = match Self::read_body(request) {
@@ -784,8 +867,25 @@ pub fn start_api_server_with_options(
     tracker: Arc<RwLock<DeviceTracker>>,
     read_only: bool,
 ) -> std::io::Result<thread::JoinHandle<()>> {
+    start_api_server_with_hosts(addr, tracker, read_only, &[])
+}
+
+/// Starts the API server, optionally refusing every write, and also serving
+/// requests whose `Host` header names one of `allowed_hosts`.
+///
+/// IP literals and `localhost` are always served; any other name is refused
+/// to block DNS rebinding.
+pub fn start_api_server_with_hosts(
+    addr: &str,
+    tracker: Arc<RwLock<DeviceTracker>>,
+    read_only: bool,
+    allowed_hosts: &[String],
+) -> std::io::Result<thread::JoinHandle<()>> {
     let mut server = ApiServer::new(addr, tracker)?;
     server.set_read_only(read_only);
+    for host in allowed_hosts {
+        server.add_allowed_host(host);
+    }
     Ok(thread::spawn(move || {
         server.run();
     }))
@@ -911,6 +1011,83 @@ mod tests {
              Connection: close\r\n\r\n",
         );
         assert!(again.starts_with("HTTP/1.1 404"), "{}", again);
+
+        for suffix in ["", "-journal", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", path, suffix));
+        }
+    }
+
+    #[test]
+    fn test_only_known_hosts_are_served() {
+        let (path, tracker) = review_test_tracker("rebind");
+        let mut api_server = ApiServer::new("127.0.0.1:0", Arc::clone(&tracker)).unwrap();
+        api_server.add_allowed_host("RaspberryPi.local.");
+        let addr = api_server.server.server_addr().to_string();
+        std::thread::spawn(move || {
+            for mut request in api_server.server.incoming_requests() {
+                let response = api_server.handle_request(&mut request);
+                let _ = request.respond(response);
+            }
+        });
+
+        let get = |host: &str| {
+            http(
+                &addr,
+                &format!(
+                    "GET /devices/count HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+                    host
+                ),
+            )
+        };
+        for host in [
+            "localhost:8080",
+            "127.0.0.1:8080",
+            "192.168.1.5",
+            "[::1]:8080",
+            "raspberrypi.local",
+        ] {
+            let response = get(host);
+            assert!(
+                response.starts_with("HTTP/1.1 200"),
+                "{}: {}",
+                host,
+                response
+            );
+        }
+        // A rebinding page's own name, even when it resolves to this machine.
+        for host in ["evil.example:8080", "localhost.evil.example", "[::1"] {
+            let response = get(host);
+            assert!(
+                response.starts_with("HTTP/1.1 403"),
+                "{}: {}",
+                host,
+                response
+            );
+        }
+
+        for suffix in ["", "-journal", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", path, suffix));
+        }
+    }
+
+    #[test]
+    fn test_a_classification_write_without_a_json_content_type_is_refused() {
+        let (path, tracker) = review_test_tracker("csrf");
+        let addr = serve(Arc::clone(&tracker), false);
+
+        // The body a cross-site form or `text/plain` fetch would send.
+        let body = r#"{"label":"Forged"}"#;
+        let refused = http(
+            &addr,
+            &format!(
+                "POST /devices/aa:bb:cc:11:22:33/classification HTTP/1.1\r\nHost: localhost\r\n\
+                 Content-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            ),
+        );
+        assert!(refused.starts_with("HTTP/1.1 415"), "{}", refused);
+        assert_eq!(tracker.read().unwrap().override_count(), 0);
 
         for suffix in ["", "-journal", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{}", path, suffix));

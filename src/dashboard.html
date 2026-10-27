@@ -988,6 +988,8 @@
         // this, so the list, the modal and the remove dialog cannot disagree.
         function deviceDisplayName(device) {
             if (!device) return 'this device';
+            // A person's own name for the device beats anything it announces.
+            if (device.product_label) return device.product_label;
             if (device.hostname) return device.hostname;
             if (device.vendor === 'Private MAC Address') {
                 // A randomised MAC names no manufacturer, so "Private MAC
@@ -1502,7 +1504,8 @@
             if (device.product_label) {
                 const badge = document.createElement('span');
                 badge.className = 'reviewed-badge';
-                badge.textContent = device.product_label;
+                // The label is already the title, so the badge only marks it.
+                badge.textContent = '\u2713 Reviewed';
                 titleEl.appendChild(badge);
             }
             document.getElementById('modal-subtitle').textContent = `${device.device_type || 'Generic Device'} / ${device.vendor || 'Unknown Vendor'}`;

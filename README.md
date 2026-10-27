@@ -544,6 +544,10 @@ When started with `--api` or `--api-default`, the tool exposes a REST API for qu
 > **The API has no authentication.** Start with `--api-readonly` to refuse every write
 > (`PUT`, and both `DELETE` routes) whenever the listener is reachable beyond a trusted network.
 
+> **Host names.** To block DNS rebinding, the API serves a request only when its `Host`
+> header is an IP address or `localhost`. To open the dashboard by name, add each name with
+> `--api-host`, e.g. `--api-host raspberrypi.local`. Other names get `403`.
+
 > **Note:** Removal only clears current state (in-memory and the database row). Discovery
 > is passive and keyed solely by MAC address, so a device still active on the LAN will simply
 > reappear as a new entry the next time it's observed (DHCP renewal, ARP, mDNS, etc.).

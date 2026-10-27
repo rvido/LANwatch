@@ -8,6 +8,36 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Entries before v0.11.0 are summarised from the commit history; only the releases
 that changed behaviour are listed.
 
+## [Unreleased]
+
+### Added
+
+- **`--api-host <NAME>`** adds a host name the API will serve, e.g.
+  `--api-host raspberrypi.local`. The flag can be given more than once. Library
+  users get the same through `ApiServer::add_allowed_host` and the new
+  `start_api_server_with_hosts`.
+
+### Fixed
+
+- **A product name set in the dashboard did not rename the device.** The tile
+  and the details title still showed the device's hostname (e.g. `Android`).
+  The product name now comes first, before the hostname and vendor.
+
+### Security
+
+- **The API is no longer open to DNS rebinding.** A hostile page could point
+  its own name at `127.0.0.1`; the browser then treated the API as the page's
+  own origin, so the page could read every device and `DELETE /devices`. The API
+  now serves a request only when its `Host` header is an IP address,
+  `localhost`, or a name added with `--api-host`. Any other name gets `403`.
+  - **This can break your setup.** If you open the dashboard by name (for
+    example `http://raspberrypi.local:8080`), add that name with `--api-host`.
+- **A page on another site could rewrite a device's classification.** A
+  cross-origin `POST` with a `text/plain` body needs no CORS preflight, and the
+  API parsed the body whatever its type. `PUT`/`POST
+  /devices/<mac>/classification` now require `Content-Type: application/json`
+  and answer `415` otherwise. The dashboard already sends that header.
+
 ## [0.18.1] - 2026-09-25
 
 ### Fixed

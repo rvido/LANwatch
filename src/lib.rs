@@ -49,7 +49,9 @@ pub use types::*;
 pub use mdns_registry::{MdnsServiceInfo, MdnsServiceRegistry};
 
 #[cfg(feature = "http-api")]
-pub use api::{ApiServer, start_api_server, start_api_server_with_options};
+pub use api::{
+    ApiServer, start_api_server, start_api_server_with_hosts, start_api_server_with_options,
+};
 
 // Include the unit tests
 #[cfg(test)]
