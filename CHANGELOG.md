@@ -36,8 +36,22 @@ that changed behaviour are listed.
   **Trusted** badge. The details window has a trust button and the device's
   recent history. The toolbar has **Trust All**, and a **Recent activity**
   panel lists the latest events.
-- **Two new fields in device JSON:** `trusted` and `online`. Library code that
-  builds a `DeviceInfo` with a struct literal must set them.
+- **Random-MAC merging.** A phone or laptop that changes its private MAC
+  address is recognised by its hostname, and its old record is folded into the
+  new one. The label, classification, trust mark, first-seen date and history
+  carry over. Strict rules refuse any doubtful case: both MACs private, a
+  distinctive hostname, no time overlap, no other device with that name, and
+  no conflicting DHCP signature.
+  - Every merge is logged in the new `device_merges` table and reported as a
+    `merged` event. The hook always gets it, even with `--untrusted-only`,
+    because a merge can carry trust. `LANWATCH_PREVIOUS_MAC` names the old
+    address.
+  - A random-MAC device without a hostname waits up to 60 seconds before it
+    is reported as `new`.
+  - On by default. `--no-mac-merge` switches it off. A merge cannot be undone.
+  - The dashboard shows old addresses under **Also seen as**.
+- **Three new fields in device JSON:** `trusted`, `online` and `previous_macs`.
+  Library code that builds a `DeviceInfo` with a struct literal must set them.
 
 ### Fixed
 

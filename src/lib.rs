@@ -13,6 +13,8 @@ pub mod classifier;
 pub mod device;
 /// Device attribute fingerprinting.
 pub mod fingerprint;
+/// Random-MAC merging: folds a rotated private MAC into its old record.
+pub mod mac_merge;
 /// IEEE OUI database parsing and querying.
 pub mod oui;
 /// Packet parsing implementations.
@@ -41,6 +43,7 @@ pub use fingerprint::{
     CatalogueSkips, Fingerprint, FingerprintCatalogue, FingerprintMatch, FingerprintProfile,
     TokenNamespace, TokenSet, fnv1a64, is_ripe,
 };
+pub use mac_merge::{MERGE_OVERLAP_GRACE, MERGE_SETTLE, merge_key};
 pub use oui::{IEEE_OUI_URL, OuiRegistry, download_ieee_oui};
 pub use parser::*;
 pub use presence::{

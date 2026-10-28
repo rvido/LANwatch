@@ -8,7 +8,8 @@
 use lanwatch::start_api_server_with_hosts;
 use lanwatch::{
     DEFAULT_OFFLINE_AFTER, DeviceTracker, DeviceType, DhcpEvent, DhcpSniffer, Dhcpv6Option,
-    EventHook, FingerprintCatalogue, IEEE_OUI_URL, OuiRegistry, download_ieee_oui, list_interfaces,
+    EventHook, FingerprintCatalogue, IEEE_OUI_URL, OuiRegistry, PresenceKind, download_ieee_oui,
+    list_interfaces,
 };
 #[cfg(feature = "mdns")]
 use lanwatch::{MdnsQuerier, MdnsRecordData, MdnsServiceRegistry};
@@ -229,6 +230,11 @@ fn main() {
 
     // Use batched DB flushing through worker threads to reduce write amplification.
     tracker.set_auto_save(false);
+
+    if config.no_mac_merge {
+        tracker.set_mac_merge(false);
+        println!("Random-MAC merging: disabled");
+    }
 
     // Wrap tracker in Arc<RwLock> for thread-safe sharing
     let tracker = Arc::new(RwLock::new(tracker));
@@ -1246,6 +1252,8 @@ struct Config {
     on_event: Option<String>,
     /// Skip the hook for trusted devices.
     untrusted_only: bool,
+    /// Keep every random MAC as its own device.
+    no_mac_merge: bool,
 }
 
 impl Config {
@@ -1342,6 +1350,7 @@ fn parse_args(args: &[String]) -> Config {
     let mut offline_after = DEFAULT_OFFLINE_AFTER;
     let mut on_event: Option<String> = None;
     let mut untrusted_only = false;
+    let mut no_mac_merge = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -1568,6 +1577,10 @@ fn parse_args(args: &[String]) -> Config {
                 untrusted_only = true;
                 i += 1;
             }
+            "--no-mac-merge" => {
+                no_mac_merge = true;
+                i += 1;
+            }
             "-h" | "--help" => {
                 print_usage();
                 std::process::exit(0);
@@ -1635,6 +1648,7 @@ fn parse_args(args: &[String]) -> Config {
         offline_after,
         on_event,
         untrusted_only,
+        no_mac_merge,
         override_specs,
         overrides_file,
     }
@@ -1683,6 +1697,7 @@ fn print_usage() {
     );
     println!("                         details in LANWATCH_* variables and as JSON on stdin");
     println!("  --untrusted-only       Run --on-event only for devices not on the trusted list");
+    println!("  --no-mac-merge         Keep each random (private) MAC as its own device");
     #[cfg(feature = "http-api")]
     {
         println!("  -a, --api <ADDR:PORT>  Start HTTP API server (e.g., 127.0.0.1:8080)");
@@ -1850,6 +1865,10 @@ fn start_presence_sweep(tracker: Arc<RwLock<DeviceTracker>>, config: &Config) {
 
     thread::spawn(move || {
         let mut reported_drops = 0;
+        // The first sweep may fold together rotations recorded before merging
+        // existed, possibly months of them. That is catch-up, not news, so it
+        // is printed and stored but not sent to the hook.
+        let mut catching_up = true;
         loop {
             let result = match tracker.write() {
                 Ok(mut tracker) => tracker.sweep_presence(SystemTime::now(), offline_after),
@@ -1864,19 +1883,27 @@ fn start_presence_sweep(tracker: Arc<RwLock<DeviceTracker>>, config: &Config) {
             };
             for event in &events {
                 println!(
-                    "[presence] {} {}{}",
+                    "[presence] {} {}{}{}",
                     event.event,
                     event.mac_address,
+                    event
+                        .previous_mac
+                        .as_deref()
+                        .map(|mac| format!(" (was {})", mac))
+                        .unwrap_or_default(),
                     event
                         .hostname
                         .as_deref()
                         .map(|name| format!(" ({})", lanwatch::display_safe(name)))
                         .unwrap_or_default()
                 );
-                if let Some(hook) = &hook {
+                if let Some(hook) = &hook
+                    && !(catching_up && event.event == PresenceKind::Merged)
+                {
                     hook.dispatch(event);
                 }
             }
+            catching_up = false;
             if let Some(hook) = &hook {
                 let dropped = hook.dropped_count();
                 if dropped > reported_drops {

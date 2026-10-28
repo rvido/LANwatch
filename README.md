@@ -30,6 +30,7 @@ Release history: [CHANGELOG.md](CHANGELOG.md).
 - **Device Attribute Fingerprinting**: Identifies a device by the *set of attributes it advertises* rather than the name it sends, so a device with a randomised MAC and no hostname is still recognisable. Attribute keys are collected from mDNS, SSDP and DHCP, plus the bare product names out of the SSDP `SERVER`/`USER-AGENT` headers. Versions, serial numbers and user-chosen names are discarded, so none of them enters a fingerprint. Matched against a shareable catalogue (`lanwatch-fingerprints.txt`). See [Device Attribute Fingerprinting](#device-attribute-fingerprinting).
 - **Agent Fingerprinting**: Reads the product names a device announces in its SSDP `SERVER` and `USER-AGENT` headers, so a responder's firmware stack (`openwrt`, `miniupnpd`, `portable-sdk-for-upnp-devices`) and a searching host's operating system or application become attributes in their own right. A multi-word product name stays one token, and versions and `(...)` comments are dropped. See [Device Attribute Fingerprinting](#device-attribute-fingerprinting).
 - **Presence History & New-Device Alerts**: Logs when each device comes online and goes offline, and runs your own command (`--on-event`) when a new MAC joins the LAN. Mark your own devices as trusted, and with `--untrusted-only` the alerts fire only for strangers. See [Presence, Trust & Alerts](#presence-trust--alerts).
+- **Random-MAC Merging**: Phones and laptops change their private MAC address now and then. LANwatch recognises a known device under its new address by its hostname and folds the old record into it, so the label, the trust mark and the history stay. Strict rules refuse any doubtful case, and every merge is reported. See [Random-MAC Merging](#random-mac-merging).
 - **Repeating Active Discovery**: `--query-interval` re-sends the mDNS and SSDP probes on a timer, so a device that was asleep or off the LAN at startup is still found. See [Repeating the Active Probes](#repeating-the-active-probes---query-interval).
 - **Dashboard Device Review**: Correct a device's type and vendor and give it a product name directly in the web dashboard. Corrections are stored in the database, survive a restart, and always beat heuristic classification. One click then exports every reviewed device as a catalogue file that carries no MAC, IP or hostname.
 - **Smart Home & IoT Discovery**: Extracts model and vendor metadata from HomeKit (HAP) and Matter service advertisements (Google, Apple, Amazon, Eve, Signify/Philips Hue, Aqara, IKEA, Nanoleaf, Tuya, Somfy, TP-Link, Lutron, Yale, Belkin, Bosch, etc.)
@@ -87,7 +88,12 @@ already in the database are not reported as new.
   every device in `/devices`. Library code that builds a `DeviceInfo` with a
   struct literal must set them; `DeviceInfo::new` sets them for you.
 - **New flags.** `--on-event`, `--untrusted-only`, `--offline-after`,
-  `--trust` and `--trust-all`. No existing flag changed.
+  `--trust`, `--trust-all` and `--no-mac-merge`. No existing flag changed.
+- **Random-MAC merging is on by default, and a merge cannot be undone.** On
+  the first start, LANwatch may fold old records of rotated phones into their
+  newest record. To keep every record as it is, copy `devices.db` first, or
+  start with `--no-mac-merge`. A third new table, `device_merges`, logs every
+  merge, and device JSON gets a `previous_macs` field.
 - **`--api-readonly` now refuses device deletes.** `DELETE /devices` and
   `DELETE /devices/{mac}` answer `403` in read-only mode, as documented.
   Before, they still removed devices.
@@ -314,7 +320,7 @@ Removing a device and forgetting one are different actions:
 
 Discovery is keyed on MAC alone, so a device still on the LAN reappears within seconds of a removal. Keeping the correction means one careless click cannot destroy review work; the device comes back already labelled. `--forget` is the deliberate opposite, for a device that has left the network for good and whose rows no dashboard can reach any more. Stop the service before running it, or a live capture may still hold the device in memory and write it straight back.
 
-Two more tables serve [Presence, Trust & Alerts](#presence-trust--alerts): **trusted_devices** (`mac_address`, `trusted_at`) and **presence_events** (`mac_address`, `event`, `at`, where `event` is `new`, `online` or `offline`). Presence events older than 90 days are deleted.
+Two more tables serve [Presence, Trust & Alerts](#presence-trust--alerts): **trusted_devices** (`mac_address`, `trusted_at`) and **presence_events** (`mac_address`, `event`, `at`, `previous_mac`, where `event` is `new`, `online`, `offline` or `merged`). Presence events older than 90 days are deleted. A last table, **device_merges** (`old_mac`, `new_mac`, `at`), logs every [random-MAC merge](#random-mac-merging).
 
 The fingerprint columns and the new tables are added to an existing database automatically on startup. No migration step and no database wipe is needed.
 
@@ -570,6 +576,7 @@ Each change is one event, saved in the database and printed to the console:
 | `new` | A MAC address LANwatch has never seen before |
 | `online` | A known device sends traffic again after being offline |
 | `offline` | A device was silent for longer than `--offline-after` |
+| `merged` | A known device came back with a new random MAC (see [Random-MAC Merging](#random-mac-merging)) |
 
 **Alerts.** `--on-event '<command>'` runs the command through `sh -c` for each
 event. LANwatch does not wait for it. The command gets the event in
@@ -577,7 +584,8 @@ environment variables and as one JSON line on stdin:
 
 `LANWATCH_EVENT`, `LANWATCH_MAC`, `LANWATCH_AT`, `LANWATCH_IP`,
 `LANWATCH_HOSTNAME`, `LANWATCH_VENDOR`, `LANWATCH_DEVICE_TYPE`,
-`LANWATCH_LABEL`, `LANWATCH_TRUSTED` (`1` or `0`).
+`LANWATCH_LABEL`, `LANWATCH_TRUSTED` (`1` or `0`), and for `merged`,
+`LANWATCH_PREVIOUS_MAC`.
 
 At most 8 commands run at once. Events past that are skipped with a warning.
 
@@ -607,6 +615,44 @@ table, so it survives **Remove Device**; only `--forget` drops it.
 alerts, run LANwatch once without `--on-event` for an hour, click
 **Trust All** (or run `lanwatch --trust-all`), then restart with
 `--on-event ... --untrusted-only`.
+
+### Random-MAC Merging
+
+Phones, tablets and laptops use a private (random) MAC address per network,
+and many change it every few days or weeks. Each change used to create a new
+device: the label and trust mark were lost, and a `new` alert fired for a
+device that never left.
+
+LANwatch now folds the old record into the new one. It does this only when
+all of these rules are true:
+
+1. Both MAC addresses are private.
+2. Both records have the same hostname, e.g. `Richards-iPhone`. Generic names
+   that many devices share (`iPhone`, `android`, `Galaxy-3`, ...) never count.
+3. The old record went quiet before the new one appeared. Two records on the
+   LAN at the same time are always two devices.
+4. No other record with that hostname was on the LAN at the same time, and
+   only one old record fits.
+5. The DHCP signatures (option 55 order, vendor class) do not conflict.
+
+The newer record stays, because that is the address the device uses now. It
+takes from the old record the first-seen date, your classification and
+product name, the trust mark, the presence history, and the attribute tokens
+if it has none of its own. The dashboard lists the old addresses under
+**Also seen as**, and the API under `previous_macs`.
+
+A random-MAC device with no hostname yet waits up to 60 seconds before it is
+reported as `new`, so its hostname can arrive and a merge can be decided.
+
+**Every merge is reported.** It is saved as a `merged` event and sent to the
+`--on-event` command, even with `--untrusted-only`. A merge can carry trust to
+a new MAC address, and a stranger who copies a trusted device's hostname must
+not get that silently. Merges found in the first check after startup are
+catch-up from older data, so they are saved and printed but not sent to the
+command.
+
+A merge cannot be undone. To switch merging off, start with `--no-mac-merge`.
+Devices with no hostname (many Android phones) are never merged.
 
 ### HTTP API
 
@@ -713,6 +759,7 @@ curl -X DELETE http://localhost:3000/devices
       "device_type": "AirPlay Device",
       "trusted": false,
       "online": true,
+      "previous_macs": [],
       "first_seen": "2026-01-16T10:25:00Z",
       "last_seen": "2026-01-16T10:30:45Z"
     }

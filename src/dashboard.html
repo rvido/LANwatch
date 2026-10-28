@@ -476,6 +476,7 @@
         .activity-kind.new { color: var(--accent-orange); }
         .activity-kind.online { color: var(--accent-emerald); }
         .activity-kind.offline { color: var(--text-muted); }
+        .activity-kind.merged { color: var(--accent-blue); }
         .reviewed-badge {
             display: inline-block;
             margin-left: 0.5rem;
@@ -852,6 +853,10 @@
                         <button class="identify-btn" id="trust-toggle" onclick="toggleTrust()">Trust this device</button>
                         <span class="identify-status" id="trust-status"></span>
                     </div>
+                </div>
+                <div class="detail-item" style="grid-column: span 2;" id="modal-previous-box">
+                    <span class="detail-label">Also seen as</span>
+                    <span class="detail-value" id="modal-previous-macs" style="font-family: 'JetBrains Mono', monospace; font-size: 0.85rem;"></span>
                 </div>
                 <div class="detail-item" style="grid-column: span 2;">
                     <span class="detail-label">Presence history</span>
@@ -1676,6 +1681,11 @@
             document.getElementById('modal-type').textContent = device.device_type || "Generic Device";
             document.getElementById('modal-last-active').textContent = device.last_seen ? formatDate(device.last_seen) : "N/A";
             document.getElementById('modal-presence').textContent = device.online ? 'Online' : 'Offline';
+            // Earlier random MACs of this device, folded in by a merge.
+            const previousBox = document.getElementById('modal-previous-box');
+            const previous = Array.isArray(device.previous_macs) ? device.previous_macs : [];
+            previousBox.style.display = previous.length ? 'flex' : 'none';
+            document.getElementById('modal-previous-macs').textContent = previous.join(', ');
             fillTrustPanel(device);
             loadPresenceHistory(device.mac_address);
             
@@ -1793,7 +1803,8 @@
                 const device = devicesData.find(d => d.mac_address === e.mac_address);
                 const name = withName ? `<span>${escapeHtml(device ? deviceDisplayName(device) : (e.hostname || e.mac_address))}</span>` : '';
                 const trust = withName && !e.trusted ? '<span class="activity-time">untrusted</span>' : '';
-                return `<li><span class="activity-time">${escapeHtml(formatDate(e.at))}</span><span class="activity-kind ${escapeHtml(e.event)}">${escapeHtml(e.event)}</span>${name}${trust}</li>`;
+                const was = e.previous_mac ? `<span class="activity-time">was ${escapeHtml(e.previous_mac)}</span>` : '';
+                return `<li><span class="activity-time">${escapeHtml(formatDate(e.at))}</span><span class="activity-kind ${escapeHtml(e.event)}">${escapeHtml(e.event)}</span>${name}${was}${trust}</li>`;
             }).join('');
         }
 

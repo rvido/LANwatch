@@ -27,7 +27,9 @@ use std::time::{Duration, SystemTime};
 use rusqlite::{Connection, params};
 use serde::Serialize;
 
-use crate::device::{format_timestamp, normalize_device_identifier, parse_timestamp};
+use crate::device::{DeviceInfo, format_timestamp, normalize_device_identifier, parse_timestamp};
+use crate::mac_merge::MERGE_SETTLE;
+use crate::oui::is_private_mac;
 use crate::tracker::DeviceTracker;
 
 /// How long a device may stay silent before it counts as offline.
@@ -56,6 +58,9 @@ pub enum PresenceKind {
     Online,
     /// A device stayed silent longer than the offline threshold.
     Offline,
+    /// A device with a new random MAC was recognised as a known device, and
+    /// the old record was folded into it. See `mac_merge.rs`.
+    Merged,
 }
 
 impl PresenceKind {
@@ -65,6 +70,7 @@ impl PresenceKind {
             PresenceKind::New => "new",
             PresenceKind::Online => "online",
             PresenceKind::Offline => "offline",
+            PresenceKind::Merged => "merged",
         }
     }
 
@@ -74,6 +80,7 @@ impl PresenceKind {
             "new" => Some(PresenceKind::New),
             "online" => Some(PresenceKind::Online),
             "offline" => Some(PresenceKind::Offline),
+            "merged" => Some(PresenceKind::Merged),
             _ => None,
         }
     }
@@ -109,6 +116,33 @@ pub struct PresenceEvent {
     pub label: Option<String>,
     /// Whether the device was on the trusted list.
     pub trusted: bool,
+    /// For `merged`: the MAC address the device used before.
+    pub previous_mac: Option<String>,
+}
+
+impl PresenceEvent {
+    /// An event about `device` as it is now.
+    pub(crate) fn about(
+        device: &DeviceInfo,
+        event: PresenceKind,
+        at: String,
+        previous_mac: Option<String>,
+    ) -> Self {
+        PresenceEvent {
+            mac_address: device.mac_address.clone(),
+            event,
+            at,
+            ip_address: (!device.ip_address.is_unspecified())
+                .then(|| device.ip_address.to_string())
+                .or_else(|| device.ipv6_address.map(|ip: IpAddr| ip.to_string())),
+            hostname: device.hostname.clone(),
+            vendor: device.vendor.as_ref().map(|v| v.to_string()),
+            device_type: device.device_type.as_ref().map(|t| t.to_string()),
+            label: device.product_label.clone(),
+            trusted: device.trusted,
+            previous_mac,
+        }
+    }
 }
 
 impl DeviceTracker {
@@ -137,7 +171,19 @@ impl DeviceTracker {
                 std::io::Error::other(format!("Failed to create presence schema: {}", e))
             })?;
         }
-        Ok(())
+        // Added after the table first shipped, so an existing table gets it
+        // here. A "duplicate column" error means it is already there.
+        match conn.execute(
+            "ALTER TABLE presence_events ADD COLUMN previous_mac TEXT;",
+            [],
+        ) {
+            Ok(_) => Ok(()),
+            Err(e) if e.to_string().contains("duplicate column name") => Ok(()),
+            Err(e) => Err(std::io::Error::other(format!(
+                "Failed to migrate presence schema: {}",
+                e
+            ))),
+        }
     }
 
     /// Reads the trusted list back and marks every loaded device as known.
@@ -261,19 +307,37 @@ impl DeviceTracker {
     /// Devices loaded from the database get their state set silently on the
     /// first sweep. A database error is returned after the in-memory state is
     /// updated, so a failed write never makes the same event fire twice.
+    ///
+    /// Random-MAC merging runs first, so a phone that only rotated its address
+    /// gives `merged`, not `new`. A device with a random MAC and no hostname
+    /// yet is held back for [`MERGE_SETTLE`]: its hostname usually arrives a
+    /// moment later, and without it no merge can be decided.
     pub fn sweep_presence(
         &mut self,
         now: SystemTime,
         offline_after: Duration,
     ) -> std::io::Result<Vec<PresenceEvent>> {
-        let mut events = Vec::new();
         let at = format_timestamp(now);
+        let mut events = if self.mac_merge_enabled {
+            self.merge_rotated_macs(&at)?
+        } else {
+            Vec::new()
+        };
 
         for (mac, device) in self.devices.iter_mut() {
             let age = now.duration_since(device.last_seen).unwrap_or_default();
             let online = age < offline_after;
             device.online = online;
             device.trusted = self.trusted.contains(mac);
+
+            let unsettled = self.mac_merge_enabled
+                && !self.known_macs.contains(mac)
+                && device.hostname.is_none()
+                && is_private_mac(mac)
+                && now.duration_since(device.first_seen).unwrap_or_default() < MERGE_SETTLE;
+            if unsettled {
+                continue;
+            }
 
             let kind = match self.online_state.insert(mac.clone(), online) {
                 None if self.known_macs.insert(mac.clone()) => Some(PresenceKind::New),
@@ -287,19 +351,7 @@ impl DeviceTracker {
             };
 
             if let Some(event) = kind {
-                events.push(PresenceEvent {
-                    mac_address: mac.clone(),
-                    event,
-                    at: at.clone(),
-                    ip_address: (!device.ip_address.is_unspecified())
-                        .then(|| device.ip_address.to_string())
-                        .or_else(|| device.ipv6_address.map(|ip: IpAddr| ip.to_string())),
-                    hostname: device.hostname.clone(),
-                    vendor: device.vendor.as_ref().map(|v| v.to_string()),
-                    device_type: device.device_type.as_ref().map(|t| t.to_string()),
-                    label: device.product_label.clone(),
-                    trusted: device.trusted,
-                });
+                events.push(PresenceEvent::about(device, event, at.clone(), None));
             }
         }
 
@@ -326,8 +378,14 @@ impl DeviceTracker {
             .map_err(|e| std::io::Error::other(format!("Failed to start transaction: {}", e)))?;
         for event in events {
             tx.execute(
-                "INSERT INTO presence_events (mac_address, event, at) VALUES (?, ?, ?);",
-                params![event.mac_address, event.event.as_str(), event.at],
+                "INSERT INTO presence_events (mac_address, event, at, previous_mac)
+                 VALUES (?, ?, ?, ?);",
+                params![
+                    event.mac_address,
+                    event.event.as_str(),
+                    event.at,
+                    event.previous_mac
+                ],
             )
             .map_err(|e| std::io::Error::other(format!("Failed to save presence: {}", e)))?;
         }
@@ -350,19 +408,21 @@ impl DeviceTracker {
         limit: usize,
     ) -> std::io::Result<Vec<PresenceEvent>> {
         let limit = limit.min(i64::MAX as usize) as i64;
-        let rows: Vec<(String, String, String)> = {
+        type Row = (String, String, String, Option<String>);
+        let rows: Vec<Row> = {
             let conn = self.conn.lock().unwrap();
             let map = |row: &rusqlite::Row<'_>| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
                 ))
             };
             let result = match mac {
                 Some(mac) => conn
                     .prepare(
-                        "SELECT mac_address, event, at FROM presence_events
+                        "SELECT mac_address, event, at, previous_mac FROM presence_events
                          WHERE mac_address = ? ORDER BY at DESC, id DESC LIMIT ?;",
                     )
                     .and_then(|mut stmt| {
@@ -371,7 +431,7 @@ impl DeviceTracker {
                     }),
                 None => conn
                     .prepare(
-                        "SELECT mac_address, event, at FROM presence_events
+                        "SELECT mac_address, event, at, previous_mac FROM presence_events
                          ORDER BY at DESC, id DESC LIMIT ?;",
                     )
                     .and_then(|mut stmt| stmt.query_map(params![limit], map)?.collect()),
@@ -381,7 +441,7 @@ impl DeviceTracker {
 
         Ok(rows
             .into_iter()
-            .filter_map(|(mac, event, at)| {
+            .filter_map(|(mac, event, at, previous_mac)| {
                 let event = PresenceKind::parse(&event)?;
                 // Re-format so a hand-edited row cannot reach the API unchecked.
                 let at = format_timestamp(parse_timestamp(&at)?);
@@ -395,6 +455,7 @@ impl DeviceTracker {
                     vendor: device.and_then(|d| d.vendor.as_ref().map(|v| v.to_string())),
                     device_type: device.and_then(|d| d.device_type.as_ref().map(|t| t.to_string())),
                     label: device.and_then(|d| d.product_label.clone()),
+                    previous_mac: previous_mac.map(|m| normalize_device_identifier(&m)),
                     mac_address: mac,
                     event,
                     at,
@@ -457,8 +518,12 @@ impl EventHook {
     }
 
     /// Whether this hook would run for the event.
+    ///
+    /// A `merged` event always runs, even for a trusted device: a merge can
+    /// carry trust to a new MAC, and a stranger who copies a trusted device's
+    /// hostname must not get that silently.
     pub fn wants(&self, event: &PresenceEvent) -> bool {
-        !(self.untrusted_only && event.trusted)
+        event.event == PresenceKind::Merged || !(self.untrusted_only && event.trusted)
     }
 
     /// How many events were dropped because too many hooks were running.
@@ -496,6 +561,7 @@ impl EventHook {
             ("LANWATCH_VENDOR", &event.vendor),
             ("LANWATCH_DEVICE_TYPE", &event.device_type),
             ("LANWATCH_LABEL", &event.label),
+            ("LANWATCH_PREVIOUS_MAC", &event.previous_mac),
         ];
         for (name, value) in optional {
             command.env(name, value.as_deref().unwrap_or(""));
@@ -553,7 +619,7 @@ fn event_json_line(event: &PresenceEvent) -> String {
 
     format!(
         "{{\"event\":{},\"mac_address\":{},\"at\":{},\"ip_address\":{},\"hostname\":{},\
-         \"vendor\":{},\"device_type\":{},\"label\":{},\"trusted\":{}}}\n",
+         \"vendor\":{},\"device_type\":{},\"label\":{},\"trusted\":{},\"previous_mac\":{}}}\n",
         quote(event.event.as_str()),
         quote(&event.mac_address),
         quote(&event.at),
@@ -562,7 +628,8 @@ fn event_json_line(event: &PresenceEvent) -> String {
         optional(&event.vendor),
         optional(&event.device_type),
         optional(&event.label),
-        event.trusted
+        event.trusted,
+        optional(&event.previous_mac)
     )
 }
 
@@ -597,7 +664,8 @@ mod tests {
             .insert(mac.to_string());
     }
 
-    const MAC: &str = "aa:bb:cc:00:00:01";
+    // A burned-in MAC, so the random-MAC settle period does not apply.
+    const MAC: &str = "00:bb:cc:00:00:01";
     const LIMIT: Duration = Duration::from_secs(600);
 
     #[test]
@@ -655,8 +723,8 @@ mod tests {
         add(&mut tracker, MAC, now);
         tracker.save_to_db().unwrap();
 
-        assert!(!tracker.set_trusted("aa:bb:cc:99:99:99", true).unwrap());
-        assert!(tracker.set_trusted("AA:BB:CC:00:00:01", true).unwrap());
+        assert!(!tracker.set_trusted("00:bb:cc:99:99:99", true).unwrap());
+        assert!(tracker.set_trusted("00:BB:CC:00:00:01", true).unwrap());
         assert!(tracker.get_device(MAC).unwrap().trusted);
         drop(tracker);
 
@@ -679,7 +747,7 @@ mod tests {
         let (path, mut tracker) = tracker("trust_all");
         let now = SystemTime::now();
         add(&mut tracker, MAC, now);
-        add(&mut tracker, "aa:bb:cc:00:00:02", now);
+        add(&mut tracker, "00:bb:cc:00:00:02", now);
         assert_eq!(tracker.trust_all().unwrap(), 2);
         assert_eq!(tracker.trust_all().unwrap(), 0);
         assert_eq!(tracker.trusted_count(), 2);
@@ -717,6 +785,7 @@ mod tests {
             device_type: None,
             label: None,
             trusted: true,
+            previous_mac: None,
         };
         assert!(!EventHook::new("true", true).wants(&event));
         assert!(EventHook::new("true", false).wants(&event));
@@ -727,7 +796,13 @@ mod tests {
             "{}",
             line
         );
-        assert!(line.ends_with("\"trusted\":true}\n"));
+        assert!(line.ends_with("\"trusted\":true,\"previous_mac\":null}\n"));
+
+        let merged = PresenceEvent {
+            event: PresenceKind::Merged,
+            ..event
+        };
+        assert!(EventHook::new("true", true).wants(&merged));
     }
 
     #[test]
@@ -751,6 +826,7 @@ mod tests {
             device_type: None,
             label: None,
             trusted: false,
+            previous_mac: None,
         };
         assert!(hook.dispatch(&event));
 

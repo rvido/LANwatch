@@ -93,6 +93,12 @@ pub struct DeviceInfo {
     /// the last presence sweep. Derived, never stored.
     #[serde(default)]
     pub online: bool,
+    /// Random MAC addresses this device used before, oldest first.
+    ///
+    /// Filled from the `device_merges` table, so it is not written to the
+    /// `devices` table or to CSV.
+    #[serde(default)]
+    pub previous_macs: Vec<String>,
     /// First seen timestamp (ISO 8601 format)
     #[serde(
         serialize_with = "serialize_system_time",
@@ -135,6 +141,7 @@ impl DeviceInfo {
             product_label: None,
             trusted: false,
             online: true,
+            previous_macs: Vec::new(),
             first_seen: timestamp,
             last_seen: timestamp,
         }
@@ -457,6 +464,7 @@ impl DeviceInfo {
             product_label: None,
             trusted: false,
             online: false,
+            previous_macs: Vec::new(),
             first_seen,
             last_seen,
         })

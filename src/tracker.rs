@@ -243,6 +243,8 @@ pub struct DeviceTracker {
     pub(crate) known_macs: HashSet<String>,
     /// Online state as of the last presence sweep, per tracked device.
     pub(crate) online_state: HashMap<String, bool>,
+    /// Whether random-MAC merging runs in the presence sweep. See `mac_merge.rs`.
+    pub(crate) mac_merge_enabled: bool,
 }
 
 impl DeviceTracker {
@@ -324,6 +326,7 @@ impl DeviceTracker {
 
         Self::migrate_fingerprint_columns(&conn)?;
         Self::create_presence_schema(&conn)?;
+        Self::create_merge_schema(&conn)?;
 
         let mut tracker = Self {
             devices: HashMap::new(),
@@ -342,6 +345,7 @@ impl DeviceTracker {
             trusted: HashSet::new(),
             known_macs: HashSet::new(),
             online_state: HashMap::new(),
+            mac_merge_enabled: true,
         };
 
         tracker.load_from_db()?;
@@ -747,6 +751,7 @@ impl DeviceTracker {
                         // Filled in by `load_presence_from_db` and the sweep.
                         trusted: false,
                         online: false,
+                        previous_macs: Vec::new(),
                         first_seen,
                         last_seen,
                     })
@@ -767,6 +772,7 @@ impl DeviceTracker {
         self.resolve_ip_conflicts();
         self.apply_overrides();
         self.load_presence_from_db()?;
+        self.load_merges_from_db()?;
 
         Ok(())
     }
@@ -825,7 +831,7 @@ impl DeviceTracker {
     ///
     /// Written immediately rather than batched: a person clicking Save expects
     /// the correction to survive a restart, even one that happens right after.
-    fn persist_override(&self, mac: &str) -> std::io::Result<()> {
+    pub(crate) fn persist_override(&self, mac: &str) -> std::io::Result<()> {
         let conn = self.conn.lock().unwrap();
         match self.overrides.get(mac) {
             Some(entry) => conn
@@ -1411,7 +1417,7 @@ impl DeviceTracker {
     }
 
     /// Recomputes the stored fingerprint for one device and re-runs the match.
-    fn refresh_fingerprint(&mut self, mac: &str) {
+    pub(crate) fn refresh_fingerprint(&mut self, mac: &str) {
         let Some(log) = self.attributes.get(mac) else {
             return;
         };
@@ -3873,11 +3879,13 @@ impl DeviceTracker {
 
         drop(conn);
         let had_presence = self.forget_presence(&key)?;
+        let had_merges = self.forget_merges(&key)?;
 
         Ok(had_device
             || had_attributes
             || had_override
             || had_presence
+            || had_merges
             || attribute_rows > 0
             || override_rows > 0)
     }
