@@ -31,6 +31,7 @@ Release history: [CHANGELOG.md](CHANGELOG.md).
 - **Agent Fingerprinting**: Reads the product names a device announces in its SSDP `SERVER` and `USER-AGENT` headers, so a responder's firmware stack (`openwrt`, `miniupnpd`, `portable-sdk-for-upnp-devices`) and a searching host's operating system or application become attributes in their own right. A multi-word product name stays one token, and versions and `(...)` comments are dropped. See [Device Attribute Fingerprinting](#device-attribute-fingerprinting).
 - **Presence History & New-Device Alerts**: Logs when each device comes online and goes offline, and runs your own command (`--on-event`) when a new MAC joins the LAN. Mark your own devices as trusted, and with `--untrusted-only` the alerts fire only for strangers. See [Presence, Trust & Alerts](#presence-trust--alerts).
 - **Random-MAC Merging**: Phones and laptops change their private MAC address now and then. LANwatch recognises a known device under its new address by its hostname and folds the old record into it, so the label, the trust mark and the history stay. Strict rules refuse any doubtful case, and every merge is reported. See [Random-MAC Merging](#random-mac-merging).
+- **Home Assistant Integration** (optional): Publishes every device to Home Assistant over MQTT discovery as a `device_tracker` entity that reads `home` or `not_home`. No extra library: the small MQTT client is built in. See [Home Assistant](#home-assistant). Gated under the `homeassistant` feature.
 - **Repeating Active Discovery**: `--query-interval` re-sends the mDNS and SSDP probes on a timer, so a device that was asleep or off the LAN at startup is still found. See [Repeating the Active Probes](#repeating-the-active-probes---query-interval).
 - **Dashboard Device Review**: Correct a device's type and vendor and give it a product name directly in the web dashboard. Corrections are stored in the database, survive a restart, and always beat heuristic classification. One click then exports every reviewed device as a catalogue file that carries no MAC, IP or hostname.
 - **Smart Home & IoT Discovery**: Extracts model and vendor metadata from HomeKit (HAP) and Matter service advertisements (Google, Apple, Amazon, Eve, Signify/Philips Hue, Aqara, IKEA, Nanoleaf, Tuya, Somfy, TP-Link, Lutron, Yale, Belkin, Bosch, etc.)
@@ -88,7 +89,9 @@ already in the database are not reported as new.
   every device in `/devices`. Library code that builds a `DeviceInfo` with a
   struct literal must set them; `DeviceInfo::new` sets them for you.
 - **New flags.** `--on-event`, `--untrusted-only`, `--offline-after`,
-  `--trust`, `--trust-all` and `--no-mac-merge`. No existing flag changed.
+  `--trust`, `--trust-all` and `--no-mac-merge`, and with the new
+  `homeassistant` feature, `--mqtt`, `--mqtt-user`, `--mqtt-prefix` and
+  `--mqtt-trusted-only`. No existing flag changed.
 - **Random-MAC merging is on by default, and a merge cannot be undone.** On
   the first start, LANwatch may fold old records of rotated phones into their
   newest record. To keep every record as it is, copy `devices.db` first, or
@@ -654,6 +657,56 @@ command.
 A merge cannot be undone. To switch merging off, start with `--no-mac-merge`.
 Devices with no hostname (many Android phones) are never merged.
 
+### Home Assistant
+
+Build with the `homeassistant` feature, then point LANwatch at the MQTT
+broker that Home Assistant uses (for example the Mosquitto add-on):
+
+```bash
+cargo build --release --features homeassistant,http-api,mdns,ssdp
+
+sudo LANWATCH_MQTT_PASSWORD='...' lanwatch eth0 --api-default \
+  --mqtt 192.168.1.10 --mqtt-user lanwatch
+```
+
+Each device appears in Home Assistant under **Settings → Devices** as a
+`device_tracker` entity. Its state is `home` while the device is
+[online](#presence-trust--alerts) and `not_home` after `--offline-after`. Its
+attributes are `ip`, `mac`, `host_name`, `vendor`, `device_type`, `trusted`,
+`previous_macs` and `first_seen`. Use it like any other tracker, e.g. "when
+my phone is `not_home`, turn off the lights".
+
+| Flag | Meaning |
+|---|---|
+| `--mqtt <HOST[:PORT]>` | The broker. Port 1883 if left out. `[v6]:port` works too. |
+| `--mqtt-user <NAME>` | User name. The password is read from `LANWATCH_MQTT_PASSWORD`, so it never shows up in `ps`. |
+| `--mqtt-prefix <PREFIX>` | Home Assistant's discovery prefix, if you changed it. Default: `homeassistant`. |
+| `--mqtt-trusted-only` | Publish only [trusted](#presence-trust--alerts) devices, so guests' phones stay out of Home Assistant. |
+
+How it behaves:
+
+- **Every message is retained.** When Home Assistant restarts, the broker
+  hands it the last state at once. LANwatch sends a message only when it
+  changed, and checks every 5 seconds.
+- **A rotating phone stays one entity.** The entity ID comes from the oldest
+  MAC the device ever used, so a [random-MAC merge](#random-mac-merging) keeps
+  the same entity and its history in Home Assistant.
+- **LANwatch stopping is visible.** `lanwatch/status` is `online` while it
+  runs. If LANwatch stops or loses the connection, the broker sets it to
+  `offline` (MQTT "last will"), and every entity shows as unavailable.
+- **Removed devices are removed.** A device you remove in LANwatch, or one you
+  stop trusting with `--mqtt-trusted-only`, is deleted from Home Assistant. If
+  it comes back, it gets the same entity ID again.
+- **Lost connections retry** after 5 seconds, then up to every 5 minutes.
+
+> **No TLS.** The connection is plain MQTT, so the password and device data
+> cross the network unencrypted. Keep the broker on the same trusted network,
+> or run LANwatch on the Home Assistant host itself.
+
+Topics: discovery at `homeassistant/device_tracker/lanwatch_<id>/config`,
+state at `lanwatch/<id>/state`, attributes at `lanwatch/<id>/attributes`,
+where `<id>` is the oldest MAC without colons.
+
 ### HTTP API
 
 > **Note:** The HTTP API requires the `http-api` feature, which is enabled by default.
@@ -921,6 +974,7 @@ cargo run --example parse_payload
 | `http-api` | ✗ | Enables the HTTP REST API server, JSON export, and Web Dashboard |
 | `mdns` | ✗ | Enables mDNS (Multicast DNS) sniffing for enhanced device discovery |
 | `ssdp` | ✗ | Enables SSDP/UPnP sniffing and active M-SEARCH discovery |
+| `homeassistant` | ✗ | Publishes devices to Home Assistant over MQTT discovery |
 
 ```bash
 # Build with minimal default features
@@ -934,6 +988,9 @@ cargo build --release --features mdns
 
 # Build with SSDP support
 cargo build --release --features ssdp
+
+# Build with Home Assistant (MQTT) support
+cargo build --release --features homeassistant
 
 # Build with all features
 cargo build --release --all-features

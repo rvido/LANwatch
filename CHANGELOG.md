@@ -50,11 +50,26 @@ that changed behaviour are listed.
     is reported as `new`.
   - On by default. `--no-mac-merge` switches it off. A merge cannot be undone.
   - The dashboard shows old addresses under **Also seen as**.
+- **Home Assistant integration** (new `homeassistant` feature). `--mqtt
+  <HOST[:PORT]>` publishes every device through MQTT discovery as a
+  `device_tracker` entity, `home` or `not_home`, with IP, MAC, hostname,
+  vendor, type and trust as attributes.
+  - The MQTT 3.1.1 client is built in; no new dependency beyond `serde_json`.
+  - All messages are retained, and only changed ones are sent.
+  - The entity ID comes from the oldest MAC, so a random-MAC merge keeps the
+    same entity.
+  - A last will sets `lanwatch/status` to `offline` when LANwatch stops.
+  - `--mqtt-user` (password from `LANWATCH_MQTT_PASSWORD`), `--mqtt-prefix`
+    and `--mqtt-trusted-only`.
+  - No TLS: keep the broker on a trusted network.
 - **Three new fields in device JSON:** `trusted`, `online` and `previous_macs`.
   Library code that builds a `DeviceInfo` with a struct literal must set them.
 
 ### Fixed
 
+- **A tick badge stretched across the whole device tile.** The ✓ (reviewed)
+  badge sat in a column layout, so it filled the tile's width as a green bar.
+  The name and its badges now share one row.
 - **`--api-readonly` did not stop device deletes.** `DELETE /devices` and
   `DELETE /devices/{mac}` still removed devices in read-only mode, although the
   README said they were refused. Both now answer `403`.

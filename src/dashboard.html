@@ -477,6 +477,21 @@
         .activity-kind.online { color: var(--accent-emerald); }
         .activity-kind.offline { color: var(--text-muted); }
         .activity-kind.merged { color: var(--accent-blue); }
+        /* The tile's info box is a flex column, which stretches every child to
+           full width. The name and its badges share this row, so a badge
+           stays the size of its text. */
+        .device-title-row {
+            display: flex;
+            align-items: center;
+            min-width: 0;
+        }
+        .device-title-row .device-name {
+            min-width: 0;
+        }
+        .device-title-row .reviewed-badge,
+        .device-title-row .trusted-badge {
+            flex: none;
+        }
         .reviewed-badge {
             display: inline-block;
             margin-left: 0.5rem;
@@ -1568,7 +1583,7 @@
                         </div>
                     </div>
                     <div class="device-info">
-                        <span class="device-name" title="${escapeHtml(name)}"><span class="presence-dot${d.online ? ' online' : ''}" title="${d.online ? 'Online' : 'Offline'}"></span>${escapeHtml(name)}</span>${d.product_label ? `<span class="reviewed-badge" title="Reviewed: ${escapeHtml(d.product_label)}">&check;</span>` : ''}${d.trusted ? '<span class="trusted-badge" title="On the trusted list">Trusted</span>' : ''}
+                        <div class="device-title-row"><span class="device-name" title="${escapeHtml(name)}"><span class="presence-dot${d.online ? ' online' : ''}" title="${d.online ? 'Online' : 'Offline'}"></span>${escapeHtml(name)}</span>${d.product_label ? `<span class="reviewed-badge" title="Reviewed: ${escapeHtml(d.product_label)}">&check;</span>` : ''}${d.trusted ? '<span class="trusted-badge" title="On the trusted list">Trusted</span>' : ''}</div>
                         <span class="device-vendor">${escapeHtml(vendor)}</span>
                     </div>
                     <div class="device-meta">

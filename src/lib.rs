@@ -32,6 +32,10 @@ pub mod types;
 #[cfg(feature = "mdns")]
 pub mod mdns_registry;
 
+/// Home Assistant integration over MQTT discovery.
+#[cfg(feature = "homeassistant")]
+pub mod homeassistant;
+
 /// HTTP API server implementation.
 #[cfg(feature = "http-api")]
 pub mod api;
@@ -56,6 +60,12 @@ pub use types::*;
 
 #[cfg(feature = "mdns")]
 pub use mdns_registry::{MdnsServiceInfo, MdnsServiceRegistry};
+
+#[cfg(feature = "homeassistant")]
+pub use homeassistant::{
+    ConnectReturnCode, DEFAULT_BASE_TOPIC, DEFAULT_DISCOVERY_PREFIX, DEFAULT_MQTT_PORT,
+    HomeAssistantConfig, entity_key, start_home_assistant,
+};
 
 #[cfg(feature = "http-api")]
 pub use api::{

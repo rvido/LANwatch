@@ -6,6 +6,8 @@
 
 #[cfg(feature = "http-api")]
 use lanwatch::start_api_server_with_hosts;
+#[cfg(feature = "homeassistant")]
+use lanwatch::{DEFAULT_MQTT_PORT, HomeAssistantConfig, start_home_assistant};
 use lanwatch::{
     DEFAULT_OFFLINE_AFTER, DeviceTracker, DeviceType, DhcpEvent, DhcpSniffer, Dhcpv6Option,
     EventHook, FingerprintCatalogue, IEEE_OUI_URL, OuiRegistry, PresenceKind, download_ieee_oui,
@@ -299,6 +301,18 @@ fn main() {
     }
 
     start_presence_sweep(Arc::clone(&tracker), &config);
+
+    #[cfg(feature = "homeassistant")]
+    if let Some(ha) = config.home_assistant.clone() {
+        println!(
+            "Home Assistant: publishing {} devices to {}:{} (discovery prefix '{}')",
+            if ha.trusted_only { "trusted" } else { "all" },
+            ha.host,
+            ha.port,
+            ha.discovery_prefix
+        );
+        start_home_assistant(ha, Arc::clone(&tracker));
+    }
 
     println!("Press Ctrl+C to stop\n");
 
@@ -1254,6 +1268,9 @@ struct Config {
     untrusted_only: bool,
     /// Keep every random MAC as its own device.
     no_mac_merge: bool,
+    /// Where to publish devices for Home Assistant, if anywhere.
+    #[cfg(feature = "homeassistant")]
+    home_assistant: Option<HomeAssistantConfig>,
 }
 
 impl Config {
@@ -1274,6 +1291,36 @@ impl Config {
         }
         enabled
     }
+}
+
+/// Parses `--mqtt`: `host`, `host:port`, `[v6]` or `[v6]:port`.
+#[cfg(feature = "homeassistant")]
+fn parse_broker(value: &str) -> Option<(String, u16)> {
+    let value = value.trim();
+    let (host, port) = if let Some(rest) = value.strip_prefix('[') {
+        let (host, after) = rest.split_once(']')?;
+        match after.strip_prefix(':') {
+            Some(port) => (host, Some(port)),
+            None if after.is_empty() => (host, None),
+            None => return None,
+        }
+    } else if value.matches(':').count() > 1 {
+        // A bare IPv6 address has no room for a port.
+        (value, None)
+    } else {
+        match value.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (value, None),
+        }
+    };
+    if host.is_empty() {
+        return None;
+    }
+    let port = match port {
+        Some(port) => port.parse().ok().filter(|p| *p != 0)?,
+        None => DEFAULT_MQTT_PORT,
+    };
+    Some((host.to_string(), port))
 }
 
 /// Parses a duration such as `90s`, `15m` or `2h`. A bare number means seconds.
@@ -1351,6 +1398,14 @@ fn parse_args(args: &[String]) -> Config {
     let mut on_event: Option<String> = None;
     let mut untrusted_only = false;
     let mut no_mac_merge = false;
+    #[cfg(feature = "homeassistant")]
+    let mut mqtt_broker: Option<(String, u16)> = None;
+    #[cfg(feature = "homeassistant")]
+    let mut mqtt_user: Option<String> = None;
+    #[cfg(feature = "homeassistant")]
+    let mut mqtt_prefix: Option<String> = None;
+    #[cfg(feature = "homeassistant")]
+    let mut mqtt_trusted_only = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -1581,6 +1636,57 @@ fn parse_args(args: &[String]) -> Config {
                 no_mac_merge = true;
                 i += 1;
             }
+            #[cfg(feature = "homeassistant")]
+            "--mqtt" => {
+                let Some(value) = args.get(i + 1) else {
+                    eprintln!("Error: --mqtt requires a broker, e.g. 192.168.1.10 or broker:1883");
+                    std::process::exit(1);
+                };
+                match parse_broker(value) {
+                    Some(broker) => mqtt_broker = Some(broker),
+                    None => {
+                        eprintln!(
+                            "Error: --mqtt could not read '{}'. Use HOST or HOST:PORT.",
+                            value
+                        );
+                        std::process::exit(1);
+                    }
+                }
+                i += 2;
+            }
+            #[cfg(feature = "homeassistant")]
+            "--mqtt-user" => {
+                if i + 1 < args.len() {
+                    mqtt_user = Some(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    eprintln!("Error: --mqtt-user requires a user name");
+                    std::process::exit(1);
+                }
+            }
+            #[cfg(feature = "homeassistant")]
+            "--mqtt-prefix" => {
+                if i + 1 < args.len() {
+                    mqtt_prefix = Some(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    eprintln!("Error: --mqtt-prefix requires a topic prefix");
+                    std::process::exit(1);
+                }
+            }
+            #[cfg(feature = "homeassistant")]
+            "--mqtt-trusted-only" => {
+                mqtt_trusted_only = true;
+                i += 1;
+            }
+            #[cfg(not(feature = "homeassistant"))]
+            "--mqtt" | "--mqtt-user" | "--mqtt-prefix" | "--mqtt-trusted-only" => {
+                eprintln!(
+                    "Error: MQTT options require a binary built with the 'homeassistant' feature."
+                );
+                eprintln!("Rebuild with: cargo build --release --features homeassistant");
+                std::process::exit(1);
+            }
             "-h" | "--help" => {
                 print_usage();
                 std::process::exit(0);
@@ -1618,6 +1724,36 @@ fn parse_args(args: &[String]) -> Config {
         }
     };
 
+    // The password comes from the environment only: a command-line argument
+    // is visible to every user through `ps`.
+    #[cfg(feature = "homeassistant")]
+    let home_assistant = match mqtt_broker {
+        Some((host, port)) => {
+            let mut config = HomeAssistantConfig::new(host, port);
+            config.username = mqtt_user;
+            config.password = env::var("LANWATCH_MQTT_PASSWORD").ok();
+            if config.password.is_some() && config.username.is_none() {
+                eprintln!("Warning: LANWATCH_MQTT_PASSWORD is ignored without --mqtt-user");
+            }
+            if let Some(prefix) = mqtt_prefix {
+                config.discovery_prefix = prefix.trim_end_matches('/').to_string();
+            }
+            config.trusted_only = mqtt_trusted_only;
+            let id: String = interface_name
+                .chars()
+                .filter(char::is_ascii_alphanumeric)
+                .collect();
+            config.client_id = format!("lanwatch-{}", id);
+            Some(config)
+        }
+        None => {
+            if mqtt_user.is_some() || mqtt_prefix.is_some() || mqtt_trusted_only {
+                eprintln!("Warning: MQTT options do nothing without --mqtt");
+            }
+            None
+        }
+    };
+
     Config {
         interface_name,
         db_path,
@@ -1649,6 +1785,8 @@ fn parse_args(args: &[String]) -> Config {
         on_event,
         untrusted_only,
         no_mac_merge,
+        #[cfg(feature = "homeassistant")]
+        home_assistant,
         override_specs,
         overrides_file,
     }
@@ -1698,6 +1836,16 @@ fn print_usage() {
     println!("                         details in LANWATCH_* variables and as JSON on stdin");
     println!("  --untrusted-only       Run --on-event only for devices not on the trusted list");
     println!("  --no-mac-merge         Keep each random (private) MAC as its own device");
+    #[cfg(feature = "homeassistant")]
+    {
+        println!("  --mqtt <HOST[:PORT]>   Publish devices to Home Assistant via this MQTT broker");
+        println!("  --mqtt-user <NAME>     MQTT user name; the password is read from");
+        println!("                         the LANWATCH_MQTT_PASSWORD environment variable");
+        println!(
+            "  --mqtt-prefix <PREFIX> Home Assistant discovery prefix (default: homeassistant)"
+        );
+        println!("  --mqtt-trusted-only    Publish only devices on the trusted list");
+    }
     #[cfg(feature = "http-api")]
     {
         println!("  -a, --api <ADDR:PORT>  Start HTTP API server (e.g., 127.0.0.1:8080)");
@@ -2004,8 +2152,8 @@ fn handle_download_oui(args: &[String]) {
     }
 }
 
+// `parse_duration` serves `--offline-after` too, so these run in every build.
 #[cfg(test)]
-#[cfg(any(feature = "mdns", feature = "ssdp"))]
 mod tests {
     use super::*;
 
@@ -2031,5 +2179,19 @@ mod tests {
         // Overflow must not wrap round to a tiny interval.
         assert_eq!(parse_duration("99999999999999999999h"), None);
         assert_eq!(parse_duration(&format!("{}h", u64::MAX)), None);
+    }
+
+    #[cfg(feature = "homeassistant")]
+    #[test]
+    fn test_the_mqtt_broker_reads_host_port_and_ipv6() {
+        let broker = |host: &str, port| Some((host.to_string(), port));
+        assert_eq!(parse_broker("192.168.1.10"), broker("192.168.1.10", 1883));
+        assert_eq!(parse_broker("mqtt.local:8883"), broker("mqtt.local", 8883));
+        assert_eq!(parse_broker("[fd00::5]:1884"), broker("fd00::5", 1884));
+        assert_eq!(parse_broker("[fd00::5]"), broker("fd00::5", 1883));
+        assert_eq!(parse_broker("fd00::5"), broker("fd00::5", 1883));
+        for bad in ["", ":1883", "host:", "host:0", "host:99999", "[fd00::5]x"] {
+            assert_eq!(parse_broker(bad), None, "{}", bad);
+        }
     }
 }

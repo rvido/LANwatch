@@ -22,6 +22,9 @@ default = []
 http-api = ["dep:serde_json", "dep:tiny_http"]
 mdns = []
 ssdp = []
+# Publish devices to Home Assistant over MQTT. The MQTT client is built in;
+# serde_json only builds the discovery payloads.
+homeassistant = ["dep:serde_json"]
 
 [dependencies]
 # The capture filter is attached with a raw setsockopt(SO_ATTACH_FILTER); see
