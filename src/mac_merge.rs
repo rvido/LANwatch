@@ -412,6 +412,8 @@ impl DeviceTracker {
         if carry_trust {
             self.trusted.insert(new.to_string());
         }
+        #[cfg(feature = "ssdp")]
+        self.move_upnp_description(old, new)?;
         if let Some(device) = self.devices.get_mut(new) {
             device.trusted = self.trusted.contains(new);
         }
@@ -428,7 +430,7 @@ impl DeviceTracker {
     }
 
     /// Drops the merge log entries that name `key`, for `--forget`.
-    pub(crate) fn forget_merges(&mut self, key: &str) -> std::io::Result<bool> {
+    pub(crate) fn forget_merges(&self, key: &str) -> std::io::Result<bool> {
         let conn = self.conn.lock().unwrap();
         let rows = conn
             .execute(

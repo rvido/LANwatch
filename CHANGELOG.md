@@ -62,11 +62,27 @@ that changed behaviour are listed.
   - `--mqtt-user` (password from `LANWATCH_MQTT_PASSWORD`), `--mqtt-prefix`
     and `--mqtt-trusted-only`.
   - No TLS: keep the broker on a trusted network.
-- **Three new fields in device JSON:** `trusted`, `online` and `previous_macs`.
-  Library code that builds a `DeviceInfo` with a struct literal must set them.
+- **UPnP device names** (`ssdp` feature). `--upnp-describe` fetches each UPnP
+  device's description XML once, from the `LOCATION` in its SSDP packets. The
+  friendly name ("Living Room TV") becomes the device's name in the dashboard
+  and in Home Assistant. The maker and model fill an empty system
+  description, and improve the vendor and type. Overrides still win.
+  - Off by default, because it connects to the device.
+  - Only `http://` to the sender's own private IP; no redirects; 5 s and
+    64 KiB limits; at most 1024 devices per run.
+  - Saved in the new `upnp_descriptions` table, so each device is fetched
+    once.
+- **Four new fields in device JSON:** `trusted`, `online`, `previous_macs` and
+  `friendly_name`. Library code that builds a `DeviceInfo` with a struct
+  literal must set them.
 
 ### Fixed
 
+- **One host could grow a device's IPv6 list without limit.** Each new source
+  address from the same MAC was kept, indexed and saved on every flush, so a
+  host sending from many addresses in its /64 slowed LANwatch down over time.
+  A device now keeps at most 32 IPv6 addresses. The oldest is dropped first,
+  never the primary one.
 - **A tick badge stretched across the whole device tile.** The ✓ (reviewed)
   badge sat in a column layout, so it filled the tile's width as a green bar.
   The name and its badges now share one row.

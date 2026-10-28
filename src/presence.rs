@@ -613,8 +613,8 @@ fn event_json_line(event: &PresenceEvent) -> String {
         out.push('"');
         out
     }
-    fn optional(value: &Option<String>) -> String {
-        value.as_deref().map_or_else(|| "null".to_string(), quote)
+    fn optional(value: Option<&str>) -> String {
+        value.map_or_else(|| "null".to_string(), quote)
     }
 
     format!(
@@ -623,13 +623,13 @@ fn event_json_line(event: &PresenceEvent) -> String {
         quote(event.event.as_str()),
         quote(&event.mac_address),
         quote(&event.at),
-        optional(&event.ip_address),
-        optional(&event.hostname),
-        optional(&event.vendor),
-        optional(&event.device_type),
-        optional(&event.label),
+        optional(event.ip_address.as_deref()),
+        optional(event.hostname.as_deref()),
+        optional(event.vendor.as_deref()),
+        optional(event.device_type.as_deref()),
+        optional(event.label.as_deref()),
         event.trusted,
-        optional(&event.previous_mac)
+        optional(event.previous_mac.as_deref())
     )
 }
 

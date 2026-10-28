@@ -19,7 +19,7 @@ use crate::types::{DeviceType, Vendor};
 
 /// Cache representation for sorted device lists to reduce database locking under high traffic.
 struct SortedDevicesCache {
-    devices: Arc<Vec<DeviceInfo>>,
+    devices: Arc<[DeviceInfo]>,
     cached_at: Instant,
 }
 
@@ -393,7 +393,7 @@ impl ApiServer {
     }
 
     /// Retrieves devices from cache if valid (<= 500ms), otherwise updates cache from tracker
-    fn get_or_update_cache(&self) -> Result<Arc<Vec<DeviceInfo>>, &'static str> {
+    fn get_or_update_cache(&self) -> Result<Arc<[DeviceInfo]>, &'static str> {
         let now = Instant::now();
 
         // 1. Try reading with cache lock first
@@ -419,7 +419,7 @@ impl ApiServer {
             // Rebuild sorted device list from the tracker using SQL indexed query
             if let Ok(tracker) = self.tracker.read() {
                 let devices = tracker.get_devices_sorted();
-                let devices_arc = Arc::new(devices);
+                let devices_arc: Arc<[DeviceInfo]> = devices.into();
                 *guard = Some(SortedDevicesCache {
                     devices: Arc::clone(&devices_arc),
                     cached_at: now,

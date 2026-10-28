@@ -371,6 +371,7 @@ mod tests {
             product_label: None,
             trusted: false,
             online: false,
+            friendly_name: None,
             previous_macs: Vec::new(),
             first_seen: parse_timestamp("2026-01-15T10:00:00Z").unwrap(),
             last_seen: parse_timestamp("2026-01-15T12:00:00Z").unwrap(),
@@ -418,6 +419,7 @@ mod tests {
             product_label: None,
             trusted: false,
             online: false,
+            friendly_name: None,
             previous_macs: Vec::new(),
             first_seen: parse_timestamp("2026-01-15T10:00:00Z").unwrap(),
             last_seen: parse_timestamp("2026-01-15T12:00:00Z").unwrap(),
@@ -447,6 +449,7 @@ mod tests {
             product_label: None,
             trusted: false,
             online: false,
+            friendly_name: None,
             previous_macs: Vec::new(),
             first_seen: parse_timestamp("2026-01-15T10:00:00Z").unwrap(),
             last_seen: parse_timestamp("2026-01-15T10:00:00Z").unwrap(),
@@ -1666,6 +1669,7 @@ mod tests {
             product_label: None,
             trusted: false,
             online: false,
+            friendly_name: None,
             previous_macs: Vec::new(),
             first_seen: parse_timestamp("2026-01-15T10:00:00Z").unwrap(),
             last_seen: parse_timestamp("2026-01-15T12:00:00Z").unwrap(),
@@ -2527,6 +2531,31 @@ mod tests {
             None,
             "a DUID identifier must never resolve to an OUI vendor"
         );
+    }
+
+    #[test]
+    fn test_ipv6_address_list_is_capped_and_keeps_the_primary() {
+        use crate::device::MAX_IPV6_ADDRESSES_PER_DEVICE;
+        let temp_path = std::env::temp_dir().join("lanwatch_test_ipv6_cap.db");
+        let _ = std::fs::remove_file(&temp_path);
+        let mut tracker = DeviceTracker::new(&temp_path).unwrap();
+        let mac = "aa:bb:cc:00:11:22";
+        let global: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        tracker.update_device(mac, IpAddr::V6(global), None);
+        // A flood of link-local sources from the same MAC.
+        for i in 0..(MAX_IPV6_ADDRESSES_PER_DEVICE as u16 * 4) {
+            let addr = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 1, i);
+            tracker.update_device(mac, IpAddr::V6(addr), None);
+        }
+        let device = tracker.get_device(mac).unwrap();
+        assert_eq!(device.ipv6_addresses.len(), MAX_IPV6_ADDRESSES_PER_DEVICE);
+        assert_eq!(device.ipv6_address, Some(IpAddr::V6(global)));
+        assert!(device.ipv6_addresses.contains(&global));
+        // The index holds no more than the device does.
+        let indexed = tracker.ip_index.values().filter(|m| *m == mac).count();
+        assert_eq!(indexed, MAX_IPV6_ADDRESSES_PER_DEVICE);
+        drop(tracker);
+        let _ = std::fs::remove_file(&temp_path);
     }
 
     #[test]

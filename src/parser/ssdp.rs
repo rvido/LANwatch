@@ -104,12 +104,7 @@ impl SsdpPacket {
     /// Rules are evaluated in table order and the first match wins, so the
     /// order of `SSDP_VENDOR_RULES` is behavior, not just presentation.
     pub fn detect_vendor(&self) -> Option<Vendor> {
-        for rule in SSDP_VENDOR_RULES {
-            if self.contains_any(rule.patterns) {
-                return Some(rule.vendor.clone());
-            }
-        }
-        None
+        detect_vendor_by(|needles| self.contains_any(needles))
     }
 
     /// Detect device type from the packet's SSDP fingerprints.
@@ -119,15 +114,7 @@ impl SsdpPacket {
     /// As with vendors, table order decides ties -- notably the gateway rule
     /// qualified by a PC hint is checked before the plain router rule.
     pub fn detect_device_type(&self) -> Option<DeviceType> {
-        for rule in SSDP_DEVICE_TYPE_RULES {
-            let matches_any = self.contains_any(rule.any_patterns);
-            let matches_extra =
-                rule.extra_patterns.is_empty() || self.contains_any(rule.extra_patterns);
-            if matches_any && matches_extra {
-                return Some(rule.device_type.clone());
-            }
-        }
-        None
+        detect_device_type_by(|needles| self.contains_any(needles))
     }
 
     /// True if any needle appears in the start line or in any header name or
@@ -310,6 +297,36 @@ const SSDP_DEVICE_TYPE_RULES: &[SsdpDeviceTypeRule] = &[
         device_type: DeviceType::SmartHomeDevice,
     },
 ];
+
+/// Applies [`SSDP_VENDOR_RULES`] in table order, first match wins.
+fn detect_vendor_by(contains_any: impl Fn(&[&str]) -> bool) -> Option<Vendor> {
+    SSDP_VENDOR_RULES
+        .iter()
+        .find(|rule| contains_any(rule.patterns))
+        .map(|rule| rule.vendor.clone())
+}
+
+/// Applies [`SSDP_DEVICE_TYPE_RULES`] in table order, first match wins.
+fn detect_device_type_by(contains_any: impl Fn(&[&str]) -> bool) -> Option<DeviceType> {
+    SSDP_DEVICE_TYPE_RULES
+        .iter()
+        .find(|rule| {
+            contains_any(rule.any_patterns)
+                && (rule.extra_patterns.is_empty() || contains_any(rule.extra_patterns))
+        })
+        .map(|rule| rule.device_type.clone())
+}
+
+/// The SSDP vendor rules, run over free text such as the fields of a UPnP
+/// device description instead of a packet's headers.
+pub(crate) fn detect_vendor_in(texts: &[&str]) -> Option<Vendor> {
+    detect_vendor_by(|needles| texts.iter().any(|text| contains_any_in(text, needles)))
+}
+
+/// The SSDP device-type rules, run over free text. See [`detect_vendor_in`].
+pub(crate) fn detect_device_type_in(texts: &[&str]) -> Option<DeviceType> {
+    detect_device_type_by(|needles| texts.iter().any(|text| contains_any_in(text, needles)))
+}
 
 /// True if any of `needles` appears in `haystack`, ignoring ASCII case.
 fn contains_any_in(haystack: &str, needles: &[&str]) -> bool {

@@ -1101,6 +1101,8 @@
             if (!device) return 'this device';
             // A person's own name for the device beats anything it announces.
             if (device.product_label) return device.product_label;
+            // The name set on the device itself, from its UPnP description.
+            if (device.friendly_name) return device.friendly_name;
             if (device.hostname) return device.hostname;
             if (device.vendor === 'Private MAC Address') {
                 // A randomised MAC names no manufacturer, so "Private MAC
@@ -1479,12 +1481,13 @@
                     matchesIpv6 ||
                     (d.device_type || '').toLowerCase().includes(search) ||
                     (d.vendor || '').toLowerCase().includes(search) ||
-                    (d.system_description || '').toLowerCase().includes(search);
+                    (d.system_description || '').toLowerCase().includes(search) ||
+                    (d.friendly_name || '').toLowerCase().includes(search);
                 return matchesFilter && matchesSearch;
             });
 
             // Diff check: only rebuild grid DOM if the matched keys/values have changed
-            const currentMatchedKeys = filtered.map(d => `${d.mac_address}-${d.ip_address}-${d.ipv6_address}-${(d.ipv6_addresses || []).length}-${d.hostname}-${d.device_type}-${d.online}-${d.trusted}-${d.product_label}`).join('|');
+            const currentMatchedKeys = filtered.map(d => `${d.mac_address}-${d.ip_address}-${d.ipv6_address}-${(d.ipv6_addresses || []).length}-${d.hostname}-${d.device_type}-${d.online}-${d.trusted}-${d.product_label}-${d.friendly_name}`).join('|');
             if (currentMatchedKeys === lastRenderedKeys) {
                 return;
             }

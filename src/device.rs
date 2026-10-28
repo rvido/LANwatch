@@ -21,6 +21,14 @@ use crate::types::{DeviceType, Vendor};
 /// A real device advertises a handful.
 const MAX_SERVICES_PER_DEVICE: usize = 64;
 
+/// Most IPv6 addresses kept per device.
+///
+/// Like the service list, the address list is filled from unauthenticated
+/// traffic: one host can send from any number of addresses in its /64, and
+/// each one was kept, indexed, and re-serialized on every flush. Phones rotate
+/// privacy addresses daily, so the oldest is dropped to make room.
+pub const MAX_IPV6_ADDRESSES_PER_DEVICE: usize = 32;
+
 /// Maximum length of a single service name, in bytes.
 const MAX_SERVICE_NAME_LEN: usize = 128;
 
@@ -83,6 +91,13 @@ pub struct DeviceInfo {
     /// to the `devices` table or to CSV.
     #[serde(default)]
     pub product_label: Option<String>,
+    /// The name the device gives itself in its UPnP description, e.g.
+    /// "Living Room TV". Fetched only with `--upnp-describe`.
+    ///
+    /// Owned by the `upnp_descriptions` table, so it is not written to the
+    /// `devices` table or to CSV.
+    #[serde(default)]
+    pub friendly_name: Option<String>,
     /// Whether a person marked this device as theirs.
     ///
     /// Owned by the `trusted_devices` table, so it is not written to the
@@ -141,6 +156,7 @@ impl DeviceInfo {
             product_label: None,
             trusted: false,
             online: true,
+            friendly_name: None,
             previous_macs: Vec::new(),
             first_seen: timestamp,
             last_seen: timestamp,
@@ -254,6 +270,17 @@ impl DeviceInfo {
     pub fn set_ipv6_address(&mut self, ipv6: Ipv6Addr) -> bool {
         let mut changed = false;
         if !self.ipv6_addresses.contains(&ipv6) {
+            if self.ipv6_addresses.len() >= MAX_IPV6_ADDRESSES_PER_DEVICE {
+                // Drop the oldest address, but never the primary one.
+                let primary = self.ipv6_address;
+                if let Some(oldest) = self
+                    .ipv6_addresses
+                    .iter()
+                    .position(|a| Some(IpAddr::V6(*a)) != primary)
+                {
+                    self.ipv6_addresses.remove(oldest);
+                }
+            }
             self.ipv6_addresses.push(ipv6);
             changed = true;
         }
@@ -464,6 +491,7 @@ impl DeviceInfo {
             product_label: None,
             trusted: false,
             online: false,
+            friendly_name: None,
             previous_macs: Vec::new(),
             first_seen,
             last_seen,

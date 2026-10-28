@@ -295,6 +295,9 @@ fn display_name(device: &DeviceInfo) -> String {
     if let Some(label) = device.product_label.as_deref().filter(|l| !l.is_empty()) {
         return label.to_string();
     }
+    if let Some(name) = device.friendly_name.as_deref().filter(|n| !n.is_empty()) {
+        return name.to_string();
+    }
     if let Some(hostname) = device.hostname.as_deref().filter(|h| !h.is_empty()) {
         return hostname.to_string();
     }

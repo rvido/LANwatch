@@ -245,6 +245,18 @@ pub struct DeviceTracker {
     pub(crate) online_state: HashMap<String, bool>,
     /// Whether random-MAC merging runs in the presence sweep. See `mac_merge.rs`.
     pub(crate) mac_merge_enabled: bool,
+    /// Whether to fetch UPnP descriptions. See `upnp_describe.rs`.
+    #[cfg(feature = "ssdp")]
+    pub(crate) upnp_describe_enabled: bool,
+    /// Fetched UPnP descriptions, per MAC.
+    #[cfg(feature = "ssdp")]
+    pub(crate) upnp_descriptions: HashMap<String, crate::upnp_describe::UpnpDescription>,
+    /// Description fetches waiting for the fetch thread.
+    #[cfg(feature = "ssdp")]
+    pub(crate) upnp_pending: Vec<crate::upnp_describe::UpnpTarget>,
+    /// MACs whose description was tried this run.
+    #[cfg(feature = "ssdp")]
+    pub(crate) upnp_attempted: HashSet<String>,
 }
 
 impl DeviceTracker {
@@ -327,6 +339,8 @@ impl DeviceTracker {
         Self::migrate_fingerprint_columns(&conn)?;
         Self::create_presence_schema(&conn)?;
         Self::create_merge_schema(&conn)?;
+        #[cfg(feature = "ssdp")]
+        Self::create_upnp_schema(&conn)?;
 
         let mut tracker = Self {
             devices: HashMap::new(),
@@ -346,6 +360,14 @@ impl DeviceTracker {
             known_macs: HashSet::new(),
             online_state: HashMap::new(),
             mac_merge_enabled: true,
+            #[cfg(feature = "ssdp")]
+            upnp_describe_enabled: false,
+            #[cfg(feature = "ssdp")]
+            upnp_descriptions: HashMap::new(),
+            #[cfg(feature = "ssdp")]
+            upnp_pending: Vec::new(),
+            #[cfg(feature = "ssdp")]
+            upnp_attempted: HashSet::new(),
         };
 
         tracker.load_from_db()?;
@@ -527,7 +549,7 @@ impl DeviceTracker {
     /// to run on every packet, so a device that is rediscovered after being
     /// removed comes back already carrying its correction rather than waiting
     /// for the next sweep. Returns whether anything changed.
-    fn apply_override_to(&mut self, mac: &str) -> bool {
+    pub(crate) fn apply_override_to(&mut self, mac: &str) -> bool {
         let Some(ov) = self.overrides.get(mac) else {
             return false;
         };
@@ -715,6 +737,12 @@ impl DeviceTracker {
                                 ipv6_addresses.push(ipv6);
                             }
                         }
+                        // A database written before the cap may hold more;
+                        // keep the newest.
+                        let excess = ipv6_addresses
+                            .len()
+                            .saturating_sub(crate::device::MAX_IPV6_ADDRESSES_PER_DEVICE);
+                        ipv6_addresses.drain(..excess);
                     }
 
                     let mut services = Vec::new();
@@ -751,6 +779,7 @@ impl DeviceTracker {
                         // Filled in by `load_presence_from_db` and the sweep.
                         trusted: false,
                         online: false,
+                        friendly_name: None,
                         previous_macs: Vec::new(),
                         first_seen,
                         last_seen,
@@ -773,6 +802,8 @@ impl DeviceTracker {
         self.apply_overrides();
         self.load_presence_from_db()?;
         self.load_merges_from_db()?;
+        #[cfg(feature = "ssdp")]
+        self.load_upnp_from_db()?;
 
         Ok(())
     }
@@ -1200,17 +1231,31 @@ impl DeviceTracker {
             None => return,
         };
 
-        for ip in ips {
-            let previous = self.ip_index.insert(ip, mac.to_string());
-            let Some(previous) = previous else { continue };
+        let mut added = false;
+        for ip in &ips {
+            let previous = self.ip_index.insert(*ip, mac.to_string());
+            let Some(previous) = previous else {
+                added = true;
+                continue;
+            };
             if previous == mac {
                 continue;
             }
+            added = true;
             if let Some(loser) = self.devices.get_mut(&previous)
-                && loser.remove_ip(ip)
+                && loser.remove_ip(*ip)
             {
                 self.dirty_devices.lock().unwrap().insert(previous);
             }
+        }
+
+        // A device at the address cap dropped its oldest address to take the
+        // new one. Drop that from the index too, or the index keeps growing.
+        // Only checked when an address was added, so the usual packet from a
+        // known address costs no scan.
+        if added && ips.len() > crate::device::MAX_IPV6_ADDRESSES_PER_DEVICE {
+            self.ip_index
+                .retain(|ip, owner| owner != mac || ips.contains(ip));
         }
     }
 
@@ -2849,7 +2894,7 @@ impl DeviceTracker {
     /// protocol -- isn't itself Eero-flavored. Centralized so mDNS, SSDP, and
     /// WSD all enforce the same anti-flapping rule instead of only mDNS.
     #[cfg(any(feature = "mdns", feature = "ssdp"))]
-    fn eero_protected(
+    pub(crate) fn eero_protected(
         device: &DeviceInfo,
         oui_vendor: Option<&str>,
         extra_hint_is_eero: bool,
@@ -2866,7 +2911,7 @@ impl DeviceTracker {
                 .unwrap_or(false)
     }
 
-    fn should_replace_vendor(
+    pub(crate) fn should_replace_vendor(
         current: Option<&Vendor>,
         incoming: &Vendor,
         oui_vendor: Option<&str>,
@@ -2895,7 +2940,7 @@ impl DeviceTracker {
         }
     }
 
-    fn should_replace_device_type(device: &DeviceInfo, incoming: &DeviceType) -> bool {
+    pub(crate) fn should_replace_device_type(device: &DeviceInfo, incoming: &DeviceType) -> bool {
         let current = device.device_type.as_ref();
         match current {
             None => true,
@@ -3117,6 +3162,7 @@ impl DeviceTracker {
         self.dirty_devices.lock().unwrap().insert(mac.clone());
 
         self.record_ssdp_attributes(&mac, packet);
+        self.note_upnp_location(&mac, packet);
 
         if self.auto_save {
             let _ = self.save_to_db();
@@ -3880,6 +3926,8 @@ impl DeviceTracker {
         drop(conn);
         let had_presence = self.forget_presence(&key)?;
         let had_merges = self.forget_merges(&key)?;
+        #[cfg(feature = "ssdp")]
+        let had_merges = self.forget_upnp(&key)? || had_merges;
 
         Ok(had_device
             || had_attributes

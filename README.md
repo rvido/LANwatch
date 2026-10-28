@@ -31,6 +31,7 @@ Release history: [CHANGELOG.md](CHANGELOG.md).
 - **Agent Fingerprinting**: Reads the product names a device announces in its SSDP `SERVER` and `USER-AGENT` headers, so a responder's firmware stack (`openwrt`, `miniupnpd`, `portable-sdk-for-upnp-devices`) and a searching host's operating system or application become attributes in their own right. A multi-word product name stays one token, and versions and `(...)` comments are dropped. See [Device Attribute Fingerprinting](#device-attribute-fingerprinting).
 - **Presence History & New-Device Alerts**: Logs when each device comes online and goes offline, and runs your own command (`--on-event`) when a new MAC joins the LAN. Mark your own devices as trusted, and with `--untrusted-only` the alerts fire only for strangers. See [Presence, Trust & Alerts](#presence-trust--alerts).
 - **Random-MAC Merging**: Phones and laptops change their private MAC address now and then. LANwatch recognises a known device under its new address by its hostname and folds the old record into it, so the label, the trust mark and the history stay. Strict rules refuse any doubtful case, and every merge is reported. See [Random-MAC Merging](#random-mac-merging).
+- **UPnP Device Names** (optional): With `--upnp-describe`, LANwatch reads each UPnP device's description once, so the dashboard shows "Living Room TV" with its maker and model instead of a MAC address. Off by default, because it connects to the device. See [UPnP Device Descriptions](#upnp-device-descriptions---upnp-describe). Gated under the `ssdp` feature.
 - **Home Assistant Integration** (optional): Publishes every device to Home Assistant over MQTT discovery as a `device_tracker` entity that reads `home` or `not_home`. No extra library: the small MQTT client is built in. See [Home Assistant](#home-assistant). Gated under the `homeassistant` feature.
 - **Repeating Active Discovery**: `--query-interval` re-sends the mDNS and SSDP probes on a timer, so a device that was asleep or off the LAN at startup is still found. See [Repeating the Active Probes](#repeating-the-active-probes---query-interval).
 - **Dashboard Device Review**: Correct a device's type and vendor and give it a product name directly in the web dashboard. Corrections are stored in the database, survive a restart, and always beat heuristic classification. One click then exports every reviewed device as a catalogue file that carries no MAC, IP or hostname.
@@ -85,12 +86,12 @@ No action is required. Two new tables, `trusted_devices` and
 `presence_events`, are added to an existing database on startup. Devices
 already in the database are not reported as new.
 
-- **Two new fields in device JSON.** `trusted` and `online` are added to
-  every device in `/devices`. Library code that builds a `DeviceInfo` with a
+- **New fields in device JSON.** `trusted`, `online` and `friendly_name` are
+  added to every device in `/devices`. Library code that builds a `DeviceInfo` with a
   struct literal must set them; `DeviceInfo::new` sets them for you.
 - **New flags.** `--on-event`, `--untrusted-only`, `--offline-after`,
-  `--trust`, `--trust-all` and `--no-mac-merge`, and with the new
-  `homeassistant` feature, `--mqtt`, `--mqtt-user`, `--mqtt-prefix` and
+  `--trust`, `--trust-all`, `--no-mac-merge` and `--upnp-describe`, and with
+  the new `homeassistant` feature, `--mqtt`, `--mqtt-user`, `--mqtt-prefix` and
   `--mqtt-trusted-only`. No existing flag changed.
 - **Random-MAC merging is on by default, and a merge cannot be undone.** On
   the first start, LANwatch may fold old records of rotated phones into their
@@ -263,6 +264,9 @@ sudo cargo run --features mdns -- en0 --mdns-query
 # Enable SSDP with active M-SEARCH discovery probes
 sudo cargo run --features ssdp -- en0 --ssdp-query
 
+# Also fetch each UPnP device's description once, for its name and model
+sudo cargo run --features ssdp -- en0 --ssdp-query --upnp-describe
+
 # Pin a specific device's type when it can't be auto-detected (repeatable)
 sudo cargo run -- en0 --override 'c0:84:7d:11:22:33=Security System'
 
@@ -323,7 +327,7 @@ Removing a device and forgetting one are different actions:
 
 Discovery is keyed on MAC alone, so a device still on the LAN reappears within seconds of a removal. Keeping the correction means one careless click cannot destroy review work; the device comes back already labelled. `--forget` is the deliberate opposite, for a device that has left the network for good and whose rows no dashboard can reach any more. Stop the service before running it, or a live capture may still hold the device in memory and write it straight back.
 
-Two more tables serve [Presence, Trust & Alerts](#presence-trust--alerts): **trusted_devices** (`mac_address`, `trusted_at`) and **presence_events** (`mac_address`, `event`, `at`, `previous_mac`, where `event` is `new`, `online`, `offline` or `merged`). Presence events older than 90 days are deleted. A last table, **device_merges** (`old_mac`, `new_mac`, `at`), logs every [random-MAC merge](#random-mac-merging).
+Two more tables serve [Presence, Trust & Alerts](#presence-trust--alerts): **trusted_devices** (`mac_address`, `trusted_at`) and **presence_events** (`mac_address`, `event`, `at`, `previous_mac`, where `event` is `new`, `online`, `offline` or `merged`). Presence events older than 90 days are deleted. The table **device_merges** (`old_mac`, `new_mac`, `at`) logs every [random-MAC merge](#random-mac-merging). With `--upnp-describe`, **upnp_descriptions** (`mac_address`, `friendly_name`, `manufacturer`, `model_name`, `model_number`, `model_description`, `device_type`, `fetched_at`) keeps each [UPnP description](#upnp-device-descriptions---upnp-describe), so it is fetched once, not on every start.
 
 The fingerprint columns and the new tables are added to an existing database automatically on startup. No migration step and no database wipe is needed.
 
@@ -656,6 +660,38 @@ command.
 
 A merge cannot be undone. To switch merging off, start with `--no-mac-merge`.
 Devices with no hostname (many Android phones) are never merged.
+
+### UPnP Device Descriptions (`--upnp-describe`)
+
+An SSDP advertisement holds only a `LOCATION` URL. The XML file behind it
+says much more: the name set on the device ("Living Room TV"), the maker and
+the model. With `--upnp-describe` (which also turns on `--ssdp`), LANwatch
+fetches that file once per device and uses it:
+
+- **The name** is shown in the dashboard and in Home Assistant, before the
+  hostname. Your own product name still comes first.
+- **The maker and model** fill the system description, if nothing else did.
+- **Vendor and type** are guessed from the maker, model and UPnP device type,
+  with the same rules as SSDP headers. Your overrides always win.
+
+The result is saved in the `upnp_descriptions` table, so each device is
+fetched only once. A failed fetch is tried again on the next start.
+
+This is **active traffic**: LANwatch opens an HTTP connection to the device.
+So it is off by default, and the fetch is narrow:
+
+- Only `http://` to the IP address that sent the advertisement, and only if
+  that address is private (`10/8`, `172.16/12`, `192.168/16`, `169.254/16`,
+  or IPv6 `fc00::/7`). A packet cannot send LANwatch to another host or to
+  the internet. Host names are not resolved.
+- One `GET`, no redirects, 2 s to connect, 5 s in total, 64 KiB at most.
+- At most 1024 devices per run, 8 every 5 seconds.
+- The reply is untrusted. Only six fields of the root device are read, and
+  each is cleaned like any other string from the network.
+
+```bash
+sudo lanwatch eth0 --ssdp-query --upnp-describe
+```
 
 ### Home Assistant
 

@@ -32,6 +32,10 @@ pub mod types;
 #[cfg(feature = "mdns")]
 pub mod mdns_registry;
 
+/// UPnP device descriptions, fetched on request.
+#[cfg(feature = "ssdp")]
+pub mod upnp_describe;
+
 /// Home Assistant integration over MQTT discovery.
 #[cfg(feature = "homeassistant")]
 pub mod homeassistant;
@@ -60,6 +64,12 @@ pub use types::*;
 
 #[cfg(feature = "mdns")]
 pub use mdns_registry::{MdnsServiceInfo, MdnsServiceRegistry};
+
+#[cfg(feature = "ssdp")]
+pub use upnp_describe::{
+    MAX_DESCRIPTION_BYTES, UpnpDescription, UpnpTarget, description_target, fetch_description,
+    parse_description, start_upnp_describer,
+};
 
 #[cfg(feature = "homeassistant")]
 pub use homeassistant::{

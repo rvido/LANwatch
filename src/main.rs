@@ -18,7 +18,7 @@ use lanwatch::{MdnsQuerier, MdnsRecordData, MdnsServiceRegistry};
 #[cfg(any(feature = "mdns", feature = "ssdp"))]
 use lanwatch::{NetworkEvent, NetworkSniffer, display_safe, format_mac};
 #[cfg(feature = "ssdp")]
-use lanwatch::{SsdpPacket, SsdpQuerier};
+use lanwatch::{SsdpPacket, SsdpQuerier, start_upnp_describer};
 use std::env;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, RwLock};
@@ -238,6 +238,12 @@ fn main() {
         println!("Random-MAC merging: disabled");
     }
 
+    #[cfg(feature = "ssdp")]
+    if config.upnp_describe {
+        tracker.set_upnp_describe(true);
+        println!("UPnP descriptions: fetching each device's LOCATION once");
+    }
+
     // Wrap tracker in Arc<RwLock> for thread-safe sharing
     let tracker = Arc::new(RwLock::new(tracker));
 
@@ -301,6 +307,11 @@ fn main() {
     }
 
     start_presence_sweep(Arc::clone(&tracker), &config);
+
+    #[cfg(feature = "ssdp")]
+    if config.upnp_describe {
+        start_upnp_describer(Arc::clone(&tracker));
+    }
 
     #[cfg(feature = "homeassistant")]
     if let Some(ha) = config.home_assistant.clone() {
@@ -1243,6 +1254,9 @@ struct Config {
     enable_ssdp: bool,
     #[cfg(feature = "ssdp")]
     ssdp_query: bool,
+    /// Fetch each device's UPnP description once.
+    #[cfg(feature = "ssdp")]
+    upnp_describe: bool,
     /// How often to re-send the active probes. `None` means send them once.
     #[cfg(any(feature = "mdns", feature = "ssdp"))]
     query_interval: Option<Duration>,
@@ -1384,6 +1398,8 @@ fn parse_args(args: &[String]) -> Config {
     let mut enable_ssdp = false;
     #[cfg(feature = "ssdp")]
     let mut ssdp_query = false;
+    #[cfg(feature = "ssdp")]
+    let mut upnp_describe = false;
     #[cfg(any(feature = "mdns", feature = "ssdp"))]
     let mut query_interval: Option<Duration> = None;
     let mut oui_file: Option<String> = None;
@@ -1465,8 +1481,14 @@ fn parse_args(args: &[String]) -> Config {
                 ssdp_query = true;
                 i += 1;
             }
+            #[cfg(feature = "ssdp")]
+            "--upnp-describe" => {
+                enable_ssdp = true;
+                upnp_describe = true;
+                i += 1;
+            }
             #[cfg(not(feature = "ssdp"))]
-            "-p" | "--ssdp" | "--upnp" | "--ssdp-query" => {
+            "-p" | "--ssdp" | "--upnp" | "--ssdp-query" | "--upnp-describe" => {
                 eprintln!("Error: SSDP options require a binary built with the 'ssdp' feature.");
                 eprintln!("Rebuild with: cargo build --release --features ssdp");
                 std::process::exit(1);
@@ -1773,6 +1795,8 @@ fn parse_args(args: &[String]) -> Config {
         enable_ssdp,
         #[cfg(feature = "ssdp")]
         ssdp_query,
+        #[cfg(feature = "ssdp")]
+        upnp_describe,
         #[cfg(any(feature = "mdns", feature = "ssdp"))]
         query_interval,
         oui_file,
@@ -1865,6 +1889,10 @@ fn print_usage() {
         println!("  -p, --ssdp             Enable SSDP/UPnP sniffing for device discovery");
         println!("  --ssdp-query           Enable SSDP and send active M-SEARCH discovery probes");
         println!("  --upnp                 Alias for --ssdp");
+        println!(
+            "  --upnp-describe        Enable SSDP and fetch each device's UPnP description once"
+        );
+        println!("                         (HTTP to the device itself; names, makers and models)");
     }
     #[cfg(any(feature = "mdns", feature = "ssdp"))]
     {
@@ -2179,6 +2207,20 @@ mod tests {
         // Overflow must not wrap round to a tiny interval.
         assert_eq!(parse_duration("99999999999999999999h"), None);
         assert_eq!(parse_duration(&format!("{}h", u64::MAX)), None);
+    }
+
+    #[cfg(feature = "ssdp")]
+    #[test]
+    fn test_upnp_describe_is_off_by_default_and_turns_on_ssdp() {
+        let args = |extra: &[&str]| {
+            let mut v = vec!["lanwatch".to_string(), "eth0".to_string()];
+            v.extend(extra.iter().map(|a| a.to_string()));
+            parse_args(&v)
+        };
+        let config = args(&["--ssdp-query"]);
+        assert!(!config.upnp_describe);
+        let config = args(&["--upnp-describe"]);
+        assert!(config.upnp_describe && config.enable_ssdp && !config.ssdp_query);
     }
 
     #[cfg(feature = "homeassistant")]
