@@ -7,8 +7,8 @@
 #[cfg(feature = "http-api")]
 use lanwatch::start_api_server_with_hosts;
 use lanwatch::{
-    DeviceTracker, DeviceType, DhcpEvent, DhcpSniffer, Dhcpv6Option, FingerprintCatalogue,
-    IEEE_OUI_URL, OuiRegistry, download_ieee_oui, list_interfaces,
+    DEFAULT_OFFLINE_AFTER, DeviceTracker, DeviceType, DhcpEvent, DhcpSniffer, Dhcpv6Option,
+    EventHook, FingerprintCatalogue, IEEE_OUI_URL, OuiRegistry, download_ieee_oui, list_interfaces,
 };
 #[cfg(feature = "mdns")]
 use lanwatch::{MdnsQuerier, MdnsRecordData, MdnsServiceRegistry};
@@ -20,7 +20,7 @@ use std::env;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, RwLock};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 const DEFAULT_DB_PATH: &str = "devices.db";
 #[cfg(feature = "http-api")]
@@ -42,6 +42,11 @@ const DROPPED_EVENT_REPORT_INTERVAL: u64 = 1000;
 /// turn LANwatch into a flood source on the operator's own LAN.
 #[cfg(any(feature = "mdns", feature = "ssdp"))]
 const MIN_QUERY_INTERVAL: Duration = Duration::from_secs(30);
+/// How often the presence sweep compares `last_seen` against `--offline-after`.
+const PRESENCE_SWEEP_INTERVAL: Duration = Duration::from_secs(10);
+/// Shortest accepted `--offline-after`. Shorter than a couple of sweeps, and
+/// every quiet device would flap between online and offline.
+const MIN_OFFLINE_AFTER: Duration = Duration::from_secs(60);
 
 fn main() {
     // Parse command line arguments
@@ -67,6 +72,11 @@ fn main() {
     // attribute tokens, so nothing about the device comes back.
     if let Some(ref mac) = config.forget_mac {
         handle_forget(&config.db_path, mac);
+        return;
+    }
+
+    if config.trust_all || !config.trust_macs.is_empty() {
+        handle_trust(&config.db_path, &config.trust_macs, config.trust_all);
         return;
     }
 
@@ -281,6 +291,8 @@ fn main() {
             );
         }
     }
+
+    start_presence_sweep(Arc::clone(&tracker), &config);
 
     println!("Press Ctrl+C to stop\n");
 
@@ -1224,6 +1236,16 @@ struct Config {
     /// Where to write an attribute dump before exiting.
     dump_fingerprints: Option<String>,
     forget_mac: Option<String>,
+    /// MACs to add to the trusted list before exiting.
+    trust_macs: Vec<String>,
+    /// Trust every device in the database, then exit.
+    trust_all: bool,
+    /// Silence after which a device counts as offline.
+    offline_after: Duration,
+    /// Shell command run for each presence event.
+    on_event: Option<String>,
+    /// Skip the hook for trusted devices.
+    untrusted_only: bool,
 }
 
 impl Config {
@@ -1250,7 +1272,6 @@ impl Config {
 ///
 /// Returns `None` for anything it cannot read, so the caller can refuse the
 /// argument rather than silently picking a value the operator did not ask for.
-#[cfg(any(feature = "mdns", feature = "ssdp"))]
 fn parse_duration(value: &str) -> Option<Duration> {
     let value = value.trim();
     // The suffix is matched as a byte, so slicing it off is always on a char
@@ -1316,6 +1337,11 @@ fn parse_args(args: &[String]) -> Config {
     let mut fingerprints_file: Option<String> = None;
     let mut dump_fingerprints: Option<String> = None;
     let mut forget_mac: Option<String> = None;
+    let mut trust_macs: Vec<String> = Vec::new();
+    let mut trust_all = false;
+    let mut offline_after = DEFAULT_OFFLINE_AFTER;
+    let mut on_event: Option<String> = None;
+    let mut untrusted_only = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -1492,6 +1518,56 @@ fn parse_args(args: &[String]) -> Config {
                     std::process::exit(1);
                 }
             }
+            "--trust" => {
+                if i + 1 < args.len() {
+                    trust_macs.push(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    eprintln!("Error: --trust requires a MAC address");
+                    std::process::exit(1);
+                }
+            }
+            "--trust-all" => {
+                trust_all = true;
+                i += 1;
+            }
+            "--offline-after" => {
+                if i + 1 >= args.len() {
+                    eprintln!("Error: --offline-after requires a duration, e.g. 30m");
+                    std::process::exit(1);
+                }
+                match parse_duration(&args[i + 1]) {
+                    Some(value) if value >= MIN_OFFLINE_AFTER => offline_after = value,
+                    Some(_) => {
+                        eprintln!(
+                            "Error: --offline-after must be at least {}s",
+                            MIN_OFFLINE_AFTER.as_secs()
+                        );
+                        std::process::exit(1);
+                    }
+                    None => {
+                        eprintln!(
+                            "Error: --offline-after could not read '{}'. Use 90s, 15m or 2h.",
+                            args[i + 1]
+                        );
+                        std::process::exit(1);
+                    }
+                }
+                i += 2;
+            }
+            "--on-event" => {
+                if i + 1 < args.len() {
+                    on_event = Some(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    eprintln!("Error: --on-event requires a shell command");
+                    std::process::exit(1);
+                }
+            }
+            "--untrusted-only" => {
+                untrusted_only = true;
+                i += 1;
+            }
             "-h" | "--help" => {
                 print_usage();
                 std::process::exit(0);
@@ -1512,7 +1588,13 @@ fn parse_args(args: &[String]) -> Config {
     // mode that does not need an interface.
     let interface_name = match interface_name {
         Some(name) => name,
-        None if dump_fingerprints.is_some() || forget_mac.is_some() => String::new(),
+        None if dump_fingerprints.is_some()
+            || forget_mac.is_some()
+            || trust_all
+            || !trust_macs.is_empty() =>
+        {
+            String::new()
+        }
         None => {
             print_usage();
             println!("\nAvailable interfaces:");
@@ -1548,6 +1630,11 @@ fn parse_args(args: &[String]) -> Config {
         fingerprints_file,
         dump_fingerprints,
         forget_mac,
+        trust_macs,
+        trust_all,
+        offline_after,
+        on_event,
+        untrusted_only,
         override_specs,
         overrides_file,
     }
@@ -1584,6 +1671,18 @@ fn print_usage() {
     println!(
         "  --forget <MAC>         Erase one device's sightings, attributes and correction, then exit"
     );
+    println!("  --trust <MAC>          Add a device to the trusted list, then exit; repeatable");
+    println!("  --trust-all            Trust every device in the database, then exit");
+    println!(
+        "  --offline-after <DUR>  Silence before a device counts as offline (default: {}m; min {}s)",
+        DEFAULT_OFFLINE_AFTER.as_secs() / 60,
+        MIN_OFFLINE_AFTER.as_secs()
+    );
+    println!(
+        "  --on-event <CMD>       Run CMD (via sh -c) when a device is new, online or offline;"
+    );
+    println!("                         details in LANWATCH_* variables and as JSON on stdin");
+    println!("  --untrusted-only       Run --on-event only for devices not on the trusted list");
     #[cfg(feature = "http-api")]
     {
         println!("  -a, --api <ADDR:PORT>  Start HTTP API server (e.g., 127.0.0.1:8080)");
@@ -1690,6 +1789,108 @@ fn handle_forget(db_path: &str, mac: &str) {
             std::process::exit(1);
         }
     }
+}
+
+fn handle_trust(db_path: &str, macs: &[String], all: bool) {
+    let mut tracker = match DeviceTracker::new(db_path) {
+        Ok(tracker) => tracker,
+        Err(e) => {
+            eprintln!("Error opening {}: {}", db_path, e);
+            std::process::exit(1);
+        }
+    };
+
+    if all {
+        match tracker.trust_all() {
+            Ok(count) => println!("Trusted {} more device(s).", count),
+            Err(e) => {
+                eprintln!("Error trusting devices: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+    for mac in macs {
+        match tracker.set_trusted(mac, true) {
+            Ok(true) => println!("Trusted {}.", mac),
+            Ok(false) => println!("No device {} in {}. Check the MAC address.", mac, db_path),
+            Err(e) => {
+                eprintln!("Error trusting {}: {}", mac, e);
+                std::process::exit(1);
+            }
+        }
+    }
+    println!(
+        "Trusted list: {} device(s). Restart a running capture to pick this up.",
+        tracker.trusted_count()
+    );
+}
+
+/// Starts the thread that turns `last_seen` into online/offline events.
+///
+/// It runs whatever sniffer is active, because it reads only the tracker.
+/// The hook runs after the write lock is released, so a slow command never
+/// holds up capture or the API.
+fn start_presence_sweep(tracker: Arc<RwLock<DeviceTracker>>, config: &Config) {
+    let offline_after = config.offline_after;
+    let hook = config
+        .on_event
+        .as_ref()
+        .map(|command| EventHook::new(command.clone(), config.untrusted_only));
+
+    println!(
+        "Devices count as offline after {}s of silence",
+        offline_after.as_secs()
+    );
+    match (&hook, config.untrusted_only) {
+        (Some(_), true) => println!("Event hook: enabled, untrusted devices only"),
+        (Some(_), false) => println!("Event hook: enabled"),
+        (None, true) => eprintln!("Warning: --untrusted-only does nothing without --on-event"),
+        (None, false) => {}
+    }
+
+    thread::spawn(move || {
+        let mut reported_drops = 0;
+        loop {
+            let result = match tracker.write() {
+                Ok(mut tracker) => tracker.sweep_presence(SystemTime::now(), offline_after),
+                Err(_) => return,
+            };
+            let events = match result {
+                Ok(events) => events,
+                Err(e) => {
+                    eprintln!("Warning: Failed to save presence events: {}", e);
+                    Vec::new()
+                }
+            };
+            for event in &events {
+                println!(
+                    "[presence] {} {}{}",
+                    event.event,
+                    event.mac_address,
+                    event
+                        .hostname
+                        .as_deref()
+                        .map(|name| format!(" ({})", lanwatch::display_safe(name)))
+                        .unwrap_or_default()
+                );
+                if let Some(hook) = &hook {
+                    hook.dispatch(event);
+                }
+            }
+            if let Some(hook) = &hook {
+                let dropped = hook.dropped_count();
+                if dropped > reported_drops {
+                    eprintln!(
+                        "Warning: {} event(s) skipped; more than {} hook commands were running",
+                        dropped - reported_drops,
+                        lanwatch::MAX_RUNNING_HOOKS
+                    );
+                    reported_drops = dropped;
+                }
+            }
+            thread::sleep(PRESENCE_SWEEP_INTERVAL);
+        }
+    });
 }
 
 fn handle_dump_fingerprints(db_path: &str, dump_path: &str) {

@@ -369,6 +369,8 @@ mod tests {
             fingerprint_label: None,
             fingerprint_confidence: None,
             product_label: None,
+            trusted: false,
+            online: false,
             first_seen: parse_timestamp("2026-01-15T10:00:00Z").unwrap(),
             last_seen: parse_timestamp("2026-01-15T12:00:00Z").unwrap(),
         };
@@ -413,6 +415,8 @@ mod tests {
             fingerprint_label: None,
             fingerprint_confidence: None,
             product_label: None,
+            trusted: false,
+            online: false,
             first_seen: parse_timestamp("2026-01-15T10:00:00Z").unwrap(),
             last_seen: parse_timestamp("2026-01-15T12:00:00Z").unwrap(),
         };
@@ -439,6 +443,8 @@ mod tests {
             fingerprint_label: None,
             fingerprint_confidence: None,
             product_label: None,
+            trusted: false,
+            online: false,
             first_seen: parse_timestamp("2026-01-15T10:00:00Z").unwrap(),
             last_seen: parse_timestamp("2026-01-15T10:00:00Z").unwrap(),
         };
@@ -1655,6 +1661,8 @@ mod tests {
             fingerprint_label: None,
             fingerprint_confidence: None,
             product_label: None,
+            trusted: false,
+            online: false,
             first_seen: parse_timestamp("2026-01-15T10:00:00Z").unwrap(),
             last_seen: parse_timestamp("2026-01-15T12:00:00Z").unwrap(),
         };

@@ -17,6 +17,8 @@ pub mod fingerprint;
 pub mod oui;
 /// Packet parsing implementations.
 pub mod parser;
+/// Presence history, trusted devices and the event hook.
+pub mod presence;
 /// Packet sniffing and network listeners.
 pub mod sniffer;
 /// Central device tracker registry.
@@ -41,6 +43,10 @@ pub use fingerprint::{
 };
 pub use oui::{IEEE_OUI_URL, OuiRegistry, download_ieee_oui};
 pub use parser::*;
+pub use presence::{
+    DEFAULT_OFFLINE_AFTER, EventHook, MAX_RUNNING_HOOKS, PRESENCE_RETENTION, PresenceEvent,
+    PresenceKind,
+};
 pub use sniffer::*;
 pub use tracker::*;
 pub use types::*;

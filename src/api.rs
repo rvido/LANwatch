@@ -54,6 +54,12 @@ pub(crate) struct ClassificationRequest {
     pub(crate) label: Option<String>,
 }
 
+/// Body of `PUT /devices/<mac>/trust`.
+#[derive(Deserialize)]
+pub(crate) struct TrustRequest {
+    pub(crate) trusted: bool,
+}
+
 /// API response structure
 #[derive(Serialize)]
 pub(crate) struct ApiResponse<T> {
@@ -171,6 +177,10 @@ impl ApiServer {
         println!("  GET /devices/count - Get device count");
         println!("  DELETE /devices/{{mac}} - Remove a single device");
         println!("  DELETE /devices - Remove all devices");
+        println!("  GET /events      - Recent presence events (?limit=100)");
+        println!("  GET /devices/{{mac}}/presence - One device's presence history");
+        println!("  PUT /devices/{{mac}}/trust - Mark a device trusted: {{\"trusted\": true}}");
+        println!("  POST /devices/trust-all - Trust every tracked device");
         println!("  GET /health      - Health check");
         println!();
 
@@ -268,6 +278,18 @@ impl ApiServer {
                 self.handle_device_attributes(&mac)
             }
             ("GET", "/fingerprints/export") => self.handle_export_fingerprints(),
+            ("GET", p) if p == "/events" || p.starts_with("/events?") => {
+                self.handle_presence(None, Self::parse_events_limit(p))
+            }
+            ("GET", p) if Self::suffix_mac(p, "/presence").is_some() => {
+                let mac = Self::suffix_mac(p, "/presence").unwrap_or_default();
+                self.handle_presence(Some(&mac), Self::parse_events_limit(p))
+            }
+            ("POST", "/devices/trust-all") => self.handle_trust_all(request),
+            ("PUT", p) | ("POST", p) if Self::suffix_mac(p, "/trust").is_some() => {
+                let mac = Self::suffix_mac(p, "/trust").unwrap_or_default();
+                self.handle_set_trust(&mac, request)
+            }
             ("PUT", p) | ("POST", p) if Self::classification_mac(p).is_some() => {
                 let mac = Self::classification_mac(p).unwrap_or_default();
                 self.handle_set_classification(&mac, request)
@@ -503,6 +525,34 @@ impl ApiServer {
         Some(Self::percent_decode(mac))
     }
 
+    /// Extracts the MAC from `/devices/<mac><suffix>`, if that is the shape.
+    ///
+    /// Same rule as [`ApiServer::classification_mac`]: returning `None` for any
+    /// other path is what keeps these routes from swallowing `/devices/<mac>`.
+    fn suffix_mac(path: &str, suffix: &str) -> Option<String> {
+        let path = path.split('?').next().unwrap_or(path);
+        let rest = path
+            .strip_prefix("/devices/")
+            .or_else(|| path.strip_prefix("/device/"))?;
+        let mac = rest.strip_suffix(suffix)?;
+        if mac.is_empty() || mac.contains('/') {
+            return None;
+        }
+        Some(Self::percent_decode(mac))
+    }
+
+    /// Reads `?limit=` for the event routes: 100 by default, at most 1000.
+    fn parse_events_limit(path: &str) -> usize {
+        const DEFAULT: usize = 100;
+        const MAX: usize = 1000;
+        path.split_once('?')
+            .into_iter()
+            .flat_map(|(_, query)| query.split('&'))
+            .find_map(|pair| pair.strip_prefix("limit="))
+            .and_then(|value| value.parse::<usize>().ok())
+            .map_or(DEFAULT, |limit| limit.clamp(1, MAX))
+    }
+
     /// Extracts the MAC from `/devices/<mac>/attributes`, if that is the shape.
     ///
     /// Same rule as [`ApiServer::classification_mac`]: returning `None` for any
@@ -559,6 +609,110 @@ impl ApiServer {
                 .unwrap_or_default(),
             )
         })
+    }
+
+    /// Answers 415 unless the request declares a JSON body. See
+    /// [`ApiServer::is_json_request`] for why every write needs this.
+    fn refuse_non_json(request: &tiny_http::Request) -> Option<Response<std::io::Cursor<Vec<u8>>>> {
+        (!Self::is_json_request(request)).then(|| {
+            Self::json(
+                415,
+                serde_json::to_string(&ApiError {
+                    success: false,
+                    error: "Content-Type must be application/json".to_string(),
+                })
+                .unwrap_or_default(),
+            )
+        })
+    }
+
+    /// `GET /events` and `GET /devices/<mac>/presence` -- presence history,
+    /// newest first.
+    ///
+    /// A known device with no history answers 200 with an empty list, for the
+    /// same reason as the attributes route.
+    fn handle_presence(
+        &self,
+        mac: Option<&str>,
+        limit: usize,
+    ) -> Response<std::io::Cursor<Vec<u8>>> {
+        let tracker = match self.tracker.read() {
+            Ok(tracker) => tracker,
+            Err(_) => return self.handle_error("Failed to acquire tracker lock"),
+        };
+        if let Some(mac) = mac
+            && tracker.get_device(mac).is_none()
+        {
+            drop(tracker);
+            return self.handle_not_found();
+        }
+        let history = tracker.presence_history(mac, limit);
+        drop(tracker);
+
+        match history {
+            Ok(events) => Self::json_ok(&ApiResponse {
+                success: true,
+                count: events.len(),
+                data: events,
+            }),
+            Err(_) => self.handle_error("Failed to read presence history"),
+        }
+    }
+
+    /// `PUT /devices/<mac>/trust` with `{"trusted": true}` or `false`.
+    fn handle_set_trust(
+        &self,
+        mac: &str,
+        request: &mut tiny_http::Request,
+    ) -> Response<std::io::Cursor<Vec<u8>>> {
+        if let Some(refusal) = self.refuse_write() {
+            return refusal;
+        }
+        if let Some(refusal) = Self::refuse_non_json(request) {
+            return refusal;
+        }
+        let body = match Self::read_body(request) {
+            Ok(body) => body,
+            Err(_) => return self.handle_bad_request("Could not read the request body"),
+        };
+        let parsed: TrustRequest = match serde_json::from_str(&body) {
+            Ok(parsed) => parsed,
+            Err(_) => return self.handle_bad_request(r#"Body must be {"trusted": true|false}"#),
+        };
+
+        let result = match self.tracker.write() {
+            Ok(mut tracker) => tracker.set_trusted(mac, parsed.trusted),
+            Err(_) => return self.handle_error("Failed to acquire tracker lock"),
+        };
+        match result {
+            Ok(true) => {
+                self.invalidate_cache();
+                self.handle_device_by_mac(mac)
+            }
+            Ok(false) => self.handle_not_found(),
+            Err(_) => self.handle_error("Failed to save trust"),
+        }
+    }
+
+    /// `POST /devices/trust-all` -- trust every device tracked right now.
+    fn handle_trust_all(&self, request: &tiny_http::Request) -> Response<std::io::Cursor<Vec<u8>>> {
+        if let Some(refusal) = self.refuse_write() {
+            return refusal;
+        }
+        if let Some(refusal) = Self::refuse_non_json(request) {
+            return refusal;
+        }
+        let result = match self.tracker.write() {
+            Ok(mut tracker) => tracker.trust_all(),
+            Err(_) => return self.handle_error("Failed to acquire tracker lock"),
+        };
+        match result {
+            Ok(count) => {
+                self.invalidate_cache();
+                Self::json_ok(&serde_json::json!({ "success": true, "trusted": count }))
+            }
+            Err(_) => self.handle_error("Failed to save trust"),
+        }
     }
 
     /// `GET /device-types` -- every name the type field accepts.
@@ -740,6 +894,9 @@ impl ApiServer {
     }
 
     fn handle_delete_device(&self, mac: &str) -> Response<std::io::Cursor<Vec<u8>>> {
+        if let Some(refusal) = self.refuse_write() {
+            return refusal;
+        }
         let removed = match self.tracker.write() {
             Ok(mut tracker) => tracker.remove_device(mac),
             Err(_) => return self.handle_error("Failed to acquire device lock"),
@@ -760,6 +917,9 @@ impl ApiServer {
     /// Same caveat as [`ApiServer::handle_delete_device`]: devices still active
     /// on the LAN will simply reappear as new entries the next time they're seen.
     fn handle_flush_devices(&self) -> Response<std::io::Cursor<Vec<u8>>> {
+        if let Some(refusal) = self.refuse_write() {
+            return refusal;
+        }
         let cleared = match self.tracker.write() {
             Ok(mut tracker) => tracker.clear_all_devices(),
             Err(_) => return self.handle_error("Failed to acquire device lock"),
@@ -1118,6 +1278,23 @@ mod tests {
         );
         assert!(deleted.starts_with("HTTP/1.1 403"), "{}", deleted);
 
+        for route in ["/devices/aa:bb:cc:11:22:33", "/devices"] {
+            let removed = http(
+                &addr,
+                &format!(
+                    "DELETE {} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                    route
+                ),
+            );
+            assert!(
+                removed.starts_with("HTTP/1.1 403"),
+                "{}: {}",
+                route,
+                removed
+            );
+        }
+        assert_eq!(tracker.read().unwrap().device_count(), 1);
+
         // Reading still works, which is the whole point of the mode.
         let read = http(
             &addr,
@@ -1136,6 +1313,104 @@ mod tests {
         for suffix in ["", "-journal", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{}", path, suffix));
         }
+    }
+
+    #[test]
+    fn test_the_trust_and_presence_routes() {
+        let (path, tracker) = review_test_tracker("trust");
+        let addr = serve(Arc::clone(&tracker), false);
+        let put = |body: &str, content_type: &str| {
+            http(
+                &addr,
+                &format!(
+                    "PUT /devices/aa%3Abb%3Acc%3A11%3A22%3A33/trust HTTP/1.1\r\nHost: localhost\r\n\
+                     Content-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    content_type,
+                    body.len(),
+                    body
+                ),
+            )
+        };
+
+        // A cross-site form can send text/plain without a preflight.
+        let refused = put(r#"{"trusted":true}"#, "text/plain");
+        assert!(refused.starts_with("HTTP/1.1 415"), "{}", refused);
+        assert!(!tracker.read().unwrap().is_trusted("aa:bb:cc:11:22:33"));
+
+        let bad = put("{}", "application/json");
+        assert!(bad.starts_with("HTTP/1.1 400"), "{}", bad);
+
+        let trusted = put(r#"{"trusted":true}"#, "application/json");
+        assert!(trusted.starts_with("HTTP/1.1 200"), "{}", trusted);
+        assert!(get_http_body(&trusted).contains(r#""trusted":true"#));
+        assert!(tracker.read().unwrap().is_trusted("aa:bb:cc:11:22:33"));
+
+        tracker
+            .write()
+            .unwrap()
+            .sweep_presence(SystemTime::now(), Duration::from_secs(600))
+            .unwrap();
+        let events = http(
+            &addr,
+            "GET /events?limit=5 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        );
+        assert!(events.starts_with("HTTP/1.1 200"), "{}", events);
+        assert!(
+            get_http_body(&events).contains(r#""event":"new""#),
+            "{}",
+            events
+        );
+
+        let history = http(
+            &addr,
+            "GET /devices/aa:bb:cc:11:22:33/presence HTTP/1.1\r\nHost: localhost\r\n\
+             Connection: close\r\n\r\n",
+        );
+        assert!(
+            get_http_body(&history).contains(r#""count":1"#),
+            "{}",
+            history
+        );
+
+        let missing = http(
+            &addr,
+            "GET /devices/aa:bb:cc:99:99:99/presence HTTP/1.1\r\nHost: localhost\r\n\
+             Connection: close\r\n\r\n",
+        );
+        assert!(missing.starts_with("HTTP/1.1 404"), "{}", missing);
+
+        for suffix in ["", "-journal", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", path, suffix));
+        }
+    }
+
+    #[test]
+    fn test_a_read_only_api_refuses_trust_changes() {
+        let (path, tracker) = review_test_tracker("trust_readonly");
+        let addr = serve(Arc::clone(&tracker), true);
+        let refused = http(
+            &addr,
+            "POST /devices/trust-all HTTP/1.1\r\nHost: localhost\r\n\
+             Content-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+        );
+        assert!(refused.starts_with("HTTP/1.1 403"), "{}", refused);
+        assert_eq!(tracker.read().unwrap().trusted_count(), 0);
+
+        for suffix in ["", "-journal", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", path, suffix));
+        }
+    }
+
+    #[test]
+    fn test_the_events_limit_is_clamped() {
+        assert_eq!(ApiServer::parse_events_limit("/events"), 100);
+        assert_eq!(ApiServer::parse_events_limit("/events?limit=5"), 5);
+        assert_eq!(ApiServer::parse_events_limit("/events?limit=0"), 1);
+        assert_eq!(
+            ApiServer::parse_events_limit("/events?x=1&limit=99999"),
+            1000
+        );
+        assert_eq!(ApiServer::parse_events_limit("/events?limit=abc"), 100);
     }
 
     #[test]

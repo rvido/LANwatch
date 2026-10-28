@@ -413,6 +413,69 @@
         }
         .identify-status.ok { color: #3fbf6f; }
         .identify-status.bad { color: #e2564d; }
+        .presence-dot {
+            display: inline-block;
+            width: 0.55rem;
+            height: 0.55rem;
+            margin-right: 0.45rem;
+            border-radius: 50%;
+            vertical-align: middle;
+            background: var(--text-muted);
+            opacity: 0.5;
+        }
+        .presence-dot.online {
+            background: var(--accent-emerald);
+            opacity: 1;
+            box-shadow: 0 0 6px var(--accent-emerald);
+        }
+        .trusted-badge {
+            display: inline-block;
+            margin-left: 0.4rem;
+            padding: 0.1rem 0.45rem;
+            border-radius: 999px;
+            font-size: 0.7rem;
+            font-weight: 700;
+            background: rgba(59, 130, 246, 0.18);
+            color: var(--accent-blue);
+            vertical-align: middle;
+        }
+        .activity-panel {
+            margin-bottom: 2rem;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            background: var(--surface);
+            padding: 0.75rem 1rem;
+        }
+        .activity-panel summary {
+            cursor: pointer;
+            font-weight: 700;
+        }
+        .activity-list {
+            list-style: none;
+            margin: 0.75rem 0 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 0.35rem;
+            font-size: 0.85rem;
+        }
+        .activity-list li {
+            display: flex;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+        }
+        .activity-time {
+            color: var(--text-muted);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.8rem;
+        }
+        .activity-kind {
+            font-weight: 700;
+            min-width: 4.5rem;
+        }
+        .activity-kind.new { color: var(--accent-orange); }
+        .activity-kind.online { color: var(--accent-emerald); }
+        .activity-kind.offline { color: var(--text-muted); }
         .reviewed-badge {
             display: inline-block;
             margin-left: 0.5rem;
@@ -714,6 +777,12 @@
             </svg>
             Export Fingerprints
         </button>
+        <button class="flush-btn" id="trust-all-btn" onclick="trustAllDevices()" title="Mark every device listed now as yours, so alerts only fire for strangers" style="background: transparent;">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+            </svg>
+            Trust All
+        </button>
         <button class="flush-btn" id="flush-btn" onclick="flushAllDevices()" title="Remove all devices">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <polyline points="3 6 5 6 21 6"></polyline>
@@ -722,6 +791,13 @@
             Flush All
         </button>
     </div>
+
+    <details class="activity-panel" id="activity-panel">
+        <summary>Recent activity</summary>
+        <ul class="activity-list" id="activity-list">
+            <li>No events yet.</li>
+        </ul>
+    </details>
 
     <div class="devices-grid" id="devices-grid">
         <!-- Rendered dynamically -->
@@ -765,6 +841,21 @@
                         <span class="detail-label">Last Active</span>
                         <span class="detail-value" id="modal-last-active">Just now</span>
                     </div>
+                    <div class="detail-item">
+                        <span class="detail-label">Status</span>
+                        <span class="detail-value" id="modal-presence">Unknown</span>
+                    </div>
+                </div>
+                <div class="detail-item" style="grid-column: span 2;">
+                    <span class="detail-label">Trust</span>
+                    <div class="identify-actions">
+                        <button class="identify-btn" id="trust-toggle" onclick="toggleTrust()">Trust this device</button>
+                        <span class="identify-status" id="trust-status"></span>
+                    </div>
+                </div>
+                <div class="detail-item" style="grid-column: span 2;">
+                    <span class="detail-label">Presence history</span>
+                    <ul class="activity-list" id="modal-presence-history"><li>Loading...</li></ul>
                 </div>
                 <div class="detail-item" style="grid-column: span 2;">
                     <span class="detail-label">System Description</span>
@@ -1373,7 +1464,7 @@
             });
 
             // Diff check: only rebuild grid DOM if the matched keys/values have changed
-            const currentMatchedKeys = filtered.map(d => `${d.mac_address}-${d.ip_address}-${d.ipv6_address}-${(d.ipv6_addresses || []).length}-${d.hostname}-${d.device_type}`).join('|');
+            const currentMatchedKeys = filtered.map(d => `${d.mac_address}-${d.ip_address}-${d.ipv6_address}-${(d.ipv6_addresses || []).length}-${d.hostname}-${d.device_type}-${d.online}-${d.trusted}-${d.product_label}`).join('|');
             if (currentMatchedKeys === lastRenderedKeys) {
                 return;
             }
@@ -1472,7 +1563,7 @@
                         </div>
                     </div>
                     <div class="device-info">
-                        <span class="device-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>${d.product_label ? `<span class="reviewed-badge" title="Reviewed: ${escapeHtml(d.product_label)}">&check;</span>` : ''}
+                        <span class="device-name" title="${escapeHtml(name)}"><span class="presence-dot${d.online ? ' online' : ''}" title="${d.online ? 'Online' : 'Offline'}"></span>${escapeHtml(name)}</span>${d.product_label ? `<span class="reviewed-badge" title="Reviewed: ${escapeHtml(d.product_label)}">&check;</span>` : ''}${d.trusted ? '<span class="trusted-badge" title="On the trusted list">Trusted</span>' : ''}
                         <span class="device-vendor">${escapeHtml(vendor)}</span>
                     </div>
                     <div class="device-meta">
@@ -1584,6 +1675,9 @@
             
             document.getElementById('modal-type').textContent = device.device_type || "Generic Device";
             document.getElementById('modal-last-active').textContent = device.last_seen ? formatDate(device.last_seen) : "N/A";
+            document.getElementById('modal-presence').textContent = device.online ? 'Online' : 'Offline';
+            fillTrustPanel(device);
+            loadPresenceHistory(device.mac_address);
             
             const desc = device.system_description || "No description available";
             document.getElementById('modal-desc').textContent = desc;
@@ -1688,6 +1782,114 @@
                 });
         }
 
+        // One line per event. Every value is escaped: hostnames come from
+        // untrusted LAN traffic.
+        function renderEventList(list, events, withName) {
+            if (!events.length) {
+                list.innerHTML = '<li>No events yet.</li>';
+                return;
+            }
+            list.innerHTML = events.map(e => {
+                const device = devicesData.find(d => d.mac_address === e.mac_address);
+                const name = withName ? `<span>${escapeHtml(device ? deviceDisplayName(device) : (e.hostname || e.mac_address))}</span>` : '';
+                const trust = withName && !e.trusted ? '<span class="activity-time">untrusted</span>' : '';
+                return `<li><span class="activity-time">${escapeHtml(formatDate(e.at))}</span><span class="activity-kind ${escapeHtml(e.event)}">${escapeHtml(e.event)}</span>${name}${trust}</li>`;
+            }).join('');
+        }
+
+        async function fetchEvents() {
+            try {
+                const response = await fetch('/events?limit=20');
+                const result = await readJson(response);
+                if (result && result.success && Array.isArray(result.data)) {
+                    renderEventList(document.getElementById('activity-list'), result.data, true);
+                }
+            } catch (error) {
+                console.error('Error fetching events:', error);
+            }
+        }
+
+        async function loadPresenceHistory(mac) {
+            const list = document.getElementById('modal-presence-history');
+            list.innerHTML = '<li>Loading...</li>';
+            try {
+                const response = await fetch(`/devices/${encodeURIComponent(mac)}/presence?limit=10`);
+                const result = await readJson(response);
+                // The modal may have moved on to another device meanwhile.
+                if (mac !== currentModalMac) return;
+                if (result && result.success && Array.isArray(result.data)) {
+                    renderEventList(list, result.data, false);
+                } else {
+                    list.innerHTML = '<li>No history.</li>';
+                }
+            } catch (error) {
+                console.error('Error loading presence history:', error);
+                list.innerHTML = '<li>Could not reach LANwatch.</li>';
+            }
+        }
+
+        function fillTrustPanel(device) {
+            const button = document.getElementById('trust-toggle');
+            button.textContent = device.trusted ? 'Stop trusting' : 'Trust this device';
+            button.classList.toggle('primary', !device.trusted);
+            const status = document.getElementById('trust-status');
+            status.textContent = device.trusted ? 'Trusted: no alerts with --untrusted-only' : 'Not trusted';
+            status.className = 'identify-status' + (device.trusted ? ' ok' : '');
+        }
+
+        async function toggleTrust() {
+            if (!currentModalMac) return;
+            const device = devicesData.find(d => d.mac_address === currentModalMac);
+            const trusted = !(device && device.trusted);
+            const button = document.getElementById('trust-toggle');
+            const status = document.getElementById('trust-status');
+            button.disabled = true;
+            let updated = null;
+            try {
+                const response = await fetch(`/devices/${encodeURIComponent(currentModalMac)}/trust`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ trusted })
+                });
+                const result = await readJson(response);
+                if (!response.ok || !result || !result.success) {
+                    status.textContent = failureReason(response, result);
+                    status.className = 'identify-status bad';
+                    return;
+                }
+                updated = Array.isArray(result.data) ? result.data[0] : result.data;
+            } catch (error) {
+                console.error('Error changing trust:', error);
+                status.textContent = 'Could not reach LANwatch.';
+                status.className = 'identify-status bad';
+                return;
+            } finally {
+                button.disabled = false;
+            }
+            absorbDevice(updated);
+            fillTrustPanel(updated);
+        }
+
+        async function trustAllDevices() {
+            if (!confirm('Trust every device listed now? Alerts with --untrusted-only will then fire only for devices that join later.')) return;
+            try {
+                const response = await fetch('/devices/trust-all', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: '{}'
+                });
+                const result = await readJson(response);
+                if (!response.ok || !result || !result.success) {
+                    alert(failureReason(response, result));
+                    return;
+                }
+                await fetchDevices();
+            } catch (error) {
+                console.error('Error trusting devices:', error);
+                alert('Could not reach LANwatch.');
+            }
+        }
+
         function closeModal(event) {
             toggleModal(false);
         }
@@ -1698,7 +1900,9 @@
 
         loadDeviceTypes();
         fetchDevices();
+        fetchEvents();
         setInterval(fetchDevices, 4000);
+        setInterval(fetchEvents, 10000);
     </script>
 </body>
 </html>

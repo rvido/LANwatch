@@ -236,6 +236,13 @@ pub struct DeviceTracker {
     /// updated. Used to resolve relayed/proxied mDNS packets (e.g. from Eero routers)
     /// without a linear scan over all tracked devices.
     pub(crate) ip_index: HashMap<IpAddr, String>,
+    /// MACs on the trusted list, tracked or not. See `presence.rs`.
+    pub(crate) trusted: HashSet<String>,
+    /// Every MAC seen since startup or loaded from the database, so a
+    /// device removed from the dashboard is not reported as new on return.
+    pub(crate) known_macs: HashSet<String>,
+    /// Online state as of the last presence sweep, per tracked device.
+    pub(crate) online_state: HashMap<String, bool>,
 }
 
 impl DeviceTracker {
@@ -316,6 +323,7 @@ impl DeviceTracker {
         .map_err(|e| std::io::Error::other(format!("Failed to create override schema: {}", e)))?;
 
         Self::migrate_fingerprint_columns(&conn)?;
+        Self::create_presence_schema(&conn)?;
 
         let mut tracker = Self {
             devices: HashMap::new(),
@@ -331,6 +339,9 @@ impl DeviceTracker {
             dirty_devices: Mutex::new(HashSet::new()),
             conn: Mutex::new(conn),
             ip_index: HashMap::new(),
+            trusted: HashSet::new(),
+            known_macs: HashSet::new(),
+            online_state: HashMap::new(),
         };
 
         tracker.load_from_db()?;
@@ -733,6 +744,9 @@ impl DeviceTracker {
                         // Filled in by `apply_overrides`; the override table
                         // owns it, so it is not a column on `devices`.
                         product_label: None,
+                        // Filled in by `load_presence_from_db` and the sweep.
+                        trusted: false,
+                        online: false,
                         first_seen,
                         last_seen,
                     })
@@ -752,6 +766,7 @@ impl DeviceTracker {
         self.drop_mac_echo_hostnames();
         self.resolve_ip_conflicts();
         self.apply_overrides();
+        self.load_presence_from_db()?;
 
         Ok(())
     }
@@ -3856,7 +3871,15 @@ impl DeviceTracker {
             )
             .map_err(|e| std::io::Error::other(format!("Failed to delete override: {}", e)))?;
 
-        Ok(had_device || had_attributes || had_override || attribute_rows > 0 || override_rows > 0)
+        drop(conn);
+        let had_presence = self.forget_presence(&key)?;
+
+        Ok(had_device
+            || had_attributes
+            || had_override
+            || had_presence
+            || attribute_rows > 0
+            || override_rows > 0)
     }
 
     /// Removes every tracked device from memory and the database.

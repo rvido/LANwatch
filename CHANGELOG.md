@@ -8,6 +8,43 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Entries before v0.11.0 are summarised from the commit history; only the releases
 that changed behaviour are listed.
 
+## [Unreleased]
+
+### Added
+
+- **Presence history.** Every 10 seconds LANwatch checks when each device was
+  last heard. A device is online while it sent traffic within the last 30
+  minutes, and offline after that. Each change (`new`, `online`, `offline`) is
+  saved in the new `presence_events` table and printed to the console. Events
+  older than 90 days are deleted.
+  - `--offline-after <DUR>` changes the limit (e.g. `10m`; at least `60s`).
+  - Devices already in the database are not reported as new.
+- **Trusted devices.** Mark the devices that are yours. Trust is kept in the new
+  `trusted_devices` table, so it survives **Remove Device**; only `--forget`
+  drops it.
+  - `--trust <MAC>` (repeatable) and `--trust-all` change the list, then exit.
+- **Event alerts.** `--on-event '<command>'` runs a command through `sh -c` for
+  each event, without waiting for it. The event comes in `LANWATCH_*`
+  environment variables and as one JSON line on stdin. At most 8 commands run
+  at once. With `--untrusted-only`, trusted devices are skipped.
+- **API routes.** `GET /events` and `GET /devices/{mac}/presence` return the
+  history, newest first (`?limit=`, default 100, max 1000).
+  `PUT /devices/{mac}/trust` with `{"trusted": true}` and
+  `POST /devices/trust-all` change the trusted list. Both need
+  `Content-Type: application/json` and are refused by `--api-readonly`.
+- **Dashboard.** Each tile shows a green dot when the device is online and a
+  **Trusted** badge. The details window has a trust button and the device's
+  recent history. The toolbar has **Trust All**, and a **Recent activity**
+  panel lists the latest events.
+- **Two new fields in device JSON:** `trusted` and `online`. Library code that
+  builds a `DeviceInfo` with a struct literal must set them.
+
+### Fixed
+
+- **`--api-readonly` did not stop device deletes.** `DELETE /devices` and
+  `DELETE /devices/{mac}` still removed devices in read-only mode, although the
+  README said they were refused. Both now answer `403`.
+
 ## [0.19.0] - 2026-10-27
 
 ### Added

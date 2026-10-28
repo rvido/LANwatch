@@ -29,6 +29,7 @@ Release history: [CHANGELOG.md](CHANGELOG.md).
 - **Manual Classification Overrides**: Pin a device's type (and optionally vendor) by MAC address via `--override` or an overrides file, for devices with no reliable passive signature. Overrides always win over heuristics and persist across live updates.
 - **Device Attribute Fingerprinting**: Identifies a device by the *set of attributes it advertises* rather than the name it sends, so a device with a randomised MAC and no hostname is still recognisable. Attribute keys are collected from mDNS, SSDP and DHCP, plus the bare product names out of the SSDP `SERVER`/`USER-AGENT` headers. Versions, serial numbers and user-chosen names are discarded, so none of them enters a fingerprint. Matched against a shareable catalogue (`lanwatch-fingerprints.txt`). See [Device Attribute Fingerprinting](#device-attribute-fingerprinting).
 - **Agent Fingerprinting**: Reads the product names a device announces in its SSDP `SERVER` and `USER-AGENT` headers, so a responder's firmware stack (`openwrt`, `miniupnpd`, `portable-sdk-for-upnp-devices`) and a searching host's operating system or application become attributes in their own right. A multi-word product name stays one token, and versions and `(...)` comments are dropped. See [Device Attribute Fingerprinting](#device-attribute-fingerprinting).
+- **Presence History & New-Device Alerts**: Logs when each device comes online and goes offline, and runs your own command (`--on-event`) when a new MAC joins the LAN. Mark your own devices as trusted, and with `--untrusted-only` the alerts fire only for strangers. See [Presence, Trust & Alerts](#presence-trust--alerts).
 - **Repeating Active Discovery**: `--query-interval` re-sends the mDNS and SSDP probes on a timer, so a device that was asleep or off the LAN at startup is still found. See [Repeating the Active Probes](#repeating-the-active-probes---query-interval).
 - **Dashboard Device Review**: Correct a device's type and vendor and give it a product name directly in the web dashboard. Corrections are stored in the database, survive a restart, and always beat heuristic classification. One click then exports every reviewed device as a catalogue file that carries no MAC, IP or hostname.
 - **Smart Home & IoT Discovery**: Extracts model and vendor metadata from HomeKit (HAP) and Matter service advertisements (Google, Apple, Amazon, Eve, Signify/Philips Hue, Aqara, IKEA, Nanoleaf, Tuya, Somfy, TP-Link, Lutron, Yale, Belkin, Bosch, etc.)
@@ -75,6 +76,21 @@ cargo build --release --all-features
 LANwatch is pre-1.0, so minor versions may break API compatibility. Unless a
 section below says otherwise, only library consumers are affected; the CLI and
 its flags are unchanged.
+
+### Unreleased
+
+No action is required. Two new tables, `trusted_devices` and
+`presence_events`, are added to an existing database on startup. Devices
+already in the database are not reported as new.
+
+- **Two new fields in device JSON.** `trusted` and `online` are added to
+  every device in `/devices`. Library code that builds a `DeviceInfo` with a
+  struct literal must set them; `DeviceInfo::new` sets them for you.
+- **New flags.** `--on-event`, `--untrusted-only`, `--offline-after`,
+  `--trust` and `--trust-all`. No existing flag changed.
+- **`--api-readonly` now refuses device deletes.** `DELETE /devices` and
+  `DELETE /devices/{mac}` answer `403` in read-only mode, as documented.
+  Before, they still removed devices.
 
 ### 0.18 → 0.19
 
@@ -294,11 +310,13 @@ Removing a device and forgetting one are different actions:
 |---|---|---|
 | **Remove Device** (dashboard, `DELETE /devices/{mac}`) | the `devices` row | your correction and the collected tokens |
 | **Reset to guess** (dashboard, `DELETE /devices/{mac}/classification`) | your correction | the sighting and the tokens |
-| `lanwatch --forget <MAC>` | all three | nothing |
+| `lanwatch --forget <MAC>` | all of them, plus trust and presence history | nothing |
 
 Discovery is keyed on MAC alone, so a device still on the LAN reappears within seconds of a removal. Keeping the correction means one careless click cannot destroy review work; the device comes back already labelled. `--forget` is the deliberate opposite, for a device that has left the network for good and whose rows no dashboard can reach any more. Stop the service before running it, or a live capture may still hold the device in memory and write it straight back.
 
-The fingerprint columns and both new tables are added to an existing database automatically on startup. No migration step and no database wipe is needed.
+Two more tables serve [Presence, Trust & Alerts](#presence-trust--alerts): **trusted_devices** (`mac_address`, `trusted_at`) and **presence_events** (`mac_address`, `event`, `at`, where `event` is `new`, `online` or `offline`). Presence events older than 90 days are deleted.
+
+The fingerprint columns and the new tables are added to an existing database automatically on startup. No migration step and no database wipe is needed.
 
 Database writes are executed in transactions using single-row transactional upserts, eliminating write-amplification and improving write efficiency to O(1) performance. Reads are concurrent and lock-free thanks to WAL mode.
 
@@ -537,6 +555,59 @@ reaches the shared catalogue until a person has named the product.
 > labelling. `make fingerprints-merge` strips every comment, and refuses the whole file outright if
 > an address reaches a data line. `/fingerprint-dump*.txt` and `/dump.txt` are in `.gitignore`.
 
+### Presence, Trust & Alerts
+
+LANwatch checks every device every 10 seconds. A device is **online** while
+it has sent traffic within the last 30 minutes, and **offline** after that.
+Change the limit with `--offline-after` (e.g. `10m`, `2h`; at least `60s`).
+Nothing on the wire says "I left", so offline is always a guess from silence.
+A device that only talks at DHCP renewal needs a longer limit.
+
+Each change is one event, saved in the database and printed to the console:
+
+| Event | When |
+|---|---|
+| `new` | A MAC address LANwatch has never seen before |
+| `online` | A known device sends traffic again after being offline |
+| `offline` | A device was silent for longer than `--offline-after` |
+
+**Alerts.** `--on-event '<command>'` runs the command through `sh -c` for each
+event. LANwatch does not wait for it. The command gets the event in
+environment variables and as one JSON line on stdin:
+
+`LANWATCH_EVENT`, `LANWATCH_MAC`, `LANWATCH_AT`, `LANWATCH_IP`,
+`LANWATCH_HOSTNAME`, `LANWATCH_VENDOR`, `LANWATCH_DEVICE_TYPE`,
+`LANWATCH_LABEL`, `LANWATCH_TRUSTED` (`1` or `0`).
+
+At most 8 commands run at once. Events past that are skipped with a warning.
+
+```bash
+# Push a phone notification through ntfy.sh for strangers only
+sudo lanwatch eth0 --api-default --untrusted-only \
+  --on-event 'curl -s -d "$LANWATCH_EVENT: $LANWATCH_HOSTNAME $LANWATCH_MAC $LANWATCH_IP" ntfy.sh/my-lan-alerts'
+
+# Post the JSON to a webhook
+sudo lanwatch eth0 --on-event 'curl -s -H "Content-Type: application/json" --data-binary @- https://example.com/hook'
+```
+
+> **The hook runs as the LANwatch user, which is usually root.** Hostnames and
+> vendors come from untrusted LAN traffic. Always quote the variables
+> (`"$LANWATCH_HOSTNAME"`), and never pass them to `eval` or an unquoted shell.
+
+**Trusted devices.** Mark the devices that are yours. With `--untrusted-only`,
+the hook skips them, so you hear only about strangers. Trust lives in its own
+table, so it survives **Remove Device**; only `--forget` drops it.
+
+- In the dashboard: open a device and click **Trust this device**, or click
+  **Trust All** in the toolbar.
+- From the command line (exits after): `lanwatch --trust AA:BB:CC:DD:EE:FF`
+  (repeatable) or `lanwatch --trust-all`. Restart a running capture afterwards.
+
+**First run.** On an empty database every device is `new`. To avoid a burst of
+alerts, run LANwatch once without `--on-event` for an hour, click
+**Trust All** (or run `lanwatch --trust-all`), then restart with
+`--on-event ... --untrusted-only`.
+
 ### HTTP API
 
 > **Note:** The HTTP API requires the `http-api` feature, which is enabled by default.
@@ -557,6 +628,10 @@ When started with `--api` or `--api-default`, the tool exposes a REST API for qu
 | `/devices/{mac}/classification` | PUT | Pin the device type, vendor and product name |
 | `/devices/{mac}/classification` | DELETE | Drop the pin and restore the heuristic guess |
 | `/devices/{mac}/attributes` | GET | The raw fingerprint tokens behind that device's hash |
+| `/devices/{mac}/presence` | GET | That device's presence history, newest first (`?limit=`, default 100, max 1000) |
+| `/devices/{mac}/trust` | PUT | Add to or remove from the trusted list: `{"trusted": true}` |
+| `/devices/trust-all` | POST | Trust every tracked device |
+| `/events` | GET | Presence events for all devices, newest first (`?limit=`, default 100, max 1000) |
 | `/device-types` | GET | Every canonical device type name, for a picker |
 | `/fingerprints/export` | GET | The reviewed devices as a shareable catalogue file |
 | `/favicon.ico` | GET | The dashboard's tab icon (the same embedded PNG as `/logo.png`) |
@@ -606,6 +681,13 @@ curl http://localhost:3000/devices/AA:BB:CC:DD:EE:FF/attributes | jq
 curl -s http://localhost:3000/devices/AA:BB:CC:DD:EE:FF/attributes \
   | jq '.data.attributes[] | select(.token | startswith("a:"))'
 
+# Mark a device as yours
+curl -X PUT http://localhost:3000/devices/AA:BB:CC:DD:EE:FF/trust \
+  -H 'Content-Type: application/json' -d '{"trusted":true}'
+
+# Who came and went recently
+curl 'http://localhost:3000/events?limit=20' | jq
+
 # Download the reviewed devices as a shareable fingerprint catalogue
 curl -O http://localhost:3000/fingerprints/export
 
@@ -629,6 +711,8 @@ curl -X DELETE http://localhost:3000/devices
       "services": ["_http._tcp", "_airplay._tcp"],
       "vendor": "Apple",
       "device_type": "AirPlay Device",
+      "trusted": false,
+      "online": true,
       "first_seen": "2026-01-16T10:25:00Z",
       "last_seen": "2026-01-16T10:30:45Z"
     }

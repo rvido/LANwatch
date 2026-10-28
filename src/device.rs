@@ -83,6 +83,16 @@ pub struct DeviceInfo {
     /// to the `devices` table or to CSV.
     #[serde(default)]
     pub product_label: Option<String>,
+    /// Whether a person marked this device as theirs.
+    ///
+    /// Owned by the `trusted_devices` table, so it is not written to the
+    /// `devices` table or to CSV.
+    #[serde(default)]
+    pub trusted: bool,
+    /// Whether the device was heard from within the offline threshold, as of
+    /// the last presence sweep. Derived, never stored.
+    #[serde(default)]
+    pub online: bool,
     /// First seen timestamp (ISO 8601 format)
     #[serde(
         serialize_with = "serialize_system_time",
@@ -123,6 +133,8 @@ impl DeviceInfo {
             fingerprint_label: None,
             fingerprint_confidence: None,
             product_label: None,
+            trusted: false,
+            online: true,
             first_seen: timestamp,
             last_seen: timestamp,
         }
@@ -443,6 +455,8 @@ impl DeviceInfo {
             fingerprint_label: None,
             fingerprint_confidence: None,
             product_label: None,
+            trusted: false,
+            online: false,
             first_seen,
             last_seen,
         })
