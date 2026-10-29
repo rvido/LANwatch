@@ -55,10 +55,10 @@ Add to your `Cargo.toml`. The `http-api` feature is opt-in to keep binary size s
 ```toml
 [dependencies]
 # Smallest binary footprint, core DHCP & MAC tracking only
-lanwatch = "0.19"
+lanwatch = "0.20"
 
 # With HTTP API server and active discovery protocols
-lanwatch = { version = "0.19", features = ["http-api", "mdns", "ssdp"] }
+lanwatch = { version = "0.20", features = ["http-api", "mdns", "ssdp"] }
 ```
 
 Or clone and build from source. Release builds are automatically optimized for size (`opt-level = "z"`, `strip = true`, `panic = "abort"`):
@@ -80,24 +80,28 @@ LANwatch is pre-1.0, so minor versions may break API compatibility. Unless a
 section below says otherwise, only library consumers are affected; the CLI and
 its flags are unchanged.
 
-### Unreleased
+### 0.19 → 0.20
 
-No action is required. Two new tables, `trusted_devices` and
-`presence_events`, are added to an existing database on startup. Devices
-already in the database are not reported as new.
+No action is required unless you want to keep every random-MAC record apart
+(see the merge note below). New tables are added to an existing database on
+startup: `trusted_devices`, `presence_events` and `device_merges`, plus
+`upnp_descriptions` in builds with the `ssdp` feature. Devices already in the
+database are not reported as new.
 
-- **New fields in device JSON.** `trusted`, `online` and `friendly_name` are
-  added to every device in `/devices`. Library code that builds a `DeviceInfo` with a
-  struct literal must set them; `DeviceInfo::new` sets them for you.
-- **New flags.** `--on-event`, `--untrusted-only`, `--offline-after`,
-  `--trust`, `--trust-all`, `--no-mac-merge` and `--upnp-describe`, and with
-  the new `homeassistant` feature, `--mqtt`, `--mqtt-user`, `--mqtt-prefix` and
-  `--mqtt-trusted-only`. No existing flag changed.
 - **Random-MAC merging is on by default, and a merge cannot be undone.** On
   the first start, LANwatch may fold old records of rotated phones into their
   newest record. To keep every record as it is, copy `devices.db` first, or
-  start with `--no-mac-merge`. A third new table, `device_merges`, logs every
-  merge, and device JSON gets a `previous_macs` field.
+  start with `--no-mac-merge`. Each merge is logged in `device_merges`.
+- **New flags.** `--on-event`, `--untrusted-only`, `--offline-after`,
+  `--trust`, `--trust-all`, `--no-mac-merge` and `--upnp-describe`, and with
+  the new `homeassistant` feature, `--mqtt`, `--mqtt-user`, `--mqtt-prefix`
+  and `--mqtt-trusted-only`. No existing flag changed.
+- **New fields in device JSON.** `trusted`, `online`, `previous_macs` and
+  `friendly_name` are added to every device in `/devices`. Library code that
+  builds a `DeviceInfo` with a struct literal must set them;
+  `DeviceInfo::new` sets them for you.
+- **A device keeps at most 32 IPv6 addresses.** A record with more is trimmed
+  to the newest 32 when it is loaded. The primary address is never dropped.
 - **`--api-readonly` now refuses device deletes.** `DELETE /devices` and
   `DELETE /devices/{mac}` answer `403` in read-only mode, as documented.
   Before, they still removed devices.
