@@ -257,6 +257,9 @@ pub struct DeviceTracker {
     /// MACs whose description was tried this run.
     #[cfg(feature = "ssdp")]
     pub(crate) upnp_attempted: HashSet<String>,
+    /// Log lines for refused `LOCATION` URLs, for the fetch thread to print.
+    #[cfg(feature = "ssdp")]
+    pub(crate) upnp_skipped: Vec<String>,
 }
 
 impl DeviceTracker {
@@ -368,6 +371,8 @@ impl DeviceTracker {
             upnp_pending: Vec::new(),
             #[cfg(feature = "ssdp")]
             upnp_attempted: HashSet::new(),
+            #[cfg(feature = "ssdp")]
+            upnp_skipped: Vec::new(),
         };
 
         tracker.load_from_db()?;

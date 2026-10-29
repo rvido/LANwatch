@@ -241,7 +241,7 @@ fn main() {
     #[cfg(feature = "ssdp")]
     if config.upnp_describe {
         tracker.set_upnp_describe(true);
-        println!("UPnP descriptions: fetching each device's LOCATION once");
+        println!("UPnP: fetching each device's description once (--upnp-describe)");
     }
 
     // Wrap tracker in Arc<RwLock> for thread-safe sharing

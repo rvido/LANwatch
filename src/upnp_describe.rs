@@ -149,6 +149,12 @@ fn is_path_char(c: char) -> bool {
 /// can describe only itself, so a spoofed packet cannot point LANwatch at the
 /// router or at a host on the internet.
 pub fn description_target(mac: &str, location: &str, source: IpAddr) -> Option<UpnpTarget> {
+    check_target(mac, location, source).ok()
+}
+
+/// [`description_target`], with the reason for a refusal, for the log.
+fn check_target(mac: &str, location: &str, source: IpAddr) -> Result<UpnpTarget, &'static str> {
+    const MALFORMED: &str = "malformed URL";
     let location = location.trim();
     // `get` rather than indexing: the URL comes off the wire and may hold a
     // multi-byte character that a fixed byte offset would split.
@@ -157,7 +163,7 @@ pub fn description_target(mac: &str, location: &str, source: IpAddr) -> Option<U
         .get(..scheme_len)
         .is_some_and(|scheme| scheme.eq_ignore_ascii_case("http://"))
     {
-        return None;
+        return Err("not an http:// URL");
     }
     let rest = &location[scheme_len..];
     let (authority, path) = match rest.find('/') {
@@ -166,14 +172,14 @@ pub fn description_target(mac: &str, location: &str, source: IpAddr) -> Option<U
     };
     // No user info, which could hide the real host from a reader.
     if authority.contains('@') {
-        return None;
+        return Err("user info in URL");
     }
 
     let (host, port) = if let Some(bracketed) = authority.strip_prefix('[') {
-        let (host, after) = bracketed.split_once(']')?;
+        let (host, after) = bracketed.split_once(']').ok_or(MALFORMED)?;
         let port = match after {
             "" => None,
-            p => Some(p.strip_prefix(':')?),
+            p => Some(p.strip_prefix(':').ok_or(MALFORMED)?),
         };
         (host, port)
     } else {
@@ -182,10 +188,12 @@ pub fn description_target(mac: &str, location: &str, source: IpAddr) -> Option<U
             None => (authority, None),
         }
     };
-    let ip: IpAddr = host.parse().ok()?;
+    let ip: IpAddr = host
+        .parse()
+        .map_err(|_| "host is a name, not an IP address")?;
     let port: u16 = match port {
         None => 80,
-        Some(p) => p.parse().ok().filter(|&p| p != 0)?,
+        Some(p) => p.parse().ok().filter(|&p| p != 0).ok_or("bad port")?,
     };
 
     // Compare after unmapping, so an IPv4 sender matches `::ffff:a.b.c.d`.
@@ -194,15 +202,18 @@ pub fn description_target(mac: &str, location: &str, source: IpAddr) -> Option<U
         v4 => v4,
     };
     let ip = canonical(ip);
-    if ip != canonical(source) || !is_lan_address(ip) {
-        return None;
+    if ip != canonical(source) {
+        return Err("URL host is not the sender's address");
+    }
+    if !is_lan_address(ip) {
+        return Err("address is not private or link-local");
     }
 
     if path.is_empty() || path.len() > MAX_PATH_LEN || !path.chars().all(is_path_char) {
-        return None;
+        return Err("path has characters that are not allowed");
     }
 
-    Some(UpnpTarget {
+    Ok(UpnpTarget {
         mac: mac.to_string(),
         addr: SocketAddr::new(ip, port),
         path: path.to_string(),
@@ -507,9 +518,22 @@ impl DeviceTracker {
         // One try per device per run, whether the URL passes or not, so a
         // device that keeps advertising a bad URL is not rechecked forever.
         self.upnp_attempted.insert(mac.to_string());
-        if let Some(target) = description_target(mac, location, packet.source_ip) {
-            self.upnp_pending.push(target);
+        match check_target(mac, location, packet.source_ip) {
+            Ok(target) => self.upnp_pending.push(target),
+            Err(reason) => self.upnp_skipped.push(format!(
+                "UPnP: skipped {} (from {}): {}: {}",
+                mac,
+                packet.source_ip,
+                reason,
+                crate::device::display_safe(location)
+            )),
         }
+    }
+
+    /// Takes the log lines for refused `LOCATION` URLs. At most one per
+    /// device per run, so the list stays small.
+    pub(crate) fn take_upnp_skipped(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.upnp_skipped)
     }
 
     /// Takes up to `max` queued fetches.
@@ -651,10 +675,16 @@ pub fn start_upnp_describer(tracker: Arc<RwLock<DeviceTracker>>) -> thread::Join
         let mut failed: HashSet<String> = HashSet::new();
         loop {
             thread::sleep(POLL_INTERVAL);
-            let targets = match tracker.write() {
-                Ok(mut tracker) => tracker.take_upnp_targets(FETCHES_PER_POLL),
+            let (targets, skipped) = match tracker.write() {
+                Ok(mut tracker) => (
+                    tracker.take_upnp_targets(FETCHES_PER_POLL),
+                    tracker.take_upnp_skipped(),
+                ),
                 Err(_) => return,
             };
+            for line in skipped {
+                println!("{}", line);
+            }
             for target in targets {
                 match fetch_description(&target) {
                     Ok(description) => {
@@ -680,7 +710,7 @@ pub fn start_upnp_describer(tracker: Arc<RwLock<DeviceTracker>>) -> thread::Join
                     }
                     // One warning per device, not one per retry of the run.
                     Err(e) if failed.insert(target.mac.clone()) => eprintln!(
-                        "Warning: UPnP description of {} at {} failed: {}",
+                        "UPnP: fetch from {} at {} failed: {}",
                         target.mac, target.addr, e
                     ),
                     Err(_) => {}
@@ -940,6 +970,22 @@ mod tests {
         // Not again in the same run, even though it failed or is pending.
         tracker.update_from_ssdp(&packet);
         assert!(tracker.take_upnp_targets(8).is_empty());
+        assert!(tracker.take_upnp_skipped().is_empty());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_refused_location_is_logged_once_with_the_reason() {
+        let (mut tracker, path) = tracker();
+        tracker.set_upnp_describe(true);
+        let packet = ssdp_packet("http://192.168.1.1:1900/gateway.xml");
+        tracker.update_from_ssdp(&packet);
+        tracker.update_from_ssdp(&packet);
+        assert!(tracker.take_upnp_targets(8).is_empty());
+        let skipped = tracker.take_upnp_skipped();
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0].starts_with("UPnP: skipped aa:bb:cc:dd:ee:ff"));
+        assert!(skipped[0].contains("not the sender's address"));
         let _ = std::fs::remove_file(path);
     }
 
