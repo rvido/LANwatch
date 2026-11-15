@@ -340,6 +340,7 @@ impl DeviceTracker {
         .map_err(|e| std::io::Error::other(format!("Failed to create override schema: {}", e)))?;
 
         Self::migrate_fingerprint_columns(&conn)?;
+        Self::migrate_ipv6_seen_column(&conn)?;
         Self::create_presence_schema(&conn)?;
         Self::create_merge_schema(&conn)?;
         #[cfg(feature = "ssdp")]
@@ -406,6 +407,41 @@ impl DeviceTracker {
             }
         }
         Ok(())
+    }
+
+    /// Adds the column that times each IPv6 address, on a database written
+    /// before it existed. See [`DeviceInfo::prune_stale_ipv6`].
+    fn migrate_ipv6_seen_column(conn: &Connection) -> std::io::Result<()> {
+        match conn.execute("ALTER TABLE devices ADD COLUMN ipv6_seen TEXT;", []) {
+            Ok(_) => Ok(()),
+            Err(e) if e.to_string().contains("duplicate column name") => Ok(()),
+            Err(e) => Err(std::io::Error::other(format!(
+                "Failed to migrate the ipv6_seen column: {}",
+                e
+            ))),
+        }
+    }
+
+    /// Drops, from every device, the IPv6 addresses it has stopped using.
+    ///
+    /// Runs with the presence sweep. Returns how many addresses went.
+    pub(crate) fn prune_stale_ipv6_addresses(&mut self) -> usize {
+        let mut removed = 0;
+        for (mac, device) in self.devices.iter_mut() {
+            let stale = device.prune_stale_ipv6();
+            if stale.is_empty() {
+                continue;
+            }
+            removed += stale.len();
+            for ipv6 in stale {
+                let ip = IpAddr::V6(ipv6);
+                if self.ip_index.get(&ip) == Some(mac) {
+                    self.ip_index.remove(&ip);
+                }
+            }
+            self.dirty_devices.lock().unwrap().insert(mac.clone());
+        }
+        removed
     }
 
     /// Sets the OUI registry used to identify device manufacturers from MAC addresses.
@@ -708,7 +744,7 @@ impl DeviceTracker {
                 .prepare(
                     "SELECT mac_address, ip_address, ipv6_address, ipv6_addresses, hostname,
                     system_description, services, vendor, device_type, first_seen, last_seen,
-                    fingerprint, fingerprint_label, fingerprint_confidence
+                    fingerprint, fingerprint_label, fingerprint_confidence, ipv6_seen
              FROM devices;",
                 )
                 .map_err(std::io::Error::other)?;
@@ -729,6 +765,7 @@ impl DeviceTracker {
                     let fingerprint: Option<String> = row.get(11)?;
                     let fingerprint_label: Option<String> = row.get(12)?;
                     let fingerprint_confidence: Option<i64> = row.get(13)?;
+                    let ipv6_seen_str: Option<String> = row.get(14)?;
 
                     let ip_address: IpAddr = ip_address_str
                         .parse()
@@ -764,6 +801,29 @@ impl DeviceTracker {
                     let last_seen = crate::device::parse_timestamp(&last_seen_str)
                         .unwrap_or_else(SystemTime::now);
 
+                    // `address@time;...`. An address the column does not time
+                    // -- every address, in a database from before the column
+                    // -- starts its clock at the device's own last sighting.
+                    let stored_seen: Vec<(std::net::Ipv6Addr, SystemTime)> = ipv6_seen_str
+                        .as_deref()
+                        .unwrap_or_default()
+                        .split(';')
+                        .filter_map(|entry| {
+                            let (address, at) = entry.split_once('@')?;
+                            Some((address.parse().ok()?, crate::device::parse_timestamp(at)?))
+                        })
+                        .collect();
+                    let ipv6_seen = ipv6_addresses
+                        .iter()
+                        .map(|address| {
+                            let seen = stored_seen
+                                .iter()
+                                .find(|(stored, _)| stored == address)
+                                .map_or(last_seen, |(_, at)| *at);
+                            (*address, seen)
+                        })
+                        .collect();
+
                     Ok(DeviceInfo {
                         mac_address,
                         ip_address,
@@ -786,6 +846,7 @@ impl DeviceTracker {
                         online: false,
                         friendly_name: None,
                         previous_macs: Vec::new(),
+                        ipv6_seen,
                         first_seen,
                         last_seen,
                     })
@@ -1307,8 +1368,8 @@ impl DeviceTracker {
                     "INSERT INTO devices (
                     mac_address, ip_address, ipv6_address, ipv6_addresses, hostname,
                     system_description, services, vendor, device_type, first_seen, last_seen,
-                    fingerprint, fingerprint_label, fingerprint_confidence
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    fingerprint, fingerprint_label, fingerprint_confidence, ipv6_seen
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(mac_address) DO UPDATE SET
                     ip_address = excluded.ip_address,
                     ipv6_address = excluded.ipv6_address,
@@ -1321,6 +1382,7 @@ impl DeviceTracker {
                     fingerprint = excluded.fingerprint,
                     fingerprint_label = excluded.fingerprint_label,
                     fingerprint_confidence = excluded.fingerprint_confidence,
+                    ipv6_seen = excluded.ipv6_seen,
                     last_seen = excluded.last_seen;",
                 )
                 .map_err(std::io::Error::other)?;
@@ -1333,6 +1395,15 @@ impl DeviceTracker {
                         .ipv6_addresses
                         .iter()
                         .map(|ip| ip.to_string())
+                        .collect::<Vec<_>>()
+                        .join(";");
+                    let ipv6_seen = device
+                        .ipv6_seen
+                        .iter()
+                        .filter(|(address, _)| device.ipv6_addresses.contains(address))
+                        .map(|(address, at)| {
+                            format!("{}@{}", address, crate::device::format_timestamp(*at))
+                        })
                         .collect::<Vec<_>>()
                         .join(";");
                     let services = device.services.join(";");
@@ -1354,6 +1425,7 @@ impl DeviceTracker {
                         device.fingerprint,
                         device.fingerprint_label,
                         device.fingerprint_confidence.map(i64::from),
+                        ipv6_seen,
                     ])
                     .map_err(|e| {
                         std::io::Error::other(format!(
@@ -3268,6 +3340,154 @@ impl DeviceTracker {
 
         // Update description with msg_type info
         let desc = format!("LIFX device (msg_type: {})", packet.msg_type);
+        if device.system_description.as_ref() != Some(&desc) {
+            device.system_description = Some(desc);
+            updated += 1;
+        }
+
+        device.last_seen = SystemTime::now();
+
+        self.claim_ips(&mac);
+
+        // Mark dirty before flushing -- see the note in `update_from_ssdp`.
+        if updated > 0 {
+            self.dirty_devices.lock().unwrap().insert(mac.clone());
+            if self.auto_save {
+                let _ = self.save_to_db();
+            }
+        }
+
+        updated
+    }
+
+    /// Updates the tracker state with information from a Tuya broadcast.
+    ///
+    /// # Returns
+    /// The count of unique updates applied to the device entry.
+    #[cfg(feature = "ssdp")]
+    pub fn update_from_tuya(&mut self, packet: &crate::parser::tuya_ubnt::TuyaPacket) -> usize {
+        let mac = self.packet_owner(packet.source_mac, packet.source_ip);
+        let mut updated = 0;
+
+        let device = self.devices.entry(mac.clone()).or_insert_with(|| {
+            updated += 1;
+            DeviceInfo::new(mac.clone(), packet.source_ip, None)
+        });
+
+        if matches!(device.ip_address, IpAddr::V4(addr) if addr.is_unspecified()) {
+            device.ip_address = packet.source_ip;
+            updated += 1;
+        }
+
+        // The radio module is rarely Tuya's own (Espressif, Beken, Realtek),
+        // so the OUI names the chip maker and the broadcast names the product.
+        let oui_vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(&mac));
+        if Self::should_replace_vendor(device.vendor.as_ref(), &Vendor::Tuya, oui_vendor) {
+            device.vendor = Some(Vendor::Tuya);
+            updated += 1;
+        }
+
+        // The broadcast does not say plug, bulb or switch.
+        if Self::should_replace_device_type(device, &DeviceType::IotDevice) {
+            device.device_type = Some(DeviceType::IotDevice);
+            updated += 1;
+        }
+
+        let clean = |value: &Option<String>| value.as_deref().and_then(sanitize_display_string);
+        let mut details = Vec::new();
+        if let Some(version) = clean(&packet.version) {
+            details.push(format!("protocol {version}"));
+        }
+        if let Some(key) = clean(&packet.product_key) {
+            details.push(format!("product key {key}"));
+        }
+        if let Some(id) = clean(&packet.device_id) {
+            details.push(format!("ID {id}"));
+        }
+        // An encrypted broadcast carries no detail, and must not erase the
+        // detail an earlier plain one gave.
+        let desc = if details.is_empty() {
+            device
+                .system_description
+                .as_deref()
+                .is_none_or(|current| !current.starts_with("Tuya device"))
+                .then(|| "Tuya device".to_string())
+        } else {
+            Some(format!("Tuya device ({})", details.join(", ")))
+        };
+        if let Some(desc) = desc
+            && device.system_description.as_ref() != Some(&desc)
+        {
+            device.system_description = Some(desc);
+            updated += 1;
+        }
+
+        device.last_seen = SystemTime::now();
+
+        self.claim_ips(&mac);
+
+        // Mark dirty before flushing -- see the note in `update_from_ssdp`.
+        if updated > 0 {
+            self.dirty_devices.lock().unwrap().insert(mac.clone());
+            if self.auto_save {
+                let _ = self.save_to_db();
+            }
+        }
+
+        updated
+    }
+
+    /// Updates the tracker state with information from a Ubiquiti discovery
+    /// announcement.
+    ///
+    /// The record is keyed on the frame's source, never on the MAC address the
+    /// payload reports, so a host cannot write into another device's record.
+    ///
+    /// # Returns
+    /// The count of unique updates applied to the device entry.
+    #[cfg(feature = "ssdp")]
+    pub fn update_from_ubnt(&mut self, packet: &crate::parser::tuya_ubnt::UbntPacket) -> usize {
+        let mac = self.packet_owner(packet.source_mac, packet.source_ip);
+        let mut updated = 0;
+
+        let device = self.devices.entry(mac.clone()).or_insert_with(|| {
+            updated += 1;
+            DeviceInfo::new(mac.clone(), packet.source_ip, None)
+        });
+
+        if matches!(device.ip_address, IpAddr::V4(addr) if addr.is_unspecified()) {
+            device.ip_address = packet.source_ip;
+            updated += 1;
+        }
+
+        let oui_vendor = self.oui_registry.as_ref().and_then(|r| r.lookup(&mac));
+        if Self::should_replace_vendor(device.vendor.as_ref(), &Vendor::Ubiquiti, oui_vendor) {
+            device.vendor = Some(Vendor::Ubiquiti);
+            updated += 1;
+        }
+
+        // Access point, switch or gateway: the announcement does not say which.
+        if Self::should_replace_device_type(device, &DeviceType::NetworkEquipment) {
+            device.device_type = Some(DeviceType::NetworkEquipment);
+            updated += 1;
+        }
+
+        if let Some(ref name) = packet.hostname
+            && let Some(clean) = sanitize_display_string(name)
+            && device.hostname.as_ref() != Some(&clean)
+            && !hostname_echoes_mac(&device.mac_address, &clean)
+        {
+            device.hostname = Some(clean);
+            updated += 1;
+        }
+
+        let clean = |value: &Option<String>| value.as_deref().and_then(sanitize_display_string);
+        let desc = match (clean(&packet.model), clean(&packet.firmware)) {
+            (Some(model), Some(firmware)) => format!("Ubiquiti {model} (firmware {firmware})"),
+            (Some(model), None) => format!("Ubiquiti {model}"),
+            (None, Some(firmware)) => format!("Ubiquiti device (firmware {firmware})"),
+            (None, None) => "Ubiquiti device".to_string(),
+        };
         if device.system_description.as_ref() != Some(&desc) {
             device.system_description = Some(desc);
             updated += 1;

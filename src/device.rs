@@ -29,6 +29,20 @@ const MAX_SERVICES_PER_DEVICE: usize = 64;
 /// privacy addresses daily, so the oldest is dropped to make room.
 pub const MAX_IPV6_ADDRESSES_PER_DEVICE: usize = 32;
 
+/// How long a device may stay active without using an IPv6 address before the
+/// address is dropped from its record.
+///
+/// A phone makes a new temporary address (RFC 8981) every day and at every
+/// reconnect, and stops using the old one. Nothing on the wire says so, so
+/// the only evidence is silence. See [`DeviceInfo::prune_stale_ipv6`].
+pub const IPV6_ADDRESS_STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// How far a stored IPv6 sighting time may lag behind the truth.
+///
+/// A sighting newer than this is not recorded again, so a busy address costs
+/// one database write an hour, not one per packet.
+const IPV6_SEEN_GRANULARITY: Duration = Duration::from_secs(60 * 60);
+
 /// Maximum length of a single service name, in bytes.
 const MAX_SERVICE_NAME_LEN: usize = 128;
 
@@ -114,6 +128,13 @@ pub struct DeviceInfo {
     /// `devices` table or to CSV.
     #[serde(default)]
     pub previous_macs: Vec<String>,
+    /// When each entry of `ipv6_addresses` was last seen in use, to within an
+    /// hour. An address with no entry has not been timed yet.
+    ///
+    /// Bookkeeping for [`Self::prune_stale_ipv6`]: stored in the `devices`
+    /// table, but not part of the JSON or CSV output.
+    #[serde(skip)]
+    pub ipv6_seen: Vec<(Ipv6Addr, SystemTime)>,
     /// First seen timestamp (ISO 8601 format)
     #[serde(
         serialize_with = "serialize_system_time",
@@ -140,6 +161,7 @@ impl DeviceInfo {
             }
             _ => None,
         };
+        let ipv6_seen = ipv6_addresses.iter().map(|ip| (*ip, timestamp)).collect();
         Self {
             mac_address,
             ip_address,
@@ -158,6 +180,7 @@ impl DeviceInfo {
             online: true,
             friendly_name: None,
             previous_macs: Vec::new(),
+            ipv6_seen,
             first_seen: timestamp,
             last_seen: timestamp,
         }
@@ -268,7 +291,7 @@ impl DeviceInfo {
     /// # Returns
     /// `true` if the address list or primary address was changed or set, `false` if it was already identical.
     pub fn set_ipv6_address(&mut self, ipv6: Ipv6Addr) -> bool {
-        let mut changed = false;
+        let mut changed = self.note_ipv6_seen(ipv6, SystemTime::now());
         if !self.ipv6_addresses.contains(&ipv6) {
             if self.ipv6_addresses.len() >= MAX_IPV6_ADDRESSES_PER_DEVICE {
                 // Drop the oldest address, but never the primary one.
@@ -278,7 +301,8 @@ impl DeviceInfo {
                     .iter()
                     .position(|a| Some(IpAddr::V6(*a)) != primary)
                 {
-                    self.ipv6_addresses.remove(oldest);
+                    let dropped = self.ipv6_addresses.remove(oldest);
+                    self.ipv6_seen.retain(|(addr, _)| *addr != dropped);
                 }
             }
             self.ipv6_addresses.push(ipv6);
@@ -306,6 +330,88 @@ impl DeviceInfo {
         changed
     }
 
+    /// Records that `ipv6` was in use at `now`.
+    ///
+    /// Returns `true` when the stored time moved, which is at most once per
+    /// [`IPV6_SEEN_GRANULARITY`] for one address. The caller treats that as a
+    /// change, so the time reaches the database.
+    fn note_ipv6_seen(&mut self, ipv6: Ipv6Addr, now: SystemTime) -> bool {
+        match self.ipv6_seen.iter_mut().find(|(addr, _)| *addr == ipv6) {
+            Some((_, seen)) => {
+                let fresh = now
+                    .duration_since(*seen)
+                    .is_ok_and(|age| age < IPV6_SEEN_GRANULARITY);
+                if fresh {
+                    return false;
+                }
+                *seen = now;
+            }
+            None => self.ipv6_seen.push((ipv6, now)),
+        }
+        true
+    }
+
+    /// Whether `ipv6` is an address this device keeps for as long as it keeps
+    /// its MAC: a link-local address, or one built from the MAC (EUI-64).
+    ///
+    /// Such an address does not rotate, so it cannot pile up, and it is often
+    /// silent for days while still assigned.
+    fn is_stable_ipv6(&self, ipv6: &Ipv6Addr) -> bool {
+        if (ipv6.segments()[0] & 0xffc0) == 0xfe80 {
+            return true;
+        }
+        crate::types::parse_mac(&self.mac_address).is_some_and(|mac| {
+            let eui64 = [
+                mac[0] ^ 0x02,
+                mac[1],
+                mac[2],
+                0xff,
+                0xfe,
+                mac[3],
+                mac[4],
+                mac[5],
+            ];
+            ipv6.octets()[8..] == eui64
+        })
+    }
+
+    /// Drops the IPv6 addresses this device has stopped using.
+    ///
+    /// An address goes when the device was active more than
+    /// [`IPV6_ADDRESS_STALE_AFTER`] after the address was last seen. Age is
+    /// measured against the device's own `last_seen`, not the clock, so a
+    /// device that is switched off keeps the addresses it left with. Stable
+    /// addresses ([`Self::is_stable_ipv6`]) are never dropped. An address with
+    /// no recorded time starts its clock now.
+    ///
+    /// A quiet address that is still assigned can be dropped too. It comes
+    /// back the next time it is seen.
+    ///
+    /// Returns the addresses removed.
+    pub fn prune_stale_ipv6(&mut self) -> Vec<Ipv6Addr> {
+        let reference = self.last_seen;
+        let mut stale = Vec::new();
+        for index in 0..self.ipv6_addresses.len() {
+            let ipv6 = self.ipv6_addresses[index];
+            if self.is_stable_ipv6(&ipv6) {
+                continue;
+            }
+            match self.ipv6_seen.iter().find(|(addr, _)| *addr == ipv6) {
+                Some((_, seen)) => {
+                    let unused = reference.duration_since(*seen).unwrap_or_default();
+                    if unused > IPV6_ADDRESS_STALE_AFTER {
+                        stale.push(ipv6);
+                    }
+                }
+                None => self.ipv6_seen.push((ipv6, reference)),
+            }
+        }
+        for ipv6 in &stale {
+            self.remove_ip(IpAddr::V6(*ipv6));
+        }
+        stale
+    }
+
     /// Drops `ip` from this device, if it holds it.
     ///
     /// Used when another device proves the address is now its own. The primary
@@ -320,6 +426,7 @@ impl DeviceInfo {
         if let IpAddr::V6(v6) = ip {
             let before = self.ipv6_addresses.len();
             self.ipv6_addresses.retain(|addr| *addr != v6);
+            self.ipv6_seen.retain(|(addr, _)| *addr != v6);
             changed |= self.ipv6_addresses.len() != before;
 
             if self.ipv6_address == Some(IpAddr::V6(v6)) {
@@ -493,6 +600,7 @@ impl DeviceInfo {
             online: false,
             friendly_name: None,
             previous_macs: Vec::new(),
+            ipv6_seen: Vec::new(),
             first_seen,
             last_seen,
         })

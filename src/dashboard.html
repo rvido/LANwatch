@@ -1180,6 +1180,48 @@
             }
         }
 
+        // The API write token, when the server asks for one. It is kept for
+        // this browser tab only, so it is gone when the tab closes.
+        const TOKEN_KEY = 'lanwatch-api-token';
+
+        function storedToken() {
+            try {
+                return sessionStorage.getItem(TOKEN_KEY) || '';
+            } catch (error) {
+                return '';
+            }
+        }
+
+        function storeToken(token) {
+            try {
+                if (token) sessionStorage.setItem(TOKEN_KEY, token);
+                else sessionStorage.removeItem(TOKEN_KEY);
+            } catch (error) {
+                console.error('Could not keep the API token:', error);
+            }
+        }
+
+        // fetch() for every request that changes something. It adds the token,
+        // and when the server answers 401 it asks for the token once and tries
+        // again. Cancelling the question returns the 401 to the caller.
+        async function writeFetch(url, options) {
+            const send = (token) => {
+                const headers = Object.assign({}, options.headers);
+                if (token) headers['Authorization'] = `Bearer ${token}`;
+                return fetch(url, Object.assign({}, options, { headers }));
+            };
+            let response = await send(storedToken());
+            if (response.status !== 401) return response;
+
+            storeToken('');
+            const entered = prompt('This LANwatch needs its API token for changes.\n\nEnter the value of LANWATCH_API_TOKEN:');
+            const token = (entered || '').trim();
+            if (!token) return response;
+            response = await send(token);
+            if (response.status !== 401) storeToken(token);
+            return response;
+        }
+
         // Always says something a person can act on. Without the status code, a
         // server that answered is indistinguishable from one that did not.
         function failureReason(response, result) {
@@ -1212,7 +1254,7 @@
             setIdentifyStatus('Saving...');
             let device = null;
             try {
-                const response = await fetch(`/devices/${encodeURIComponent(currentModalMac)}/classification`, {
+                const response = await writeFetch(`/devices/${encodeURIComponent(currentModalMac)}/classification`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(body)
@@ -1242,7 +1284,7 @@
             setIdentifyStatus('Clearing...');
             let device = null;
             try {
-                const response = await fetch(`/devices/${encodeURIComponent(currentModalMac)}/classification`, {
+                const response = await writeFetch(`/devices/${encodeURIComponent(currentModalMac)}/classification`, {
                     method: 'DELETE'
                 });
                 if (response.status === 404) {
@@ -1389,9 +1431,9 @@
             if (!confirmed) return;
 
             try {
-                const response = await fetch(`/devices/${encodeURIComponent(mac)}`, { method: 'DELETE' });
-                const result = await response.json();
-                if (result.success) {
+                const response = await writeFetch(`/devices/${encodeURIComponent(mac)}`, { method: 'DELETE' });
+                const result = await readJson(response);
+                if (response.ok && result && result.success) {
                     devicesData = devicesData.filter(d => d.mac_address !== mac);
                     if (currentModalMac === mac) {
                         toggleModal(false);
@@ -1400,7 +1442,7 @@
                     renderStats();
                     renderDevices();
                 } else {
-                    alert('Failed to remove device.');
+                    alert(`Failed to remove device. ${failureReason(response, result)}`);
                 }
             } catch (error) {
                 console.error("Error removing device:", error);
@@ -1430,16 +1472,16 @@
             if (!confirmed) return;
 
             try {
-                const response = await fetch('/devices', { method: 'DELETE' });
-                const result = await response.json();
-                if (result.success) {
+                const response = await writeFetch('/devices', { method: 'DELETE' });
+                const result = await readJson(response);
+                if (response.ok && result && result.success) {
                     devicesData = [];
                     toggleModal(false);
                     currentModalMac = null;
                     renderStats();
                     renderDevices();
                 } else {
-                    alert('Failed to flush devices.');
+                    alert(`Failed to flush devices. ${failureReason(response, result)}`);
                 }
             } catch (error) {
                 console.error("Error flushing devices:", error);
@@ -1875,7 +1917,7 @@
             button.disabled = true;
             let updated = null;
             try {
-                const response = await fetch(`/devices/${encodeURIComponent(currentModalMac)}/trust`, {
+                const response = await writeFetch(`/devices/${encodeURIComponent(currentModalMac)}/trust`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ trusted })
@@ -1902,7 +1944,7 @@
         async function trustAllDevices() {
             if (!confirm('Trust every device listed now? Alerts with --untrusted-only will then fire only for devices that join later.')) return;
             try {
-                const response = await fetch('/devices/trust-all', {
+                const response = await writeFetch('/devices/trust-all', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: '{}'

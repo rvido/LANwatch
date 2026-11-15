@@ -317,6 +317,9 @@ impl DeviceTracker {
         now: SystemTime,
         offline_after: Duration,
     ) -> std::io::Result<Vec<PresenceEvent>> {
+        // Before the merge, so a rotated MAC hands over only live addresses.
+        self.prune_stale_ipv6_addresses();
+
         let at = format_timestamp(now);
         let mut events = if self.mac_merge_enabled {
             self.merge_rotated_macs(&at)?
@@ -549,6 +552,8 @@ impl EventHook {
         command
             .arg("-c")
             .arg(&self.command)
+            // The hook has no use for the API's write token; do not hand it on.
+            .env_remove("LANWATCH_API_TOKEN")
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .env("LANWATCH_EVENT", event.event.as_str())

@@ -80,6 +80,7 @@ pub use homeassistant::{
 #[cfg(feature = "http-api")]
 pub use api::{
     ApiServer, start_api_server, start_api_server_with_hosts, start_api_server_with_options,
+    start_api_server_with_token,
 };
 
 // Include the unit tests

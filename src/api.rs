@@ -31,9 +31,13 @@ pub struct ApiServer {
     cache: Arc<Mutex<Option<SortedDevicesCache>>>,
     /// When set, every route that changes state answers 403 instead.
     ///
-    /// The API has no authentication, so a LANwatch reachable beyond a trusted
-    /// network should not accept writes.
+    /// Without a [`Self::write_token`] the API has no authentication, so a
+    /// LANwatch reachable beyond a trusted network should not accept writes.
     read_only: bool,
+    /// When set, every route that changes state needs
+    /// `Authorization: Bearer <token>`. Reads stay open. See
+    /// [`Self::write_authorised`].
+    write_token: Option<Arc<str>>,
     /// Host names, besides IP literals and `localhost`, a request may name.
     ///
     /// Stored lowercase without a trailing dot. See [`Self::host_allowed`].
@@ -116,8 +120,65 @@ impl ApiServer {
             tracker,
             cache: Arc::new(Mutex::new(None)),
             read_only: false,
+            write_token: None,
             allowed_hosts: Vec::new(),
         })
+    }
+
+    /// Requires `Authorization: Bearer <token>` on every state-changing route.
+    ///
+    /// Surrounding whitespace is dropped. An empty token is ignored, so an
+    /// unset-but-exported environment variable cannot turn the check into one
+    /// that an empty header passes.
+    pub fn set_write_token(&mut self, token: &str) {
+        let token = token.trim();
+        if !token.is_empty() {
+            self.write_token = Some(Arc::from(token));
+        }
+    }
+
+    /// Whether a write token is set.
+    pub fn has_write_token(&self) -> bool {
+        self.write_token.is_some()
+    }
+
+    /// Whether the request may change state.
+    ///
+    /// True when no token is set. Otherwise the request must carry
+    /// `Authorization: Bearer <token>`. The comparison looks at every byte
+    /// whatever the outcome, so the time it takes does not tell a guesser how
+    /// many leading characters were right.
+    ///
+    /// A browser never attaches this header on its own, so the token also
+    /// stops a cross-site page from writing.
+    fn write_authorised(&self, request: &tiny_http::Request) -> bool {
+        let Some(expected) = &self.write_token else {
+            return true;
+        };
+        let presented = request
+            .headers()
+            .iter()
+            .find(|h| h.field.equiv("Authorization"))
+            .and_then(|h| {
+                let (scheme, value) = h.value.as_str().trim().split_once(' ')?;
+                scheme.eq_ignore_ascii_case("Bearer").then(|| value.trim())
+            });
+        let Some(presented) = presented else {
+            return false;
+        };
+        let (expected, presented) = (expected.as_bytes(), presented.as_bytes());
+        let mut diff = expected.len() ^ presented.len();
+        for (i, byte) in presented.iter().enumerate() {
+            // An over-long guess is compared against a repeat of the token, so
+            // the loop length follows the guess, not the secret.
+            diff |= usize::from(byte ^ expected[i % expected.len()]);
+        }
+        diff == 0
+    }
+
+    /// Whether the method reads only. Everything else is treated as a write.
+    fn is_read_method(method: &str) -> bool {
+        matches!(method, "GET" | "HEAD" | "OPTIONS")
     }
 
     /// Refuses every state-changing route with 403.
@@ -252,6 +313,24 @@ impl ApiServer {
 
         let path = request.url().to_string();
         let method = request.method().as_str().to_string();
+
+        // One check for every write route, present and future. A read-only
+        // server skips it: the route answers 403 anyway, and asking for a
+        // token that could never help would only mislead.
+        if !self.read_only && !Self::is_read_method(&method) && !self.write_authorised(request) {
+            let challenge = tiny_http::Header::from_bytes("WWW-Authenticate", "Bearer")
+                .expect("static header is always valid");
+            return Self::json(
+                401,
+                serde_json::to_string(&ApiError {
+                    success: false,
+                    error: "This write needs the API token: send Authorization: Bearer <token>"
+                        .to_string(),
+                })
+                .unwrap_or_default(),
+            )
+            .with_header(challenge);
+        }
 
         match (method.as_str(), path.as_str()) {
             ("GET", "/devices/count") | ("GET", "/device/count") => self.handle_device_count(),
@@ -1020,8 +1099,9 @@ pub fn start_api_server(
 
 /// Starts the API server, optionally refusing every write.
 ///
-/// The API has no authentication. Read-only is the safe choice whenever the
-/// listener is reachable from more than a trusted network.
+/// This entry point sets no write token, so the API has no authentication.
+/// Read-only, or [`start_api_server_with_token`], is the safe choice whenever
+/// the listener is reachable from more than a trusted network.
 pub fn start_api_server_with_options(
     addr: &str,
     tracker: Arc<RwLock<DeviceTracker>>,
@@ -1041,10 +1121,26 @@ pub fn start_api_server_with_hosts(
     read_only: bool,
     allowed_hosts: &[String],
 ) -> std::io::Result<thread::JoinHandle<()>> {
+    start_api_server_with_token(addr, tracker, read_only, allowed_hosts, None)
+}
+
+/// Starts the API server like [`start_api_server_with_hosts`], and with
+/// `write_token` set, requires `Authorization: Bearer <token>` on every route
+/// that changes state. Reads stay open.
+pub fn start_api_server_with_token(
+    addr: &str,
+    tracker: Arc<RwLock<DeviceTracker>>,
+    read_only: bool,
+    allowed_hosts: &[String],
+    write_token: Option<&str>,
+) -> std::io::Result<thread::JoinHandle<()>> {
     let mut server = ApiServer::new(addr, tracker)?;
     server.set_read_only(read_only);
     for host in allowed_hosts {
         server.add_allowed_host(host);
+    }
+    if let Some(token) = write_token {
+        server.set_write_token(token);
     }
     Ok(thread::spawn(move || {
         server.run();
@@ -1078,8 +1174,19 @@ mod tests {
 
     /// A server on a free port, plus its address. The thread ends with the test.
     fn serve(tracker: Arc<RwLock<DeviceTracker>>, read_only: bool) -> String {
+        serve_with_token(tracker, read_only, None)
+    }
+
+    fn serve_with_token(
+        tracker: Arc<RwLock<DeviceTracker>>,
+        read_only: bool,
+        token: Option<&str>,
+    ) -> String {
         let mut api_server = ApiServer::new("127.0.0.1:0", tracker).unwrap();
         api_server.set_read_only(read_only);
+        if let Some(token) = token {
+            api_server.set_write_token(token);
+        }
         let addr = api_server.server.server_addr().to_string();
         std::thread::spawn(move || {
             for mut request in api_server.server.incoming_requests() {
@@ -1382,6 +1489,101 @@ mod tests {
         for suffix in ["", "-journal", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{}", path, suffix));
         }
+    }
+
+    #[test]
+    fn test_a_write_token_guards_every_write_and_no_read() {
+        let (path, tracker) = review_test_tracker("api_write_token");
+        let addr = serve_with_token(Arc::clone(&tracker), false, Some("s3cret-token"));
+        let send = |method: &str, route: &str, auth: &str| {
+            http(
+                &addr,
+                &format!(
+                    "{method} {route} HTTP/1.1\r\nHost: 127.0.0.1\r\n{auth}\
+                     Content-Type: application/json\r\nContent-Length: 2\r\n\
+                     Connection: close\r\n\r\n{{}}"
+                ),
+            )
+        };
+
+        // Reads need no token.
+        for route in ["/devices", "/health", "/events", "/"] {
+            let response = send("GET", route, "");
+            assert!(response.starts_with("HTTP/1.1 200"), "{route}: {response}");
+        }
+
+        // Every write is refused without the token, and with a wrong one.
+        let wrong = [
+            "",
+            "Authorization: Bearer wrong\r\n",
+            "Authorization: Bearer s3cret-toke\r\n",
+            "Authorization: Bearer s3cret-token-and-more\r\n",
+            "Authorization: Bearer s3cret-tokens3cret-token\r\n",
+            "Authorization: Bearer \r\n",
+            "Authorization: Basic s3cret-token\r\n",
+            "Authorization: s3cret-token\r\n",
+        ];
+        for (method, route) in [
+            ("DELETE", "/devices"),
+            ("DELETE", "/devices/00:11:22:33:44:55"),
+            ("DELETE", "/devices/00:11:22:33:44:55/classification"),
+            ("PUT", "/devices/00:11:22:33:44:55/classification"),
+            ("POST", "/devices/00:11:22:33:44:55/classification"),
+            ("PUT", "/devices/00:11:22:33:44:55/trust"),
+            ("POST", "/devices/trust-all"),
+            ("PATCH", "/devices"),
+        ] {
+            for auth in wrong {
+                let response = send(method, route, auth);
+                assert!(
+                    response.starts_with("HTTP/1.1 401"),
+                    "{method} {route} with {auth:?}: {response}"
+                );
+                assert!(response.contains("WWW-Authenticate: Bearer"), "{response}");
+            }
+        }
+        assert_eq!(
+            tracker.read().unwrap().device_count(),
+            1,
+            "nothing was deleted"
+        );
+
+        // The right token is let through; the scheme name is case-insensitive.
+        let response = send(
+            "POST",
+            "/devices/trust-all",
+            "authorization: bearer s3cret-token\r\n",
+        );
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        let response = send(
+            "DELETE",
+            "/devices",
+            "Authorization: Bearer s3cret-token\r\n",
+        );
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert_eq!(tracker.read().unwrap().device_count(), 0);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_an_empty_write_token_is_ignored_and_read_only_still_answers_403() {
+        let (path, tracker) = review_test_tracker("api_write_token_edges");
+        let mut server = ApiServer::new("127.0.0.1:0", Arc::clone(&tracker)).unwrap();
+        server.set_write_token("   ");
+        assert!(!server.has_write_token());
+        server.set_write_token("  padded  ");
+        assert_eq!(server.write_token.as_deref(), Some("padded"));
+
+        // Read-only wins: a token could not make the write succeed.
+        let addr = serve_with_token(Arc::clone(&tracker), true, Some("s3cret-token"));
+        let response = http(
+            &addr,
+            "DELETE /devices HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        );
+        assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

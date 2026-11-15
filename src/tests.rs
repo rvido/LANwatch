@@ -373,6 +373,7 @@ mod tests {
             online: false,
             friendly_name: None,
             previous_macs: Vec::new(),
+            ipv6_seen: Vec::new(),
             first_seen: parse_timestamp("2026-01-15T10:00:00Z").unwrap(),
             last_seen: parse_timestamp("2026-01-15T12:00:00Z").unwrap(),
         };
@@ -421,6 +422,7 @@ mod tests {
             online: false,
             friendly_name: None,
             previous_macs: Vec::new(),
+            ipv6_seen: Vec::new(),
             first_seen: parse_timestamp("2026-01-15T10:00:00Z").unwrap(),
             last_seen: parse_timestamp("2026-01-15T12:00:00Z").unwrap(),
         };
@@ -451,6 +453,7 @@ mod tests {
             online: false,
             friendly_name: None,
             previous_macs: Vec::new(),
+            ipv6_seen: Vec::new(),
             first_seen: parse_timestamp("2026-01-15T10:00:00Z").unwrap(),
             last_seen: parse_timestamp("2026-01-15T10:00:00Z").unwrap(),
         };
@@ -1671,6 +1674,7 @@ mod tests {
             online: false,
             friendly_name: None,
             previous_macs: Vec::new(),
+            ipv6_seen: Vec::new(),
             first_seen: parse_timestamp("2026-01-15T10:00:00Z").unwrap(),
             last_seen: parse_timestamp("2026-01-15T12:00:00Z").unwrap(),
         };
@@ -6729,5 +6733,402 @@ mod tests {
 
         drop(conn);
         remove_db(&path);
+    }
+
+    /// A Tuya 55AA frame around `body`: header, return code, body, CRC, suffix.
+    #[cfg(feature = "ssdp")]
+    fn tuya_frame(body: &[u8]) -> Vec<u8> {
+        let mut frame = vec![0x00, 0x00, 0x55, 0xAA, 0, 0, 0, 0, 0, 0, 0, 0x13];
+        frame.extend_from_slice(&((body.len() + 12) as u32).to_be_bytes());
+        frame.extend_from_slice(&[0, 0, 0, 0]);
+        frame.extend_from_slice(body);
+        frame.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x00, 0xAA, 0x55]);
+        frame
+    }
+
+    /// A Ubiquiti announcement built from `(type, value)` fields.
+    #[cfg(feature = "ssdp")]
+    fn ubnt_frame(version: u8, fields: &[(u8, &[u8])]) -> Vec<u8> {
+        let mut body = Vec::new();
+        for (kind, value) in fields {
+            body.push(*kind);
+            body.extend_from_slice(&(value.len() as u16).to_be_bytes());
+            body.extend_from_slice(value);
+        }
+        let mut frame = vec![version, 0];
+        frame.extend_from_slice(&(body.len() as u16).to_be_bytes());
+        frame.extend_from_slice(&body);
+        frame
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_parse_tuya_plain_broadcast() {
+        use crate::parser::tuya_ubnt::{is_tuya_port, parse_tuya_payload};
+        assert!(is_tuya_port(6666));
+        assert!(is_tuya_port(6667));
+        assert!(!is_tuya_port(6668));
+
+        let json = br#"{"ip":"192.168.1.60","gwId":"bf1234567890abcdef1234","active":2,"ability":0,"mode":0,"encrypt":true,"productKey":"keyabc123def4567","version":"3.1"}"#;
+        let mac = parse_mac("11:22:33:44:55:66").unwrap();
+        let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 60));
+        let packet = parse_tuya_payload(&tuya_frame(json), mac, ip).unwrap();
+        assert!(!packet.encrypted);
+        assert_eq!(packet.device_id.as_deref(), Some("bf1234567890abcdef1234"));
+        assert_eq!(packet.product_key.as_deref(), Some("keyabc123def4567"));
+        assert_eq!(packet.version.as_deref(), Some("3.1"));
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_parse_tuya_encrypted_and_malformed() {
+        use crate::parser::tuya_ubnt::parse_tuya_payload;
+        let mac = parse_mac("11:22:33:44:55:66").unwrap();
+        let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 60));
+
+        // Cipher text: still a Tuya device, with nothing read from it.
+        let packet = parse_tuya_payload(&tuya_frame(&[0x9C; 48]), mac, ip).unwrap();
+        assert!(packet.encrypted);
+        assert_eq!(packet.device_id, None);
+
+        // Cipher text that happens to hold braces is not mistaken for JSON.
+        let packet = parse_tuya_payload(&tuya_frame(b"\xff{\x01\x02gwId\xfe}\xff"), mac, ip).unwrap();
+        assert!(packet.encrypted);
+
+        // Protocol 3.5 uses another prefix and is always encrypted.
+        let mut v35 = tuya_frame(br#"{"gwId":"looks-plain"}"#);
+        v35[2] = 0x66;
+        v35[3] = 0x99;
+        let packet = parse_tuya_payload(&v35, mac, ip).unwrap();
+        assert!(packet.encrypted);
+        assert_eq!(packet.device_id, None);
+
+        // A key used as a value, an escape, and an over-long value are refused.
+        let packet = parse_tuya_payload(
+            &tuya_frame(br#"{"note":"gwId","gwId":"a\"b","version":"3.3"}"#),
+            mac,
+            ip,
+        )
+        .unwrap();
+        assert_eq!(packet.device_id, None);
+        assert_eq!(packet.version.as_deref(), Some("3.3"));
+        let long = format!(r#"{{"gwId":"{}"}}"#, "x".repeat(65));
+        let packet = parse_tuya_payload(&tuya_frame(long.as_bytes()), mac, ip).unwrap();
+        assert_eq!(packet.device_id, None);
+
+        // Wrong prefix, short input, every truncation: no panic, and no
+        // device without the prefix.
+        assert!(parse_tuya_payload(&[0u8; 64], mac, ip).is_none());
+        assert!(parse_tuya_payload(&[], mac, ip).is_none());
+        let frame = tuya_frame(br#"{"gwId":"abc"}"#);
+        for len in 0..frame.len() {
+            let _ = parse_tuya_payload(&frame[..len], mac, ip);
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_parse_ubnt_announcement() {
+        use crate::parser::tuya_ubnt::{UbntField, is_ubnt_ports, parse_ubnt_payload};
+        assert!(is_ubnt_ports(10001, 40000));
+        assert!(is_ubnt_ports(40000, 10001));
+        assert!(!is_ubnt_ports(40000, 10002));
+        assert_eq!(UbntField::from(0x0B), UbntField::Hostname);
+        assert_eq!(UbntField::from(0x7F), UbntField::Other(0x7F));
+
+        let mac = parse_mac("24:a4:3c:11:22:33").unwrap();
+        let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20));
+        let frame = ubnt_frame(
+            1,
+            &[
+                (0x02, &[0x24, 0xa4, 0x3c, 0x11, 0x22, 0x33, 192, 168, 1, 20]),
+                (0x01, &[0x24, 0xa4, 0x3c, 0x11, 0x22, 0x33]),
+                (0x0A, &[0, 0, 0x10, 0]),
+                (0x0B, b"Office-AP"),
+                (0x0C, b"U7PG2"),
+                (0x14, b"UAP-AC-Pro-Gen2"),
+                (0x03, b"BZ.qca956x.v4.3.20.11298"),
+            ],
+        );
+        let packet = parse_ubnt_payload(&frame, mac, ip).unwrap();
+        assert_eq!(packet.version, 1);
+        assert_eq!(packet.announced_mac, Some(mac));
+        assert_eq!(packet.hostname.as_deref(), Some("Office-AP"));
+        assert_eq!(packet.model.as_deref(), Some("UAP-AC-Pro-Gen2"));
+        assert_eq!(packet.firmware.as_deref(), Some("BZ.qca956x.v4.3.20.11298"));
+
+        // Without the full name, the short platform name is the model.
+        let frame = ubnt_frame(2, &[(0x0C, b"US8P150"), (0x16, b"4.0.42")]);
+        let packet = parse_ubnt_payload(&frame, mac, ip).unwrap();
+        assert_eq!(packet.model.as_deref(), Some("US8P150"));
+        assert_eq!(packet.firmware.as_deref(), Some("4.0.42"));
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_parse_ubnt_rejects_what_is_not_an_announcement() {
+        use crate::parser::tuya_ubnt::parse_ubnt_payload;
+        let mac = parse_mac("24:a4:3c:11:22:33").unwrap();
+        let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20));
+
+        // The query a discovery tool sends names no device.
+        assert!(parse_ubnt_payload(&[1, 0, 0, 0], mac, ip).is_none());
+        assert!(parse_ubnt_payload(&[], mac, ip).is_none());
+        // Unknown version.
+        assert!(parse_ubnt_payload(&ubnt_frame(3, &[(0x0B, b"x")]), mac, ip).is_none());
+        // Only fields LANwatch does not know: some other protocol on the port.
+        assert!(parse_ubnt_payload(&ubnt_frame(1, &[(0x7F, b"abcd")]), mac, ip).is_none());
+        // A MAC field of the wrong size is not a MAC.
+        assert!(parse_ubnt_payload(&ubnt_frame(1, &[(0x01, b"abc")]), mac, ip).is_none());
+        // Control characters and over-long text are dropped.
+        let long = [b'a'; 65];
+        let frame = ubnt_frame(1, &[(0x0B, b"bad\x1b[2Jname"), (0x14, &long), (0x03, b"1.0")]);
+        let packet = parse_ubnt_payload(&frame, mac, ip).unwrap();
+        assert_eq!(packet.hostname, None);
+        assert_eq!(packet.model, None);
+
+        // The declared length must match, and no truncation may panic.
+        let frame = ubnt_frame(1, &[(0x0B, b"Office-AP"), (0x0C, b"U7PG2")]);
+        for len in 0..frame.len() {
+            assert!(parse_ubnt_payload(&frame[..len], mac, ip).is_none(), "len {len}");
+        }
+        let mut extra = frame.clone();
+        extra.push(0);
+        assert!(parse_ubnt_payload(&extra, mac, ip).is_none());
+        // A field that runs past the end.
+        assert!(parse_ubnt_payload(&[1, 0, 0, 4, 0x0B, 0xFF, 0xFF, b'x'], mac, ip).is_none());
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_device_tracker_update_from_tuya() {
+        let path = "/tmp/lanwatch_test_tuya.db";
+        remove_db(path);
+        {
+            let mut tracker = DeviceTracker::new(path).unwrap();
+            let mut packet = crate::parser::tuya_ubnt::TuyaPacket {
+                source_mac: parse_mac("11:22:33:44:55:77").unwrap(),
+                source_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 60)),
+                encrypted: false,
+                device_id: Some("bf12345".to_string()),
+                product_key: Some("keyabc".to_string()),
+                version: Some("3.1".to_string()),
+            };
+            assert!(tracker.update_from_tuya(&packet) > 0);
+            let device = tracker.devices.get("11:22:33:44:55:77").unwrap();
+            assert_eq!(device.vendor, Some(Vendor::Tuya));
+            assert_eq!(device.device_type, Some(DeviceType::IotDevice));
+            let detailed = "Tuya device (protocol 3.1, product key keyabc, ID bf12345)";
+            assert_eq!(device.system_description.as_deref(), Some(detailed));
+
+            // The same broadcast again changes nothing.
+            assert_eq!(tracker.update_from_tuya(&packet), 0);
+
+            // An encrypted broadcast keeps the detail already known.
+            packet.encrypted = true;
+            packet.device_id = None;
+            packet.product_key = None;
+            packet.version = None;
+            assert_eq!(tracker.update_from_tuya(&packet), 0);
+            let device = tracker.devices.get("11:22:33:44:55:77").unwrap();
+            assert_eq!(device.system_description.as_deref(), Some(detailed));
+
+            // On a device seen only encrypted, it still says what it is.
+            packet.source_mac = parse_mac("11:22:33:44:55:78").unwrap();
+            packet.source_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 61));
+            assert!(tracker.update_from_tuya(&packet) > 0);
+            let device = tracker.devices.get("11:22:33:44:55:78").unwrap();
+            assert_eq!(device.system_description.as_deref(), Some("Tuya device"));
+        }
+        remove_db(path);
+    }
+
+    #[test]
+    #[cfg(feature = "ssdp")]
+    fn test_device_tracker_update_from_ubnt() {
+        let path = "/tmp/lanwatch_test_ubnt.db";
+        remove_db(path);
+        {
+            let mut tracker = DeviceTracker::new(path).unwrap();
+            let packet = crate::parser::tuya_ubnt::UbntPacket {
+                source_mac: parse_mac("24:a4:3c:11:22:33").unwrap(),
+                source_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20)),
+                version: 1,
+                // A reported MAC that is not the sender's must not be believed.
+                announced_mac: Some(parse_mac("aa:aa:aa:aa:aa:aa").unwrap()),
+                hostname: Some("Office-AP".to_string()),
+                model: Some("UAP-AC-Pro-Gen2".to_string()),
+                firmware: Some("4.3.20".to_string()),
+            };
+            assert!(tracker.update_from_ubnt(&packet) > 0);
+            assert!(!tracker.devices.contains_key("aa:aa:aa:aa:aa:aa"));
+            let device = tracker.devices.get("24:a4:3c:11:22:33").unwrap();
+            assert_eq!(device.vendor, Some(Vendor::Ubiquiti));
+            assert_eq!(device.device_type, Some(DeviceType::NetworkEquipment));
+            assert_eq!(device.hostname.as_deref(), Some("Office-AP"));
+            assert_eq!(
+                device.system_description.as_deref(),
+                Some("Ubiquiti UAP-AC-Pro-Gen2 (firmware 4.3.20)")
+            );
+            assert_eq!(tracker.update_from_ubnt(&packet), 0);
+        }
+        remove_db(path);
+    }
+
+    const DAY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+    /// A phone-like device, last active now, holding one address of each kind.
+    /// Returns it with (link-local, EUI-64 global, fresh random, stale random).
+    fn device_with_rotated_ipv6() -> (DeviceInfo, [Ipv6Addr; 4]) {
+        let now = SystemTime::now();
+        let link_local: Ipv6Addr = "fe80::2cd3:77ff:fe2f:c052".parse().unwrap();
+        let eui64: Ipv6Addr = "2603:8000:4200:e66a:2cd3:77ff:fe2f:c052".parse().unwrap();
+        let fresh: Ipv6Addr = "2603:8000:4200:e66a:1528:dab2:65c7:b32c".parse().unwrap();
+        let stale: Ipv6Addr = "2603:8000:4200:e66a:56b5:f809:bab7:be80".parse().unwrap();
+
+        let mut device = DeviceInfo::new(
+            "2e:d3:77:2f:c0:52".to_string(),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 4, 73)),
+            Some("Pixel-10-Pro".to_string()),
+        );
+        let old = now - 3 * DAY;
+        device.ipv6_addresses = vec![link_local, eui64, fresh, stale];
+        device.ipv6_seen = vec![
+            (link_local, old),
+            (eui64, old),
+            (fresh, now - std::time::Duration::from_secs(2 * 60 * 60)),
+            (stale, old),
+        ];
+        device.ipv6_address = Some(IpAddr::V6(stale));
+        device.last_seen = now;
+        (device, [link_local, eui64, fresh, stale])
+    }
+
+    #[test]
+    fn test_a_rotated_ipv6_address_is_dropped_and_a_stable_one_is_kept() {
+        let (mut device, [link_local, eui64, fresh, stale]) = device_with_rotated_ipv6();
+
+        assert_eq!(device.prune_stale_ipv6(), vec![stale]);
+        assert_eq!(device.ipv6_addresses, vec![link_local, eui64, fresh]);
+        assert!(device.ipv6_seen.iter().all(|(addr, _)| *addr != stale));
+        // The primary was the stale one; it falls back to a live global.
+        assert!(matches!(device.ipv6_address, Some(IpAddr::V6(a)) if a == eui64 || a == fresh));
+        // Nothing more to drop.
+        assert!(device.prune_stale_ipv6().is_empty());
+    }
+
+    #[test]
+    fn test_a_device_that_is_off_keeps_its_ipv6_addresses() {
+        let (mut device, addresses) = device_with_rotated_ipv6();
+        // Last active when the oldest address was last used: three days ago.
+        device.last_seen = SystemTime::now() - 3 * DAY;
+        assert!(device.prune_stale_ipv6().is_empty());
+        assert_eq!(device.ipv6_addresses, addresses.to_vec());
+    }
+
+    #[test]
+    fn test_an_untimed_ipv6_address_starts_its_clock_instead_of_being_dropped() {
+        let (mut device, [.., stale]) = device_with_rotated_ipv6();
+        device.ipv6_seen.clear();
+        assert!(device.prune_stale_ipv6().is_empty());
+        assert_eq!(device.ipv6_addresses.len(), 4);
+        assert_eq!(device.ipv6_seen.len(), 2, "only the two that can expire are timed");
+
+        // A day and more of activity later, the unused ones go.
+        device.last_seen += DAY + std::time::Duration::from_secs(60);
+        assert_eq!(device.prune_stale_ipv6().len(), 2);
+        assert!(!device.ipv6_addresses.contains(&stale));
+    }
+
+    #[test]
+    fn test_an_ipv6_sighting_is_a_change_at_most_once_an_hour() {
+        let (mut device, [_, _, fresh, stale]) = device_with_rotated_ipv6();
+
+        // Seen two hours ago: the sighting is recorded, once.
+        assert!(device.set_ipv6_address(fresh));
+        assert!(!device.set_ipv6_address(fresh));
+        // Seen again, the stale address is live and survives the prune.
+        assert!(device.set_ipv6_address(stale));
+        assert!(device.prune_stale_ipv6().is_empty());
+
+        // A new address is timed from the start.
+        let new: Ipv6Addr = "2603:8000:4200:e66a:9449:d0db:5e21:f7d6".parse().unwrap();
+        assert!(device.set_ipv6_address(new));
+        assert!(!device.set_ipv6_address(new));
+        assert!(device.ipv6_seen.iter().any(|(addr, _)| *addr == new));
+        let fresh_device = DeviceInfo::new("aa:bb:cc:00:00:01".to_string(), IpAddr::V6(new), None);
+        assert_eq!(fresh_device.ipv6_seen.len(), 1);
+    }
+
+    #[test]
+    fn test_the_presence_sweep_drops_stale_ipv6_addresses_and_the_times_survive_a_restart() {
+        let path = "/tmp/lanwatch_test_ipv6_prune.db";
+        remove_db(path);
+        let (device, [link_local, eui64, fresh, stale]) = device_with_rotated_ipv6();
+        let mac = device.mac_address.clone();
+        let fresh_seen = device.ipv6_seen[2].1;
+        {
+            let mut tracker = DeviceTracker::new(path).unwrap();
+            tracker.devices.insert(mac.clone(), device);
+            tracker.ip_index.insert(IpAddr::V6(stale), mac.clone());
+            tracker.ip_index.insert(IpAddr::V6(fresh), mac.clone());
+
+            tracker
+                .sweep_presence(SystemTime::now(), std::time::Duration::from_secs(300))
+                .unwrap();
+            let kept = &tracker.devices[&mac].ipv6_addresses;
+            assert_eq!(kept, &vec![link_local, eui64, fresh]);
+            assert!(!tracker.ip_index.contains_key(&IpAddr::V6(stale)));
+            assert!(tracker.ip_index.contains_key(&IpAddr::V6(fresh)));
+            assert!(tracker.dirty_devices.lock().unwrap().contains(&mac));
+            tracker.save_to_db().unwrap();
+        }
+        {
+            let tracker = DeviceTracker::new(path).unwrap();
+            let device = &tracker.devices[&mac];
+            assert_eq!(device.ipv6_addresses, vec![link_local, eui64, fresh]);
+            let reloaded = device.ipv6_seen.iter().find(|(addr, _)| *addr == fresh).unwrap().1;
+            // Stored to the second.
+            let drift = fresh_seen.duration_since(reloaded).unwrap_or_default();
+            assert!(drift < std::time::Duration::from_secs(1), "{drift:?}");
+        }
+        remove_db(path);
+    }
+
+    #[test]
+    fn test_a_database_from_before_ipv6_times_is_migrated_and_keeps_its_addresses() {
+        let path = "/tmp/lanwatch_test_ipv6_migrate.db";
+        remove_db(path);
+        {
+            let conn = rusqlite::Connection::open(path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE devices (
+                    mac_address TEXT PRIMARY KEY, ip_address TEXT NOT NULL, ipv6_address TEXT,
+                    ipv6_addresses TEXT, hostname TEXT, system_description TEXT, services TEXT,
+                    vendor TEXT, device_type TEXT, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL
+                 );
+                 INSERT INTO devices VALUES (
+                    '2e:d3:77:2f:c0:52', '192.168.4.73', '2603:8000:4200:e66a:1528:dab2:65c7:b32c',
+                    '2603:8000:4200:e66a:1528:dab2:65c7:b32c;2603:8000:4200:e66a:56b5:f809:bab7:be80',
+                    'Pixel-10-Pro', NULL, NULL, NULL, NULL,
+                    '2026-11-01T00:00:00Z', '2026-11-10T00:00:00Z'
+                 );",
+            )
+            .unwrap();
+        }
+        {
+            let mut tracker = DeviceTracker::new(path).unwrap();
+            let last_seen = tracker.devices["2e:d3:77:2f:c0:52"].last_seen;
+            let device = &tracker.devices["2e:d3:77:2f:c0:52"];
+            assert_eq!(device.ipv6_addresses.len(), 2);
+            // Every address is timed from the device's last sighting...
+            assert!(device.ipv6_seen.iter().all(|(_, at)| *at == last_seen));
+            // ...so the first sweep after the upgrade drops nothing.
+            assert_eq!(tracker.prune_stale_ipv6_addresses(), 0);
+            // Opening it a second time must not fail on the existing column.
+            drop(tracker);
+            DeviceTracker::new(path).unwrap();
+        }
+        remove_db(path);
     }
 }

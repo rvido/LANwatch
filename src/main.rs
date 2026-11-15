@@ -5,7 +5,7 @@
 // See LICENSE file for details.
 
 #[cfg(feature = "http-api")]
-use lanwatch::start_api_server_with_hosts;
+use lanwatch::start_api_server_with_token;
 #[cfg(feature = "homeassistant")]
 use lanwatch::{DEFAULT_MQTT_PORT, HomeAssistantConfig, start_home_assistant};
 use lanwatch::{
@@ -251,16 +251,31 @@ fn main() {
     #[cfg(feature = "http-api")]
     if let Some(addr) = &config.api_addr {
         let tracker_clone = Arc::clone(&tracker);
-        match start_api_server_with_hosts(
+        // The token comes from the environment only: a command-line argument
+        // is visible to every local user in `ps`.
+        let api_token = env::var("LANWATCH_API_TOKEN")
+            .ok()
+            .map(|token| token.trim().to_string())
+            .filter(|token| !token.is_empty());
+        match start_api_server_with_token(
             addr,
             tracker_clone,
             config.api_read_only,
             &config.api_hosts,
+            api_token.as_deref(),
         ) {
             Ok(_) => {
                 println!("API server started on http://{}", addr);
                 if config.api_read_only {
                     println!("API is read-only: edits and deletes are refused.");
+                } else if api_token.is_some() {
+                    println!("API writes need the token from LANWATCH_API_TOKEN.");
+                } else {
+                    println!(
+                        "API writes are open to anyone who can reach {}; \
+                         set LANWATCH_API_TOKEN to require a token.",
+                        addr
+                    );
                 }
             }
             Err(e) => eprintln!("Warning: Failed to start API server: {}", e),
@@ -723,6 +738,26 @@ fn start_network_worker(
                                 }
                             }
                             #[cfg(feature = "ssdp")]
+                            NetworkEvent::Tuya(packet) => {
+                                if _enable_ssdp {
+                                    let updates = tracker.update_from_tuya(packet);
+                                    if updates > 0 {
+                                        pending_updates += updates;
+                                    }
+                                    print_tuya_packet(packet, updates > 0, tracker.device_count());
+                                }
+                            }
+                            #[cfg(feature = "ssdp")]
+                            NetworkEvent::Ubnt(packet) => {
+                                if _enable_ssdp {
+                                    let updates = tracker.update_from_ubnt(packet);
+                                    if updates > 0 {
+                                        pending_updates += updates;
+                                    }
+                                    print_ubnt_packet(packet, updates > 0, tracker.device_count());
+                                }
+                            }
+                            #[cfg(feature = "ssdp")]
                             NetworkEvent::Knx(packet) => {
                                 if _enable_ssdp {
                                     let updates = tracker.update_from_knx(packet);
@@ -862,6 +897,49 @@ fn print_lifx_packet(packet: &lanwatch::LifxPacket, is_new_or_updated: bool, tot
     println!("Source IP:  {}", packet.source_ip);
     println!("Target MAC: {}", format_mac(packet.target_mac));
     println!("Msg Type:   {}", packet.msg_type);
+    if is_new_or_updated {
+        println!("-> [DB Updated] Total devices: {}", total);
+    }
+    println!("------------------------------");
+}
+
+#[cfg(feature = "ssdp")]
+fn print_tuya_packet(packet: &lanwatch::TuyaPacket, is_new_or_updated: bool, total: usize) {
+    println!("\n[Tuya] Smart Device Broadcast Detected");
+    println!("Source MAC: {}", format_mac(packet.source_mac));
+    println!("Source IP:  {}", packet.source_ip);
+    if packet.encrypted {
+        println!("Body:       encrypted");
+    }
+    if let Some(ref version) = packet.version {
+        println!("Protocol:   {}", version);
+    }
+    if let Some(ref key) = packet.product_key {
+        println!("Product:    {}", key);
+    }
+    if let Some(ref id) = packet.device_id {
+        println!("Device ID:  {}", id);
+    }
+    if is_new_or_updated {
+        println!("-> [DB Updated] Total devices: {}", total);
+    }
+    println!("------------------------------");
+}
+
+#[cfg(feature = "ssdp")]
+fn print_ubnt_packet(packet: &lanwatch::UbntPacket, is_new_or_updated: bool, total: usize) {
+    println!("\n[Ubiquiti] Discovery Announcement Detected");
+    println!("Source MAC: {}", format_mac(packet.source_mac));
+    println!("Source IP:  {}", packet.source_ip);
+    if let Some(ref hostname) = packet.hostname {
+        println!("Hostname:   {}", hostname);
+    }
+    if let Some(ref model) = packet.model {
+        println!("Model:      {}", model);
+    }
+    if let Some(ref firmware) = packet.firmware {
+        println!("Firmware:   {}", firmware);
+    }
     if is_new_or_updated {
         println!("-> [DB Updated] Total devices: {}", total);
     }
@@ -1875,6 +1953,8 @@ fn print_usage() {
         println!("  -a, --api <ADDR:PORT>  Start HTTP API server (e.g., 127.0.0.1:8080)");
         println!("  --api-default          Start HTTP API on default address (127.0.0.1:8080)");
         println!("  --api-readonly         Refuse every API write (edits, deletes)");
+        println!("                         To require a token for writes instead, set the");
+        println!("                         LANWATCH_API_TOKEN environment variable");
         println!("  --api-host <NAME>      Also serve requests for this host name (repeatable;");
         println!("                         IP addresses and localhost are always served)");
     }

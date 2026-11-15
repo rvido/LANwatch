@@ -1382,6 +1382,12 @@ pub enum NetworkEvent {
     /// Plex GDM discovery packet
     #[cfg(feature = "ssdp")]
     Gdm(crate::parser::mqtt_gdm::GdmPacket),
+    /// Tuya smart device broadcast
+    #[cfg(feature = "ssdp")]
+    Tuya(crate::parser::tuya_ubnt::TuyaPacket),
+    /// Ubiquiti discovery announcement
+    #[cfg(feature = "ssdp")]
+    Ubnt(crate::parser::tuya_ubnt::UbntPacket),
 }
 
 #[cfg(any(feature = "mdns", feature = "ssdp"))]

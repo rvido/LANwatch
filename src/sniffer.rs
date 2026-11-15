@@ -261,6 +261,18 @@ fn dispatch_udp_extended(
     }
 
     #[cfg(feature = "ssdp")]
+    if crate::parser::tuya_ubnt::is_tuya_port(dest) {
+        let packet = crate::parser::tuya_ubnt::parse_tuya_payload(payload, source_mac, source_ip)?;
+        return Some(NetworkEvent::Tuya(packet));
+    }
+
+    #[cfg(feature = "ssdp")]
+    if crate::parser::tuya_ubnt::is_ubnt_ports(src, dest) {
+        let packet = crate::parser::tuya_ubnt::parse_ubnt_payload(payload, source_mac, source_ip)?;
+        return Some(NetworkEvent::Ubnt(packet));
+    }
+
+    #[cfg(feature = "ssdp")]
     if crate::parser::iot::is_knx_port(src) || crate::parser::iot::is_knx_port(dest) {
         let packet = crate::parser::iot::parse_knx_payload(payload, source_mac, source_ip)?;
         return Some(NetworkEvent::Knx(packet));

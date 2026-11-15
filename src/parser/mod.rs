@@ -31,6 +31,10 @@ pub mod cctv;
 #[cfg(any(feature = "mdns", feature = "ssdp"))]
 pub mod mqtt_gdm;
 
+/// Tuya and Ubiquiti discovery parsers.
+#[cfg(any(feature = "mdns", feature = "ssdp"))]
+pub mod tuya_ubnt;
+
 // Re-export the main parsing entry points and types
 #[cfg(any(feature = "mdns", feature = "ssdp"))]
 pub use cctv::{
@@ -49,6 +53,11 @@ pub use mqtt_gdm::{
     parse_mqtt_connect, parse_mqtt_sn_connect,
 };
 pub use network::{parse_arp_packet, parse_ndp_packet};
+#[cfg(any(feature = "mdns", feature = "ssdp"))]
+pub use tuya_ubnt::{
+    TUYA_ENCRYPTED_PORT, TUYA_PLAIN_PORT, TuyaPacket, UBNT_PORT, UbntField, UbntPacket,
+    is_tuya_port, is_ubnt_ports, parse_tuya_payload, parse_ubnt_payload,
+};
 
 #[cfg(feature = "mdns")]
 pub use mdns::{
