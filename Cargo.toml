@@ -1,13 +1,12 @@
 [package]
 name = "lanwatch"
-version = "0.20.0"
+version = "0.21.0"
 edition = "2024"
 authors = ["Richard Vidal-Dorsch"]
 license = "MIT OR Apache-2.0"
 description = "A library and CLI tool for network device discovery and tracking via DHCP, mDNS, SSDP/UPnP, and OUI identification"
 readme = "README.md"
 repository = "https://github.com/rvido/lanwatch"
-homepage = "https://github.com/rvido/lanwatch"
 keywords = ["network", "discovery", "dhcp", "mdns", "device-tracking"]
 categories = ["network-programming", "parsing"]
 
@@ -33,7 +32,7 @@ homeassistant = ["dep:serde_json"]
 libc = "0.2"
 pnet_datalink = "0.35"
 pnet_packet = "0.35"
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", optional = true }
 tiny_http = { version = "0.12", optional = true }

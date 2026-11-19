@@ -8,6 +8,46 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Entries before v0.11.0 are summarised from the commit history; only the releases
 that changed behaviour are listed.
 
+## [0.21.0] - 2026-11-15
+
+### Added
+
+- **API write token.** Set the `LANWATCH_API_TOKEN` environment variable and
+  every route that changes state (`PUT`, `POST`, `DELETE`) answers `401`
+  without `Authorization: Bearer <token>`. Reads stay open. The token is
+  optional: without it the API works as before, and LANwatch says so once at
+  startup. The dashboard asks for the token on the first change and keeps it
+  until the tab closes. The API has no TLS, so the token travels in clear
+  text.
+  - `start_api_server_with_token` and `ApiServer::set_write_token` are new.
+- **Tuya discovery.** With `--ssdp`, LANwatch listens for the broadcasts Tuya
+  plugs, bulbs and switches send on UDP 6666 and 6667. The sender is marked as
+  a Tuya IoT device. A plain broadcast (6666) also gives the protocol version,
+  product key and device ID; an encrypted one (6667) gives the vendor only.
+- **Ubiquiti discovery.** With `--ssdp`, LANwatch reads the announcements on
+  UDP 10001: host name, model and firmware version. The record is keyed on the
+  frame's sender, never on the MAC address inside the payload.
+- `TuyaPacket`, `UbntPacket`, `NetworkEvent::Tuya` and `NetworkEvent::Ubnt`.
+
+### Changed
+
+- **Unused IPv6 addresses expire.** A phone makes a new temporary address
+  every day and at every reconnect, so its record filled with up to 32
+  addresses it no longer had. An address is now dropped once the device has
+  been active for 24 hours without using it. Link-local addresses and
+  addresses built from the MAC (EUI-64) are always kept, and a device that is
+  off keeps the addresses it left with. The sighting times are stored in a new
+  `ipv6_seen` column on `devices`, added on startup. After the upgrade, old
+  addresses clear within about a day.
+  - `DeviceInfo` has a new `ipv6_seen` field; it is not part of the JSON or
+    CSV output.
+- The capture filter also passes UDP 6666, 6667 and 10001.
+- `rusqlite` 0.40 → 0.43.
+
+### Security
+
+- The `--on-event` command does not inherit `LANWATCH_API_TOKEN`.
+
 ## [0.20.0] - 2026-10-28
 
 ### Added
@@ -427,7 +467,8 @@ that changed behaviour are listed.
 - Table-driven matching for the mDNS and SSDP heuristics.
 - Feature-gated `MODEL_RULES` to prevent `dead_code` warnings.
 
-[Unreleased]: https://github.com/rvido/lanwatch/compare/v0.20.0...HEAD
+[Unreleased]: https://github.com/rvido/lanwatch/compare/v0.21.0...HEAD
+[0.21.0]: https://github.com/rvido/lanwatch/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/rvido/lanwatch/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/rvido/lanwatch/compare/v0.18.1...v0.19.0
 [0.18.1]: https://github.com/rvido/lanwatch/compare/v0.18.0...v0.18.1

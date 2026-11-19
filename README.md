@@ -7,7 +7,7 @@
 
 ![LANwatch Logo](assets/lanwatch_logo.jpg)
 
-A Rust library and CLI tool for network device discovery and tracking via DHCP, mDNS, SSDP/UPnP, LLMNR, NetBIOS (NBNS), WS-Discovery (WSD), CoAP, Matter, KNXnet/IP, MQTT, Plex GDM, IP Camera discovery (SADP, Dahua, RTSP), link-layer frames (ARP, NDP, LLDP, CDP), and IEEE OUI vendor identification.
+A Rust library and CLI tool for network device discovery and tracking via DHCP, mDNS, SSDP/UPnP, LLMNR, NetBIOS (NBNS), WS-Discovery (WSD), CoAP, Matter, KNXnet/IP, MQTT, Plex GDM, Tuya, Ubiquiti discovery, IP Camera discovery (SADP, Dahua, RTSP), link-layer frames (ARP, NDP, LLDP, CDP), and IEEE OUI vendor identification.
 
 ![LANwatch System Architecture](assets/lanwatch_architecture.jpg)
 
@@ -37,6 +37,7 @@ Release history: [CHANGELOG.md](CHANGELOG.md).
 - **Dashboard Device Review**: Correct a device's type and vendor and give it a product name directly in the web dashboard. Corrections are stored in the database, survive a restart, and always beat heuristic classification. One click then exports every reviewed device as a catalogue file that carries no MAC, IP or hostname.
 - **Smart Home & IoT Discovery**: Extracts model and vendor metadata from HomeKit (HAP) and Matter service advertisements (Google, Apple, Amazon, Eve, Signify/Philips Hue, Aqara, IKEA, Nanoleaf, Tuya, Somfy, TP-Link, Lutron, Yale, Belkin, Bosch, etc.)
 - **Specialized IoT & Constrained Protocols**: Captures and parses CoAP (Constrained Application Protocol) on UDP port 5683, KNXnet/IP building automation traffic on UDP port 3671, and MQTT/MQTT-SN on TCP/UDP port 1883 to dynamically identify sensors, smart lights, smart plugs, and home automation systems
+- **Tuya & Ubiquiti Discovery**: Listens for the broadcasts Tuya smart plugs, bulbs and switches send on UDP 6666/6667, and for Ubiquiti announcements on UDP 10001 (host name, model, firmware). A Tuya broadcast on 6667 is encrypted: LANwatch names the device as Tuya and reads no further.
 - **Media Server & Player Discovery**: Parses Plex GDM (Good Day Mate) XML/HTTP-like discovery broadcasts on UDP ports 32410, 32412, and 32414 to locate and identify Plex Media Servers and Players
 - **IP Camera & CCTV Discovery (Physical Security)**: Identifies physical security hardware by parsing Hikvision SADP (port 9999) XML discovery messages, Dahua discovery (port 37810) JSON payloads, and RTSP (TCP port 554) server responses
 - **IEEE OUI Database**: Built-in vendor identification from MAC addresses using IEEE OUI (Organizationally Unique Identifier) prefixes (40,000+ entries)
@@ -55,10 +56,10 @@ Add to your `Cargo.toml`. The `http-api` feature is opt-in to keep binary size s
 ```toml
 [dependencies]
 # Smallest binary footprint, core DHCP & MAC tracking only
-lanwatch = "0.20"
+lanwatch = "0.21"
 
 # With HTTP API server and active discovery protocols
-lanwatch = { version = "0.20", features = ["http-api", "mdns", "ssdp"] }
+lanwatch = { version = "0.21", features = ["http-api", "mdns", "ssdp"] }
 ```
 
 Or clone and build from source. Release builds are automatically optimized for size (`opt-level = "z"`, `strip = true`, `panic = "abort"`):
@@ -79,6 +80,28 @@ cargo build --release --all-features
 LANwatch is pre-1.0, so minor versions may break API compatibility. Unless a
 section below says otherwise, only library consumers are affected; the CLI and
 its flags are unchanged.
+
+### 0.20 → 0.21
+
+No action is required. One column, `ipv6_seen`, is added to the `devices`
+table on the first start. No stored data is reset.
+
+- **Unused IPv6 addresses now expire.** A phone makes a new temporary IPv6
+  address every day and at every reconnect, and LANwatch kept up to 32 of
+  them. An address is now dropped once the device has been active for 24 hours
+  without using it. Link-local addresses and addresses built from the MAC
+  (EUI-64) are always kept, and a device that is off keeps the addresses it
+  left with. After the upgrade, old addresses clear within about a day. A quiet
+  address that is still assigned can be dropped too; it returns the next time
+  it is seen.
+- **API writes can require a token.** Set `LANWATCH_API_TOKEN`; see the HTTP
+  API section. Without it, nothing changes.
+- **Tuya and Ubiquiti discovery** on UDP 6666, 6667 and 10001, with `--ssdp`.
+- **Library code:** `DeviceInfo` has a new field, `ipv6_seen`. Code that
+  builds a `DeviceInfo` with a struct literal must set it (`Vec::new()` is
+  fine); `DeviceInfo::new` sets it for you. `start_api_server_with_token`,
+  `ApiServer::set_write_token`, `TuyaPacket`, `UbntPacket` and the
+  `NetworkEvent::Tuya` / `NetworkEvent::Ubnt` variants are new.
 
 ### 0.19 → 0.20
 
@@ -776,8 +799,21 @@ When started with `--api` or `--api-default`, the tool exposes a REST API for qu
 | `/favicon.ico` | GET | The dashboard's tab icon (the same embedded PNG as `/logo.png`) |
 | `/health` | GET | Health check endpoint |
 
-> **The API has no authentication.** Start with `--api-readonly` to refuse every write
-> (`PUT`, and both `DELETE` routes) whenever the listener is reachable beyond a trusted network.
+> **Writes can require a token.** Set the `LANWATCH_API_TOKEN` environment variable and every
+> route that changes state (`PUT`, `POST`, `DELETE`) answers `401` without
+> `Authorization: Bearer <token>`. Reads stay open. The dashboard asks for the token on the first
+> change and keeps it until the tab closes. The token is read from the environment, so it never
+> shows up in `ps`:
+>
+> ```bash
+> sudo LANWATCH_API_TOKEN="$(openssl rand -hex 24)" lanwatch eth0 --api 0.0.0.0:8080
+> curl -X DELETE -H "Authorization: Bearer $TOKEN" http://192.168.1.2:8080/devices/aa:bb:cc:11:22:33
+> ```
+>
+> The API has no TLS, so the token travels in clear text; it stops other devices on a trusted
+> LAN, not someone who can read the traffic. **Without a token the API has no authentication.**
+> Then start with `--api-readonly` to refuse every write whenever the listener is reachable
+> beyond a trusted network.
 
 > **Host names.** To block DNS rebinding, the API serves a request only when its `Host`
 > header is an IP address or `localhost`. To open the dashboard by name, add each name with
@@ -1005,6 +1041,7 @@ cargo run --example parse_payload
 - `build_mdns_query(name, record_type)` - Build an mDNS query packet (requires `mdns` feature)
 - `build_ssdp_search_request(search_target)` - Build an SSDP M-SEARCH request (requires `ssdp` feature)
 - `start_api_server(addr, tracker)` - Start HTTP API server in background thread (requires `http-api` feature)
+- `start_api_server_with_token(addr, tracker, read_only, allowed_hosts, write_token)` - The same, with a read-only switch, extra `Host` names, and an optional bearer token for writes
 - `to_json()` / `to_json_sorted()` - Export devices as JSON (requires `http-api` feature)
 
 ## Feature Flags
@@ -1163,6 +1200,8 @@ Under the `ssdp` feature gate, LANwatch sniffs Plex GDM discovery messages broad
 | **Dahua** | UDP 37810 | Dahua CCTV & IP Cameras | Camera model, software version |
 | **MQTT** | TCP/UDP 1883 | IoT Devices, Smart Appliances | Client ID, protocol flavor (MQTT / MQTT-SN) |
 | **Plex GDM** | UDP 32410-32414 | Plex Media Servers & Players | Friendly name, product type, resource UUID, service port |
+| **Tuya** | UDP 6666, 6667 | Tuya smart plugs, bulbs, switches | Vendor; on 6666 also protocol version, product key, device ID |
+| **Ubiquiti discovery** | UDP 10001 | UniFi / airMAX access points, switches, gateways | Host name, model, firmware version |
 
 ## Development and Build Automation
 
@@ -1302,9 +1341,11 @@ worker can classify.
 
 These measures bound resource use and prevent one host from corrupting another
 host's record. They are not an authentication boundary. In particular the HTTP
-API has no authentication: it binds `127.0.0.1:8080` by default, and `DELETE
-/devices` will wipe the database for anyone who can reach it. If you bind it to
-a routable address, put your own access control in front of it.
+API has no authentication unless you set `LANWATCH_API_TOKEN`: it binds
+`127.0.0.1:8080` by default, and without the token `DELETE /devices` will wipe
+the database for anyone who can reach it. The token guards writes only, and
+travels in clear text. If you bind the API to a routable address, put your own
+access control in front of it.
 
 ## Performance Tuning & Optimizations
 
