@@ -8,6 +8,12 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Entries before v0.11.0 are summarised from the commit history; only the releases
 that changed behaviour are listed.
 
+## [0.21.1] - 2026-11-18
+
+### Changed
+
+- Version bump only. No code or behaviour changed since 0.21.0.
+
 ## [0.21.0] - 2026-11-15
 
 ### Added
@@ -467,7 +473,8 @@ that changed behaviour are listed.
 - Table-driven matching for the mDNS and SSDP heuristics.
 - Feature-gated `MODEL_RULES` to prevent `dead_code` warnings.
 
-[Unreleased]: https://github.com/rvido/lanwatch/compare/v0.21.0...HEAD
+[Unreleased]: https://github.com/rvido/lanwatch/compare/v0.21.1...HEAD
+[0.21.1]: https://github.com/rvido/lanwatch/compare/v0.21.0...v0.21.1
 [0.21.0]: https://github.com/rvido/lanwatch/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/rvido/lanwatch/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/rvido/lanwatch/compare/v0.18.1...v0.19.0
